@@ -170,7 +170,7 @@ def test_contract_employment_never_produces_a_reason():
     rec = rules.screen_row(_row(employment_type="contract",
                                 description_text="Lead operational excellence across workflow and stakeholder teams."))
     assert rec.verdict == "candidate" and rec.reasons == [] and rec.tier == 1
-    assert rec.rule_score == int(100 * (30 + 5 + 10) / rules.rule_max() + 0.5)  # tier 1 + senior title + remote, rescaled
+    assert rec.rule_score == 92   # level senior 100 (title), remote 100, pay not posted 60, tier 1 100: (20+15+6+5)/0.5
 
 
 def test_tier3_data_lane_drops_off_function_and_rejects_coding_test():
@@ -192,18 +192,37 @@ def test_rules_version_is_stable_and_changes(monkeypatch):
 
 
 # ---------------------------------------------------------------- scoring
-def test_combine_renormalizes_caps_bands_and_rejects():
-    assert pipeline.combine(60, None, None, None) == (60, "partial")
-    assert pipeline.combine(60, 0.8, None, None) == (69, "partial")        # (0.4*60 + 0.35*80) / 0.75
-    assert pipeline.combine(60, 0.9, 0.5, None, {"embed_lo": 0.3, "embed_hi": 0.7}) == (68, "partial")
-    assert pipeline.combine(60, None, 0.5, None) == (60, "partial")        # no calibration: embed ignored
+def test_combine_content_first_caps_penalties_bands_and_rejects():
+    assert pipeline.combine(80, 0.9, None, None) == (85, "very_strong")          # 0.5 * 90 + 0.5 * 80
+    assert pipeline.combine(80, None, None, None) == (60, "partial")             # no content: capped
+    assert pipeline.combine(80, 0.9, None, None, {"fit_weight": 0.15}) == (82, "strong")   # (0.15*90 + 0.5*80) / 0.65
+    assert pipeline.combine(60, 0.9, 0.5, None, {"embed_lo": 0.3, "embed_hi": 0.7}) == (65, "partial")   # content (90+50)/2
+    assert pipeline.combine(60, None, 0.5, None) == (60, "partial")              # no calibration: embed ignored
     for score, band in ((100, "very_strong"), (85, "very_strong"), (84, "strong"), (70, "strong"),
                         (69, "partial"), (50, "partial"), (49, "weak"), (30, "weak"), (29, "none"), (0, "none")):
-        assert pipeline.combine(score, None, None, None) == (score, band)
-    assert pipeline.combine(95, None, None, None, tier=3) == (80, "strong")
-    assert pipeline.combine(95, None, None, None, tier=1) == (95, "very_strong")
-    assert pipeline.combine(95, None, None, None, rejected=True) == (0, "none")
-    assert pipeline.combine(60, None, None, 100) == (80, "strong")
+        assert pipeline.combine(score, score / 100, None, None) == (score, band)
+    assert pipeline.combine(95, 0.95, None, None, tier=3) == (80, "strong")
+    assert pipeline.combine(95, 0.95, None, None, tier=1) == (95, "very_strong")
+    assert pipeline.combine(80, 0.9, None, None, flags=2) == (75, "strong")
+    assert pipeline.combine(80, 0.9, None, None, flags=9) == (60, "partial")     # penalty capped at 25
+    assert pipeline.combine(95, 0.95, None, None, rejected=True) == (0, "none")
+    assert pipeline.combine(60, 0.6, None, 100) == (80, "strong")
+
+
+def test_content_gate_replaces_the_title_gate():
+    rec = rules.screen_row(_row(title="Director of Business Operations, Client Optimization"))
+    assert "off-function title" in rec.reasons
+    pipeline.apply_content_gate(rec, 0.94)
+    assert "off-function title" not in rec.reasons and rec.verdict != "reject"
+    rec = rules.screen_row(_row(title="Director, Operational Excellence"))
+    pipeline.apply_content_gate(rec, 0.20)
+    assert rec.reasons[-1] == "content does not fit (fit 0.20)" and rec.verdict == "reject"
+    rec = rules.screen_row(_row(title="Director, Operational Excellence"))
+    pipeline.apply_content_gate(rec, 0.42)
+    assert "content fit borderline (fit 0.42)" in rec.flags and rec.verdict == "review"
+    rec = rules.screen_row(_row(title="Pharmacy Technician"))
+    pipeline.apply_content_gate(rec, None)                                        # no content: title gate stands
+    assert "off-function title" in rec.reasons and rec.verdict == "reject"
 
 
 # ---------------------------------------------------------------- pipeline + store
@@ -583,12 +602,13 @@ def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
     result = _trained(tmp_path, con)
     model = features.load_latest(con, log=_quiet)
     pipeline.screen(con, model=model, log=_quiet)
-    rows = con.execute("SELECT model_version, fit_prob, top_terms, rule_score, final_score, verdict FROM screens "
+    rows = con.execute("SELECT model_version, fit_prob, top_terms, rule_score, final_score, verdict, flags FROM screens "
                        "WHERE posting_id IN (SELECT posting_id FROM postings WHERE req_id = 'F0')").fetchall()
-    mv, fit_prob, top, rule_score, final, verdict = rows[0]
+    mv, fit_prob, top, rule_score, final, verdict, flags = rows[0]
     assert mv == result["model_version"] and fit_prob > 0.5 and json.loads(top)
     if verdict != "reject":
-        expected = pipeline.combine(rule_score, fit_prob, None, None, {"fit_weight": features.LOW_DATA_FIT_WEIGHT})[0]
+        expected = pipeline.combine(rule_score, fit_prob, None, None, {"fit_weight": features.LOW_DATA_FIT_WEIGHT},
+                                    flags=len(json.loads(flags)))[0]
         assert final == expected
     # a new model version makes every row due again; rules-only screens stay 'none'
     assert len(pipeline.candidate_ids(con, version.rules_version(), mv)) == 0
@@ -651,11 +671,22 @@ def test_non_us_rule():
     assert rec.verdict == "reject" and "outside the US (country CN)" in rec.reasons
 
 
-def test_rule_score_is_rescaled_to_100():
-    assert rules.rule_max() == 30 + 10 + 5 + 10 + 10
-    rec = rules.screen_row(_row(title="Director, Operational Excellence and Business Transformation", pay_max=120_000,
-                                pay_min=100_000, pay_interval="year"))
-    assert rec.rule_score <= 100 and rec.rule_score >= 85
+def test_profile_components_and_score(monkeypatch):
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il"])
+    rec = rules.screen_row(_row(title="Director, Operational Excellence", pay_min=100_000, pay_max=120_000,
+                                pay_interval="year"))
+    assert rec.notes["components"] == {"level": 100, "location": 100, "pay": 100, "title": 100} and rec.rule_score == 100
+    w = P.SCORE_COMPONENT_WEIGHTS
+    for workplace, loc_pts in (("hybrid", 80), ("onsite", 70), (None, 70)):
+        rec = rules.screen_row(_row(title="Operational Excellence Consultant", location_primary="Springfield, IL",
+                                    workplace_type=workplace, pay_min=80_000, pay_max=95_000, pay_interval="year"))
+        comp = rec.notes["components"]
+        assert (comp["level"], comp["location"], comp["pay"], comp["title"]) == (60, loc_pts, 75, P.TITLE_POINTS[rec.tier])
+        expected = (w["level"] * 60 + w["location"] * loc_pts + w["pay"] * 75 + w["title"] * comp["title"]) / 0.5
+        assert rec.rule_score == int(expected + 0.5)
+    assert rules.pay_points(None) == 60 and rules.level_points({"level": "mid"}) == 50
+    assert rules.title_points(None, ["off-lane title (sales)"]) == 0 and rules.title_points(None, []) == 30
+
 
 
 def test_normalize_and_boilerplate_lines_for_the_model():

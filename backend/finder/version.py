@@ -6,7 +6,7 @@ import hashlib
 
 from backend import profile as P
 
-RULES_CODE_VERSION = "2026-09-15.5"   # bump whenever rules.py logic changes without a constant change
+RULES_CODE_VERSION = "2026-09-15.6"   # bump whenever rules.py logic changes without a constant change
 
 
 def _stable(value):

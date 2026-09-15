@@ -365,42 +365,54 @@ def tier_for(title: str) -> Optional[int]:
     return None
 
 
-def rule_max() -> int:
-    """The most rule points a posting can earn: tier 1 + extra hits + senior + remote + comp at the ask."""
-    pts = P.RULE_POINTS
-    return (pts["tier1"] + pts["extra_hit_cap"] + pts["senior"] + max(pts["remote"], pts["commutable_hybrid"])
-            + pts["comp_ask"])
-
-
-def rule_points(listing: S.Listing, tier: Optional[int], flags: list, senior: bool = False) -> int:
-    """Raw rule points (before rescaling): tier, extra function hits, level, location, comp, flags.
-    `senior` comes from level_rule (years, pay, or an unambiguous title)."""
-    pts = P.RULE_POINTS
-    title = f" {listing.title.lower()} "
-    score = {1: pts["tier1"], 2: pts["tier2"], 3: pts["tier3"]}.get(tier, 0)
-    hits = len(S._has(title, P.TITLE_FUNCTION_TERMS))
-    score += min(max(hits - 1, 0) * pts["extra_hit"], pts["extra_hit_cap"])
-    if senior:
-        score += pts["senior"]
+def location_points(listing: S.Listing) -> int:
+    """Remote 100; nationwide listing with remote unverified; commutable hybrid; commutable on-site or unstated."""
+    pts = P.LOCATION_POINTS
     if S.is_remote(listing):
-        score += pts["remote"]
-    elif listing.extra.get("workplace_type") in (None, "hybrid") and S.is_commutable(listing):
-        score += pts["commutable_hybrid"]
-    top = listing.annual_top
-    if top is not None:
-        if P.COMP_ASK and top >= P.COMP_ASK:
-            score += pts["comp_ask"]
-        elif P.COMP_FLOOR and top >= P.COMP_FLOOR:
-            score += pts["comp_floor"]
-        else:
-            score += pts["comp_posted"]
-    score += max(len(flags) * pts["flag"], pts["flag_floor"])
-    return score
+        return pts["remote"]
+    if listing.location.strip().lower() in P.NATIONWIDE_LOCATIONS:
+        return pts["nationwide_unverified"]
+    if listing.is_local_pass or S.is_commutable(listing):
+        return pts["commutable_hybrid"] if listing.extra.get("workplace_type") == "hybrid" else pts["commutable_onsite"]
+    return 0   # rejected on location anyway
+
+
+def pay_points(annual_top: Optional[float]) -> int:
+    """Band top at the ask; at the floor; not posted (unknown until a screening conversation, so mild)."""
+    pts = P.PAY_POINTS
+    if annual_top is None:
+        return pts["not_posted"]
+    if P.COMP_ASK and annual_top >= P.COMP_ASK:
+        return pts["at_ask"]
+    if not P.COMP_FLOOR or annual_top >= P.COMP_FLOOR:
+        return pts["at_floor"]
+    return 0   # rejected on comp anyway
+
+
+def level_points(notes: dict) -> int:
+    """Senior (years >= 8, band top at the ask, or an unambiguous title); mid; not stated."""
+    if notes.get("senior"):
+        return P.LEVEL_POINTS["senior"]
+    if notes.get("level") in ("mid", "junior"):   # a junior count survives only with a pay-band override
+        return P.LEVEL_POINTS["mid"]
+    return P.LEVEL_POINTS["unknown"]
+
+
+def title_points(tier: Optional[int], reasons: list) -> int:
+    if any(r.startswith("off-lane title") for r in reasons):
+        return P.TITLE_POINTS["off_lane"]
+    return P.TITLE_POINTS.get(tier, P.TITLE_POINTS[None])
+
+
+def profile_score(components: dict) -> int:
+    """The non-content components (level, location, pay, title) weighted on 0-100."""
+    weights = {k: w for k, w in P.SCORE_COMPONENT_WEIGHTS.items() if k != "content"}
+    return int(sum(weights[k] * components[k] for k in weights) / sum(weights.values()) + 0.5)
 
 
 def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
-    """Card-level screen + JD rules + tier + rule points for one postings row.
-    rule_score is rescaled to 0-100 against rule_max(), so it blends with fit on the same scale."""
+    """Card-level screen + JD rules + tier + profile score for one postings row.
+    rule_score is the profile score (level, location, pay, title on 0-100); content fit is blended in the pipeline."""
     title = row.get("title") or ""
     # Some boards store line breaks as the entity "&#xa;"; decode so headings and sentences split correctly.
     text = html.unescape(row.get("description_text") or "")
@@ -437,8 +449,8 @@ def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
         notes.update(n)
 
     verdict = "reject" if reasons else ("review" if flags else "candidate")
-    raw = rule_points(listing, tier, flags, senior=bool(notes.get("senior")))
-    top = rule_max()
-    score = int(100 * max(0, min(raw, top)) / top + 0.5)
+    notes["components"] = {"level": level_points(notes), "location": location_points(listing),
+                           "pay": pay_points(listing.annual_top), "title": title_points(tier, reasons)}
+    score = profile_score(notes["components"])
     return ScreenRecord(posting_id=row.get("posting_id") or "", verdict=verdict, tier=tier,
                         rule_score=score, reasons=reasons, flags=flags, notes=notes)

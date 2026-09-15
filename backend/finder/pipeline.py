@@ -93,30 +93,57 @@ def band_for(score: int) -> str:
 
 
 def combine(rule_score: int, fit_prob: Optional[float], embed_sim: Optional[float], llm_score: Optional[int],
-            calib: Optional[dict] = None, *, tier: Optional[int] = None, rejected: bool = False) -> tuple:
-    """(final_score, band). Weighted mean of the signals present, weights renormalized; tier cap;
-    LLM blend last. A hard reject is (0, 'none'). `calib` may carry embed_lo, embed_hi, fit_weight."""
+            calib: Optional[dict] = None, *, tier: Optional[int] = None, rejected: bool = False,
+            flags: int = 0) -> tuple:
+    """(final_score, band), content first (sprint plan §14).
+
+    content = 100 * fit_prob, averaged with the calibrated embedding score when present; final = the content
+    and profile (rule_score) scores weighted by SCORE_COMPONENT_WEIGHTS (calib `fit_weight` replaces the content
+    weight under a low-data warning). No content (no JD or no model) = the profile score capped at NO_CONTENT_CAP.
+    Then the tier cap, FLAG_PENALTY per flag, and the LLM blend. A hard reject is (0, 'none').
+    """
     if rejected:
         return 0, "none"
     calib = calib or {}
-    weights = dict(P.SCORE_WEIGHTS)
-    if calib.get("fit_weight") is not None:
-        weights["fit"] = calib["fit_weight"]
-    signals = {"rule": float(rule_score)}
+    content = []
     if fit_prob is not None:
-        signals["fit"] = 100.0 * fit_prob
+        content.append(100.0 * fit_prob)
     lo, hi = calib.get("embed_lo"), calib.get("embed_hi")
     if embed_sim is not None and lo is not None and hi is not None and hi > lo:
-        signals["embed"] = 100.0 * min(1.0, max(0.0, (embed_sim - lo) / (hi - lo)))
-    total = sum(weights[k] for k in signals)
-    final = sum(weights[k] * v for k, v in signals.items()) / total if total else float(rule_score)
+        content.append(100.0 * min(1.0, max(0.0, (embed_sim - lo) / (hi - lo))))
+    profile_w = 1.0 - P.SCORE_COMPONENT_WEIGHTS["content"]
+    content_w = calib["fit_weight"] if calib.get("fit_weight") is not None else P.SCORE_COMPONENT_WEIGHTS["content"]
+    if content:
+        final = (content_w * sum(content) / len(content) + profile_w * rule_score) / (content_w + profile_w)
+    else:
+        final = min(float(rule_score), float(P.NO_CONTENT_CAP))
     cap = P.TIER_CAP.get(tier)
     if cap is not None:
         final = min(final, cap)
+    final = max(0.0, final - min(flags * P.FLAG_PENALTY, P.FLAG_PENALTY_CAP))
     if llm_score is not None:
         final = (1 - P.LLM_BLEND) * final + P.LLM_BLEND * llm_score
     final = int(final + 0.5)
     return final, band_for(final)
+
+
+TITLE_REASONS = ("off-function title", "off-lane title")
+
+
+def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
+    """With a content score, the JD decides function fit and the title stops rejecting: title reasons are
+    dropped (an off-lane title stays visible as a flag), fit < FIT_REJECT rejects, fit < FIT_REVIEW flags.
+    Without one (no JD or no model) the title gate stands. Recomputes the verdict."""
+    if fit_prob is None:
+        return
+    off_lane = [r for r in rec.reasons if r.startswith("off-lane title")]
+    rec.reasons = [r for r in rec.reasons if not r.startswith(TITLE_REASONS)]
+    rec.flags.extend(r for r in off_lane if r not in rec.flags)
+    if fit_prob < P.FIT_REJECT:
+        rec.reasons.append(f"content does not fit (fit {fit_prob:.2f})")
+    elif fit_prob < P.FIT_REVIEW:
+        rec.flags.append(f"content fit borderline (fit {fit_prob:.2f})")
+    rec.verdict = "reject" if rec.reasons else ("review" if rec.flags else "candidate")
 
 
 # Shape of one batch passed to DuckDB as a single JSON string. Binding Python lists as parameters
@@ -180,8 +207,9 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
         probs, terms = model_scores(model, rows)
         for row, fit_prob, top in zip(rows, probs, terms):
             rec = rules.screen_row(row, rv)
+            apply_content_gate(rec, fit_prob)
             final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
-                                  rejected=rec.verdict == "reject")
+                                  rejected=rec.verdict == "reject", flags=len(rec.flags))
             recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
                          "rule_score": rec.rule_score, "fit_prob": fit_prob, "final_score": final, "band": band,
                          "reasons": rec.reasons, "flags": rec.flags, "top_terms": top})

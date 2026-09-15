@@ -125,10 +125,20 @@ AI_GIG_TITLE_TERMS = ["ai trainer", "train ai", "ai training", "expert opportuni
 
 # ---- Finder (backend/finder/): JD-text rules and scoring. Neutral structure, no personal values. ----
 # Rule points feed rule_score (0-100). See docs/SPRINT_PLAN.md section 4.2.
-RULE_POINTS = {"tier1": 30, "tier2": 15, "tier3": 8, "extra_hit": 5, "extra_hit_cap": 10, "senior": 5, "remote": 10,
-               "commutable_hybrid": 5, "comp_ask": 10, "comp_floor": 5, "comp_posted": 2, "flag": -5, "flag_floor": -25}
 # Weighted mean of the signals present (weights renormalized over what exists).
-SCORE_WEIGHTS = {"rule": 0.40, "fit": 0.35, "embed": 0.25}
+# ---- Final score (sprint plan §14). Content fit is the strongest single signal; level, location and pay together
+# weigh almost as much; the title only nudges. screens.rule_score holds the profile score (level, location, pay,
+# title weighted on 0-100); final = content and profile blended by these weights.
+SCORE_COMPONENT_WEIGHTS = {"content": 0.50, "level": 0.20, "location": 0.15, "pay": 0.10, "title": 0.05}
+LEVEL_POINTS = {"senior": 100, "mid": 50, "unknown": 60}
+LOCATION_POINTS = {"remote": 100, "commutable_hybrid": 80, "commutable_onsite": 70, "nationwide_unverified": 60}
+PAY_POINTS = {"at_ask": 100, "at_floor": 75, "not_posted": 60}   # unposted pay is unknown until a screen, not bad
+TITLE_POINTS = {1: 100, 2: 70, 3: 50, None: 30, "off_lane": 0}
+FLAG_PENALTY = 5           # points off the final score per flag
+FLAG_PENALTY_CAP = 25
+FIT_REJECT = 0.35          # content gate: a scored JD below this is rejected, whatever the title says
+FIT_REVIEW = 0.50          # a scored JD below this is flagged for review
+NO_CONTENT_CAP = 60        # no JD or no model: the profile alone cannot make a posting strong
 SCORE_BANDS = [(85, "very_strong"), (70, "strong"), (50, "partial"), (30, "weak"), (0, "none")]
 LLM_BLEND = 0.5
 TIER_CAP = {3: 80}

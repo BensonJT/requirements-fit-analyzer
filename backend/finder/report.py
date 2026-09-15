@@ -189,7 +189,7 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
         w.append(f"_No row reached the block bar ({' / '.join(bands)}) this run._\n")
     for (pid, employer, title, url, score, band, tier, rule_score, fit_prob, embed_sim, top_terms, flags,
          text) in blocks:
-        parts = [f"rule {rule_score}"]
+        parts = [f"profile {rule_score}"]
         if fit_prob is not None:
             parts.append(f"fit {fit_prob:.2f}")
         if embed_sim is not None:

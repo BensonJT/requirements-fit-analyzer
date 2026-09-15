@@ -1,0 +1,9 @@
+employer,platform,identifier_1,identifier_2,identifier_3,live_count,source,notes
+Compassion International,workday,compassion,wd5,CompassionCareers,,example,"Workday: tenant, data center (wdN), site slug — all three come from https://compassion.wd5.myworkdayjobs.com/CompassionCareers"
+Navy Federal Credit Union,oracle_orc,https://fa-etbx-saasfaprod1.fa.ocs.oraclecloud.com,CX_1001,,,example,"Oracle Recruiting Cloud: host, site number"
+Planning Center,greenhouse,planningcenter,,,,example,Greenhouse: board token from boards.greenhouse.io/<token>
+Aledade,lever,aledade,,,,example,Lever: company slug from jobs.lever.co/<slug>
+Dandy,ashby,dandy,,,,example,Ashby: org slug from jobs.ashbyhq.com/<slug> (URL-encode spaces are handled for you)
+Credence,workable,credence,,,,example,Workable: account slug from apply.workable.com/<slug>
+Biblica,bamboohr,biblica,,,,example,BambooHR: subdomain from <sub>.bamboohr.com
+ServiceNow,smartrecruiters,ServiceNow,,,,example,"SmartRecruiters: company id, CASE-SENSITIVE (a wrong id returns 200 with zero jobs)"

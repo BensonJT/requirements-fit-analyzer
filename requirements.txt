@@ -1,0 +1,12 @@
+# Core — ATS-direct sweep + DuckDB job store
+# (Replaces the earlier FastAPI/Postgres plan in SPEC_PostgreSQL_JobDB.md — DuckDB is a
+# single file, no server process, and fits this product's actual data volume. See
+# Professional/Areas/Job_Search/Tools/DESIGN_ats_registry.md §12a in the vault.)
+python-dotenv
+httpx
+duckdb
+beautifulsoup4
+lxml
+
+# Testing
+pytest

@@ -1,10 +1,5 @@
 # db/
 
-Holds `jobsearch.duckdb`, the single-file job store. The file itself is gitignored —
-only this folder (and its .gitkeep) is tracked, so every checkout has the directory
-ready to receive it.
+Holds `jobsearch.duckdb`, the single-file job store. The file itself is gitignored. Only this folder and its `.gitkeep` are tracked, so every checkout has the directory ready to receive it.
 
-Both the OptiPlex and Vostro checkouts should point at the **same** file on the author's
-external drive (not two independent copies) — see
-`Professional/Areas/Job_Search/Tools/DESIGN_ats_registry.md` §12a in the vault for why,
-and for the upsert/lifecycle schema this file holds once Phase 1 lands.
+The schema, views and macros are defined in `backend/ats/store.py` and created on first run. Migrations from older schema versions run automatically. If you run the sweep from more than one machine, point them at one shared file rather than keeping independent copies, because posting history (`first_seen_at`, `closed_at`) only accumulates in one place.

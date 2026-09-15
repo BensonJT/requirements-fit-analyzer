@@ -3,7 +3,8 @@
 
 Every run: whole-board pull (no cap) -> upsert (existing reqs are updated, never
 re-added) -> close what went missing -> spend a bounded budget on per-posting JD
-detail calls for Workday/Oracle. Then query the views:
+detail calls for platforms whose list endpoint carries no JD (Workday, Oracle,
+Workable, BambooHR, SmartRecruiters). Then query the views:
 
     SELECT employer, title, location_primary FROM new_postings(1);          -- new since yesterday
     SELECT employer, title, days_visible FROM taken_down(7);
@@ -21,13 +22,14 @@ import argparse
 import sys
 
 sys.path.insert(0, ".")
+from backend.ats.adapters import IMPLEMENTED_PLATFORMS
 from backend.ats.sweep import run
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit", type=int, help="only the first N registered boards")
-    ap.add_argument("--platform", help="one platform only (workday, greenhouse, lever, ashby, oracle_orc)")
+    ap.add_argument("--platform", help="one platform only: " + ", ".join(sorted(IMPLEMENTED_PLATFORMS)))
     ap.add_argument("--employer", help="boards whose employer name contains this text")
     ap.add_argument("--workers", type=int, default=8, help="boards pulled in parallel (default 8)")
     ap.add_argument("--max-pages", type=int, help="safety valve: stop a board after N pages and skip its close-pass")

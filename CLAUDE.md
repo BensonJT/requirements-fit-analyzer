@@ -15,7 +15,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
   live-verification step against the employer's own site before it's trusted — see
   `docs/STATUS.md` for why (every Adzuna/Jooble link the 2026-09-14 run followed 403'd).
 - **`sweep_ats.py`** (ATS-direct — `backend/ats/`): the daily engine. Whole-board pulls from
-  Workday, Greenhouse, Lever, Ashby, Oracle ORC and Workable, upserted into `db/jobsearch.duckdb`
+  Workday, Oracle ORC, Greenhouse, Lever, Ashby, Workable, BambooHR and SmartRecruiters, upserted into `db/jobsearch.duckdb`
   (never re-added; closed when they disappear; never deleted), plus a budgeted per-posting JD
   detail stage. Filtering is done in SQL views/macros defined in `backend/ats/store.py`.
   Design: vault `Professional/Areas/Job_Search/Tools/DESIGN_ats_registry.md` (§14 = this build).
@@ -27,7 +27,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - **`sweep_ats.py`** — ATS-direct sweep entry point (current, being timed)
 - `backend/profile.py` — title/exclusion rules; personal pay + location live in gitignored `backend/profile_local.py`
 - `backend/screen.py` — the rule engine both sweeps call
-- `backend/ats/registry.py` — loads + merges the vault's two registry CSVs
+- `backend/ats/registry.py` — loads the vault's `ats_registry.csv` (single file since 2026-09-15)
 - `backend/ats/adapters.py` — `list_jobs(row)` + `fetch_detail(row, posting)` per platform
 - `backend/ats/normalize.py` — one shape for every platform's fields
 - `backend/ats/store.py` — DuckDB schema v2, transactional upsert/close, views + macros

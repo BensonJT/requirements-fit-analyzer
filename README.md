@@ -35,6 +35,26 @@ flowchart LR
 
 A detail request that returns 404 closes the posting, so the detail stage doubles as a liveness check.
 
+### What a run looks like
+
+One line per board, then the detail stage, then a run summary. This is from a real run, trimmed:
+
+```text
+  [119/125] McKesson (workday): 484 live, 484 new, 0 reopened, 0 taken down — 21.5s
+  [120/125] Wells Fargo (workday): 1719 live, 0 new, 0 reopened, 5 taken down — 89.5s
+  [123/125] Philips (workday): 823 live, 0 new, 0 reopened, 0 taken down — 70.5s
+  [125/125] CVS Health (workday): 19449 live, 18453 new, 0 reopened, 4 taken down — 663.1s
+Detail stage: fetching 300 JDs (6 workers)...
+  CVS Health: 77 JDs, 0 gone, 0 errors
+  Novartis: 103 JDs, 0 gone, 0 errors
+  Accenture: 120 JDs, 0 gone, 0 errors
+Detail stage done: 300 fetched, 0 closed as gone, 0 errors.
+
+Run b2213154 done in 17.4 min: 124 boards ok, 1 failed, 76431 live postings, 54941 new, 0 reopened, 111 taken down, 300 JDs fetched
+```
+
+`new` on a board's first sweep is every posting on it (McKesson, CVS above). On later runs it is only what appeared since the last run (Wells Fargo). `taken down` is the close pass at work. A board that fails shows up in `vw_board_health`, and nothing on it is closed.
+
 ## Supported platforms
 
 | Platform | List endpoint gives | Detail fetch | Registry identifiers |
@@ -71,6 +91,20 @@ A fresh clone runs against `registry/ats_registry.example.csv`, eight example bo
 JOBSEARCH_REGISTRY_DIR=/path/to/your/registry
 ```
 
+### First result in five minutes
+
+Sweep three of the example boards, then ask the database what it saw:
+
+```bash
+.venv/bin/python sweep_ats.py --limit 3 --detail-budget 0
+.venv/bin/python -c "
+import duckdb; con = duckdb.connect('db/jobsearch.duckdb', read_only=True)
+print(con.sql('SELECT employer, title, location_primary FROM vw_active ORDER BY employer, title LIMIT 15'))
+print(con.sql('SELECT * FROM vw_board_health'))"
+```
+
+The first command prints one line per board within seconds, then spends a couple of minutes fetching descriptions for the Workday and Oracle postings (add `--new-detail-cap 0` to skip that). The second prints fifteen open postings and a health row per board. From here, replace the example registry with employers you care about and run without `--limit`.
+
 ## The registry
 
 One row per employer:
@@ -100,6 +134,17 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 - **Workday's data center and site slug must match exactly.** A wrong data center returns 422, and a missing site slug returns 405.
 
 Set `source` to `unresolved` to keep a row in the file without sweeping it.
+
+## Make it yours
+
+Four things in this repo are tuned to the author's own search. Change them before you rely on the results:
+
+| What | Where | Why it matters |
+|---|---|---|
+| The employer list | `ats_registry.csv` in your registry directory | Everything else follows from it. Start with ten employers you'd actually apply to. |
+| The backlog title regex | `DETAIL_TITLE_PATTERN` in `backend/ats/prefilter.py` | Decides which older postings get their description fetched first. It currently favors operations, process, program and data titles. Put your own titles in. It never decides what is stored. |
+| The commute-zone view | `vw_dmv_or_remote_active` in `backend/ats/store.py` | Matches the DC / Northern Virginia / Maryland area. Copy the view and swap in your own city and state patterns. |
+| The pay and location rules | `backend/profile_local.py` (copy from `profile_local.example.py`) | Only the older aggregator sweep and rule screen read these. Gitignored, so your numbers stay local. |
 
 ## Usage
 
@@ -196,6 +241,7 @@ The first sweep of a large Workday or Oracle board is the expensive part, becaus
 
 - **Only the employers you register.** It will not discover a company you've never heard of. Pair it with a job board for discovery.
 - **Adapters depend on undocumented endpoints.** They are the endpoints the vendors' own career sites use, and they have been stable, but a vendor can change one without notice. Check `vw_board_health` after each run.
+- **`first_seen_at` is when *you* started watching, not when the job was posted.** The day you add a board, every posting on it is new, so `new_postings(1)` will look like a hiring spree. Use `posted_at`, or `posted_within(days)`, for the job's real age. After the first sweep the two agree.
 - **Workday list dates are relative.** "Posted 3 Days Ago" is converted against the run date. "Posted 30+ Days Ago" stays empty until the detail fetch supplies the real date.
 - **Workday and Oracle rows are thin until their detail fetch runs.** Before that, a multi-site Workday posting has no location, and `workplace_type` is usually empty. Views that filter on location will miss those rows.
 - **Pay is often parsed from description text.** When the ATS has no salary field, a conservative regex pulls the first dollar range from the description. `pay_source` says which kind you're looking at. Treat `text` values as hints.
@@ -208,9 +254,24 @@ The first sweep of a large Workday or Oracle board is the expensive part, becaus
 
 This reads public job listings that employers publish so candidates can find them. It sends no credentials and fills out no forms. It paces requests per host and reads each board once per run. Keep it that way. Run it at most daily, keep the per-host delay, and don't point it at sites that block automated access. You are responsible for complying with each site's terms.
 
+## Adding a platform
+
+The unsupported list above is where help is most useful. An adapter is two functions in `backend/ats/adapters.py`:
+
+- **`<platform>_jobs(row, max_pages=None)`** reads the whole board for one registry row and returns a list of postings built with `normalize.base(...)`. It must raise on a hard failure, never return a partial list as if it were complete, so the close pass can trust it. If `max_pages` stops it early, return a `Truncated` list.
+- **`<platform>_detail(row, posting)`**, only if the list endpoint is thin, fetches one posting's full record and raises `Gone` on 404.
+
+Register the list function in `_LIST` and the detail function in `_DETAIL`, add a row to the platform table in this README, and add a test in `tests/test_ats.py` that feeds a saved JSON response through the adapter with no network. `normalize.py` has the helpers for dates, workplace type, pay parsing and HTML to text, so a new adapter is mostly field mapping. The Greenhouse adapter is the shortest example to copy from.
+
+Before writing one, open the platform's public careers page with the browser's network tab open and confirm it serves JSON to an anonymous request. If it returns a bot check or 403, as iCIMS and Dayforce do, there is nothing to adapt.
+
+If you resolve an employer's identifiers and want to share them, open an issue with the careers URL and the platform. Registry rows are cheap to add and hard to find.
+
 ## Also in this repo
 
 `sweep.py` is an earlier aggregator sweep over Adzuna, Jooble, and USAJobs. Their free API keys go in `.env`, and any source without a key is skipped. It is paired with a rule-based screen, `backend/screen.py`, driven by `backend/profile.py`. The profile holds the author's own title, pay, and location rules. Replace them with yours before using it. Aggregator results are stale often enough that anything it finds should be confirmed on the employer's own site.
+
+`docs/STATUS.md` and `CLAUDE.md` are the author's working notes and the working agreement for the AI coding assistant used on this repo. They describe the author's machines and current session, not the product. Read this README instead.
 
 ## Project layout
 
@@ -225,6 +286,7 @@ backend/ats/
   sweep.py                orchestration: parallel pulls, main-thread writes, detail stages
 registry/                 example registry
 tests/test_ats.py         unit tests (no network)
+LICENSE                   MIT
 db/                       DuckDB file lives here (gitignored)
 sweep.py, backend/screen.py, backend/profile.py   aggregator sweep + rule-based screen
 ```

@@ -65,7 +65,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q          # unit tests, no network
 ```
 
-A fresh clone runs against `registry/ats_registry.example.csv`, eight example boards covering every supported platform. To use your own list, copy the example to `registry/ats_registry.csv`, or point `JOBSEARCH_REGISTRY_DIR` at a directory holding one. Either set it in your environment or add it to a `.env` file in the repo root:
+A fresh clone runs against `registry/ats_registry.example.csv`, eight example boards covering every supported platform. The ATS sweep needs no API keys. To use your own list, copy the example to `registry/ats_registry.csv`, or point `JOBSEARCH_REGISTRY_DIR` at a directory holding one. Settings go in a `.env` file in the repo root; copy `.env.template` to start, since it documents every setting both sweeps read:
 
 ```env
 JOBSEARCH_REGISTRY_DIR=/path/to/your/registry
@@ -210,7 +210,7 @@ This reads public job listings that employers publish so candidates can find the
 
 ## Also in this repo
 
-`sweep.py` is an earlier aggregator sweep over Adzuna, Jooble, and USAJobs. It is paired with a rule-based screen, `backend/screen.py`, driven by `backend/profile.py`. The profile holds the author's own title, pay, and location rules. Replace them with yours before using it. Aggregator results are stale often enough that anything it finds should be confirmed on the employer's own site.
+`sweep.py` is an earlier aggregator sweep over Adzuna, Jooble, and USAJobs. Their free API keys go in `.env`, and any source without a key is skipped. It is paired with a rule-based screen, `backend/screen.py`, driven by `backend/profile.py`. The profile holds the author's own title, pay, and location rules. Replace them with yours before using it. Aggregator results are stale often enough that anything it finds should be confirmed on the employer's own site.
 
 ## Project layout
 

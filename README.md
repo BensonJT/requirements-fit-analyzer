@@ -6,7 +6,7 @@ Read job postings straight from employers' own applicant tracking systems (ATS) 
 
 Job aggregators re-list postings that closed weeks ago, and their links often dead-end. LinkedIn search is noisy and hides the posting date. The employer's ATS is the only source that is always current: if a req is on the Workday or Greenhouse board, it's open, and when it disappears, it's closed.
 
-Most large ATS platforms serve their public career sites from a JSON endpoint. This project calls those same endpoints, the ones your browser calls when you visit the careers page, for a list of employers you choose. No login, no API keys, no scraping of rendered HTML.
+Most large ATS platforms serve their public career sites from a JSON endpoint. This project calls those same endpoints, the ones your browser calls when you visit the careers page, for a list of employers you choose. No login, no API keys, no parsing of rendered page content. The one exception is Paylocity, whose public feed is often disabled, so the adapter reads the JSON block the all-jobs page embeds for its own script, and one description block from each job's page.
 
 What you get:
 
@@ -22,7 +22,7 @@ flowchart LR
     R[Registry CSV<br/>employer → ATS + ids] --> P[Pull every board<br/>8 in parallel]
     P --> U[Upsert<br/>one transaction per board]
     U --> C[Close postings missing<br/>from a clean pull]
-    C --> N[Fetch JDs for NEW postings<br/>Workday · Oracle · Workable ·<br/>BambooHR · SmartRecruiters · Eightfold]
+    C --> N[Fetch JDs for NEW postings<br/>Workday · Oracle · Workable · BambooHR ·<br/>SmartRecruiters · Eightfold · Paylocity]
     N --> B[Fetch JDs for older backlog<br/>small budget, newest first]
     B --> D[(DuckDB<br/>postings)]
 ```
@@ -68,12 +68,13 @@ Run b2213154 done in 17.4 min: 124 boards ok, 1 failed, 76431 live postings, 549
 | BambooHR | title, location, department | yes | subdomain |
 | SmartRecruiters | title, location, remote/hybrid, date, level | yes | company ID (case-sensitive) |
 | Eightfold | title, locations, workplace flag, date, department | yes | host URL, domain |
+| Paylocity | title, location, remote flag, department, date (from the JSON block embedded in the all-jobs page) | yes | company GUID, slug |
 
 **Not supported:**
 - **iCIMS** answers scripted requests with a human-verification page.
 - **Dayforce** returns 403 even with cookies and CSRF tokens.
 - **Taleo** has no public JSON. Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
-- **Phenom, SuccessFactors, ADP, UKG, and Paylocity** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
+- **Phenom, SuccessFactors, ADP, and UKG** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
 
 ## Setup
 
@@ -130,11 +131,13 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 | `https://biblica.bamboohr.com/careers/64` | `bamboohr` | `biblica` |
 | `https://jobs.smartrecruiters.com/ServiceNow/...` | `smartrecruiters` | `ServiceNow` |
 | `https://apply.careers.microsoft.com/careers/job/123` | `eightfold` | `https://apply.careers.microsoft.com`, `microsoft.com` |
+| `https://recruiting.paylocity.com/recruiting/jobs/All/cd6cba65-…/Logos` | `paylocity` | `cd6cba65-…` (the GUID), `Logos` |
 
 **Things that trip people up:**
 - **Vanity careers sites hide the ATS.** A branded site like `careers.example.com` is often a front end for Workday or Oracle. Click Apply and watch where you land.
 - **A Workday tenant name isn't always the company name.** Amentum's jobs live on the `pae` tenant from a company it acquired. RTX's live on `globalhr`.
 - **Workday's data center and site slug must match exactly.** A wrong data center returns 422, and a missing site slug returns 405.
+- **Paylocity apply links carry only a numeric job ID.** `recruiting.paylocity.com/Recruiting/jobs/Apply/4466374` names no company. Open the job's Details page and follow its all-jobs link; the company GUID is in that URL. The public v2 feed for the GUID often returns an empty list even when jobs are live.
 - **Eightfold's domain is the company's email domain, not the careers host.** Microsoft is `microsoft.com` on `apply.careers.microsoft.com`; Liberty Mutual is `libertymutual.com` on `libertymutual.eightfold.ai`. Some tenants answer only one of Eightfold's two list APIs, and the adapter tries both.
 
 Set `source` to `unresolved` to keep a row in the file without sweeping it.

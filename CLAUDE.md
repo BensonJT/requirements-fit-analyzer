@@ -15,7 +15,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
   live-verification step against the employer's own site before it's trusted — see
   `docs/STATUS.md` for why (every Adzuna/Jooble link the 2026-09-14 run followed 403'd).
 - **`sweep_ats.py`** (ATS-direct — `backend/ats/`): the daily engine. Whole-board pulls from
-  Workday, Oracle ORC, Greenhouse, Lever, Ashby, Workable, BambooHR, SmartRecruiters and Eightfold, upserted into `db/jobsearch.duckdb`
+  Workday, Oracle ORC, Greenhouse, Lever, Ashby, Workable, BambooHR, SmartRecruiters, Eightfold and Paylocity, upserted into `db/jobsearch.duckdb`
   (never re-added; closed when they disappear; never deleted), plus a budgeted per-posting JD
   detail stage. Filtering is done in SQL views/macros defined in `backend/ats/store.py`.
   Design: vault `Professional/Areas/Job_Search/Tools/DESIGN_ats_registry.md` (§14 = this build).

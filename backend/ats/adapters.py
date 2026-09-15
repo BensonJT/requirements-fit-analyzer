@@ -13,6 +13,7 @@ Design (see DESIGN_ats_registry.md §6a / §14):
   posting, never re-fetched — see sweep.py's detail stage.
 - A detail call that 404s means the posting is gone; the caller closes it.
 """
+import json
 import re
 import time
 from urllib.parse import quote
@@ -621,6 +622,86 @@ def eightfold_detail(row, posting):
         raise Gone(f"empty detail for {ef_id}")
     return _eightfold_detail_fields(d, posting)
 
+
+# ================================================================ Paylocity
+# No public JSON endpoint that works for every company: the documented v2 feed
+# (recruiting/v2/api/feed/jobs/<guid>) returns an empty list when the company hasn't
+# enabled it. The all-jobs page embeds the full listing, descriptions included, as a
+# `window.pageData = {...};` script block, but its Description is a ~110-char teaser,
+# so the detail stage reads the job-preview-details block of each job's Details page. Registry: identifier_1 = company GUID (from the jobs/All/<guid>/
+# URL a job's Details page links to), identifier_2 = the cosmetic slug after it.
+_PAYLOCITY_PAGEDATA = re.compile(r"window\.pageData\s*=\s*(\{.*?\});\s*\n", re.S)
+
+
+def paylocity_jobs(row, max_pages=None):
+    guid, slug = row["identifier_1"], row["identifier_2"] or "jobs"
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", guid or ""):
+        raise ValueError(f"{row['employer']}: Paylocity row needs the company GUID in identifier_1")
+    url = f"https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/{slug}"
+    with client() as c:
+        resp = _request(c, "GET", url)
+    if "JobNotFound" in str(resp.url):
+        raise RuntimeError(f"{row['employer']}: Paylocity company {guid} not found (redirected to JobNotFound)")
+    m = _PAYLOCITY_PAGEDATA.search(resp.text)
+    if not m:
+        raise RuntimeError(f"{row['employer']}: no pageData block on {url}")
+    return _paylocity_positions(json.loads(m.group(1)).get("Jobs") or [])
+
+
+def _paylocity_positions(jobs):
+    out = []
+    for j in jobs:
+        if j.get("IsInternal"):
+            continue
+        loc = j.get("JobLocation") or {}
+        name = j.get("LocationName") or loc.get("Name")
+        metro = loc.get("Metro")
+        out.append(N.base(
+            req_id=str(j.get("JobId")),
+            title=j.get("JobTitle"),
+            url=f"https://recruiting.paylocity.com/recruiting/jobs/Details/{j.get('JobId')}",
+            location_primary=metro or name,
+            locations=N.locations_json([name, metro]),
+            country=loc.get("Country") or None,
+            workplace_type=N.workplace_type(j.get("IsRemote") or None, name, metro),
+            job_family=j.get("HiringDepartment") or None,
+            posted_at=N.parse_date(j.get("PublishedDate")),
+            raw_json=N.raw({k: v for k, v in j.items() if k != "Description"}),
+        ))
+    return out
+
+
+def paylocity_detail(row, posting):
+    """The all-jobs block carries only a ~110-character teaser; the full description is
+    the job-preview-details block on the job's Details page."""
+    url = posting.get("url") or f"https://recruiting.paylocity.com/recruiting/jobs/Details/{posting.get('req_id')}"
+    with client() as c:
+        resp = _request(c, "GET", url)
+    if "JobNotFound" in str(resp.url):
+        raise Gone(f"JobNotFound {url}")
+    return _paylocity_detail_fields(resp.text, posting)
+
+
+def _paylocity_detail_fields(html, posting):
+    from bs4 import BeautifulSoup
+    div = BeautifulSoup(html, "lxml").select_one("div.job-preview-details")
+    if div is None:
+        raise RuntimeError("no job-preview-details block on Paylocity Details page")
+    text = div.get_text("\n", strip=True)
+    job_type = None
+    m = re.search(r"^Job Type\n([^\n]+)", text, re.M)
+    if m:
+        job_type = m.group(1)
+    # Drop the header rows (Apply / Job Type / <type>) and the "Description" label.
+    text = re.sub(r"^(?:Apply\n)?(?:Job Type\n[^\n]+\n)?(?:Description\n)?", "", text)
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        employment_type=N.employment_type(job_type) or posting.get("employment_type"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -631,6 +712,7 @@ _LIST = {
     "bamboohr": bamboohr_jobs,
     "smartrecruiters": smartrecruiters_jobs,
     "eightfold": eightfold_jobs,
+    "paylocity": paylocity_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -639,6 +721,7 @@ _DETAIL = {
     "bamboohr": bamboohr_detail,
     "smartrecruiters": smartrecruiters_detail,
     "eightfold": eightfold_detail,
+    "paylocity": paylocity_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

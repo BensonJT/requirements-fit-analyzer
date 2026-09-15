@@ -207,3 +207,39 @@ def test_eightfold_union_of_two_orders_and_truncation(monkeypatch):
     monkeypatch.setattr(A, "_eightfold_pages", lambda c, u, h, m: ([A._eightfold_position(h, {"id": 1, "name": "A"})], 5, False))
     got = A.eightfold_jobs(row)
     assert getattr(got, "truncated", False) and len(got) == 1
+
+
+# ---------------------------------------------------------------- paylocity
+def test_paylocity_positions_map_embedded_pagedata():
+    jobs = [{"JobId": 4466374, "JobTitle": "Data Scientist (US)", "LocationName": "LI-Remote",
+             "JobLocation": {"Name": "LI-Remote", "Metro": "US, Remote", "Country": "USA"},
+             "IsRemote": False, "IsInternal": False, "HiringDepartment": "General & Administrative",
+             "PublishedDate": "2026-08-31T14:34:33-05:00",
+             "Description": "<p>About Logos</p><p>Salary range $120,000 - $150,000 per year.</p>"},
+            {"JobId": 1, "JobTitle": "Internal only", "IsInternal": True, "Description": ""}]
+    out = A._paylocity_positions(jobs)
+    assert len(out) == 1
+    p = out[0]
+    assert p["req_id"] == "4466374"
+    assert p["url"] == "https://recruiting.paylocity.com/recruiting/jobs/Details/4466374"
+    assert p["location_primary"] == "US, Remote" and p["country"] == "USA"
+    assert p["workplace_type"] == "remote"          # sniffed from Metro, IsRemote is False
+    assert p["posted_at"] == date(2026, 8, 31)
+    assert p["description_text"] is None          # embedded Description is a teaser
+    assert "paylocity" in A.IMPLEMENTED_PLATFORMS and "paylocity" in A.DETAIL_PLATFORMS
+
+
+def test_paylocity_detail_strips_header_and_parses_pay():
+    html = """<html><body><div class="job-preview-details"><div><a>Apply</a></div>
+    <div><span>Job Type</span><span>Full-time</span></div><div>Description</div>
+    <div><p>About Logos</p><p>The salary range is $120,000 - $150,000 annually.</p></div></div></body></html>"""
+    f = A._paylocity_detail_fields(html, {})
+    assert f["description_text"].startswith("About Logos")
+    assert f["employment_type"] is not None
+    assert (f["pay_min"], f["pay_max"], f["pay_interval"], f["pay_source"]) == (120000, 150000, "year", "text")
+
+
+def test_paylocity_pagedata_regex_finds_block():
+    html = "<script>\nwindow.pageData = {\"Jobs\":[{\"JobId\":5}],\"x\":1};\n</script>"
+    m = A._PAYLOCITY_PAGEDATA.search(html)
+    assert m and A.json.loads(m.group(1))["Jobs"][0]["JobId"] == 5

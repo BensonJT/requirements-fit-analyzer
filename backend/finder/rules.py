@@ -183,9 +183,12 @@ def discipline_rule(title: str, text: str) -> RuleResult:
     return [], [], notes
 
 
-def corridor_rule(title: str, text: str, location_text: str = "") -> RuleResult:
-    """In a manufacturing-cluster place, a plant term in the Required block means a plant role."""
-    if not P.CORRIDOR_PLACES or not text or not find_terms(P.CORRIDOR_PLACES, location_text):
+def corridor_rule(title: str, text: str, locations=()) -> RuleResult:
+    """In a manufacturing-cluster place, a plant term in the Required block means a plant role.
+    `locations` is one location string or a list of them; CORRIDOR_PLACES may pin a state."""
+    if isinstance(locations, str):
+        locations = [locations]
+    if not P.CORRIDOR_PLACES or not text or not any(S.place_matches(loc, P.CORRIDOR_PLACES) for loc in locations if loc):
         return [], [], {}
     hits = find_terms(P.PLANT_DISCIPLINE_TERMS, required_block(text))
     if not hits:
@@ -317,9 +320,8 @@ def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
     _merge(reasons, (r for r in listing.reasons if not r.startswith(SUPERSEDED_PREFIXES)))
     _merge(flags, (f for f in listing.flags if not f.startswith(SUPERSEDED_PREFIXES)))
 
-    location_text = " | ".join([listing.location] + listing.locations)
     results = [rule(title, text) for rule in JD_RULES]
-    results.append(corridor_rule(title, text, location_text))
+    results.append(corridor_rule(title, text, [listing.location, *listing.locations]))
     results.append((h_reasons, h_flags, h_notes))
     tier = tier_for(title)
     if tier == 3:

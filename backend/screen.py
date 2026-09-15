@@ -85,11 +85,64 @@ def is_remote(job: Listing) -> bool:
     return len(states) >= 3
 
 
+_STATES = {
+    "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas", "CA": "california", "CO": "colorado",
+    "CT": "connecticut", "DE": "delaware", "DC": "district of columbia", "FL": "florida", "GA": "georgia",
+    "HI": "hawaii", "ID": "idaho", "IL": "illinois", "IN": "indiana", "IA": "iowa", "KS": "kansas",
+    "KY": "kentucky", "LA": "louisiana", "ME": "maine", "MD": "maryland", "MA": "massachusetts",
+    "MI": "michigan", "MN": "minnesota", "MS": "mississippi", "MO": "missouri", "MT": "montana",
+    "NE": "nebraska", "NV": "nevada", "NH": "new hampshire", "NJ": "new jersey", "NM": "new mexico",
+    "NY": "new york", "NC": "north carolina", "ND": "north dakota", "OH": "ohio", "OK": "oklahoma",
+    "OR": "oregon", "PA": "pennsylvania", "RI": "rhode island", "SC": "south carolina", "SD": "south dakota",
+    "TN": "tennessee", "TX": "texas", "UT": "utah", "VT": "vermont", "VA": "virginia", "WA": "washington",
+    "WV": "west virginia", "WI": "wisconsin", "WY": "wyoming",
+}
+_STATE_BY_NAME = {name: code for code, name in _STATES.items()} | {"d.c.": "DC", "d. c.": "DC"}
+# Longest names first, so "west virginia" is read whole and never also as "virginia".
+_STATE_NAME_RE = re.compile(r"(?<![a-z])(" + "|".join(re.escape(n) for n in sorted(_STATE_BY_NAME, key=len, reverse=True))
+                            + r")(?![a-z])", re.I)
+_STATE_CODE_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(_STATES) + r")(?![A-Za-z])")  # uppercase codes only
+
+
+def states_in(location: str) -> set:
+    """US state codes a location string names: an uppercase two-letter code or the full name."""
+    found = {m.group(1) for m in _STATE_CODE_RE.finditer(location or "")}
+    return found | {_STATE_BY_NAME[m.group(1).lower()] for m in _STATE_NAME_RE.finditer(location or "")}
+
+
+def place_matches(location: str, places) -> list:
+    """Configured places named in a location string, matched as whole words.
+
+    The string is split on ';' and '|' so several locations in one field are judged separately.
+    An entry "name, st" (st = a US state code) pins the state: the segment must name that state.
+    So "springfield, il" matches "Springfield, IL", "US-IL-Springfield" and "Springfield, Illinois",
+    but not "Springfield, MO", "Springfield, Ontario", "8351 W Springfield" or a bare "Springfield"
+    (a city with no state is ambiguous). An entry without a state code matches anywhere.
+    """
+    hits = []
+    for entry in places or []:
+        name, _, code = entry.rpartition(",")
+        code = code.strip().upper()
+        if not name.strip() or code not in _STATES:
+            name, code = entry, None
+        name = name.strip().lower()
+        if not name:
+            continue
+        for segment in re.split(r"[;|]", location or ""):
+            if not re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", segment.lower()):
+                continue
+            if code and code not in states_in(segment):
+                continue
+            hits.append(entry)
+            break
+    return hits
+
+
 def is_commutable(job: Listing) -> bool:
-    """A commutable place is named on the listing. A `hybrid` workplace flag alone is not
-    commutable: hybrid in another metro is still out of the area."""
-    locs = " | ".join([job.location] + job.locations).lower()
-    return bool(_has(locs, P.COMMUTABLE_PLACES))
+    """A commutable place is named in one of the listing's locations (each checked on its own, so a
+    state in one location never vouches for a city in another). A `hybrid` workplace flag alone is
+    not commutable: hybrid in another metro is still out of the area."""
+    return any(place_matches(loc, P.COMMUTABLE_PLACES) for loc in [job.location, *job.locations] if loc)
 
 
 def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker: bool = False) -> Listing:

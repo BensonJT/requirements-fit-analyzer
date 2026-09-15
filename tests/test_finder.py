@@ -14,6 +14,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from backend import profile as P  # noqa: E402
+from backend import screen as S  # noqa: E402
 from backend.ats import normalize as N  # noqa: E402
 from backend.ats import store  # noqa: E402
 from backend.finder import pipeline, report, rules, tracker_sync, version  # noqa: E402
@@ -98,6 +99,32 @@ def test_corridor_rule_needs_place_and_required_plant_term():
     jd = "Required Qualifications\n- Experience in GMP manufacturing\n"
     assert rules.corridor_rule("", jd, "Springfield, IL")[0] == ["corridor manufacturing (required: gmp)"]
     assert rules.corridor_rule("", jd, "Chicago, IL") == ([], [], {})
+
+
+def test_place_matching_pins_the_state():
+    places = ["springfield, il", "chatham"]
+    for loc in ("Springfield, IL", "US-IL-Springfield", "Springfield, Illinois, United States", "IL - Springfield (Hybrid)"):
+        assert S.place_matches(loc, places) == ["springfield, il"], loc
+    for loc in ("Springfield, MO", "US-MO-Springfield", "Springfield, Ontario", "West Springfield, MA", "Springfieldia",
+                "Indianapolis-8351 W Springfield", "Springfield, MO; Peoria, IL", "Springfield"):
+        assert S.place_matches(loc, places) == [], loc
+    assert S.place_matches("Chatham, NJ", places) == ["chatham"]          # no state on the entry: anywhere
+    assert S.place_matches("Bluefield, Virginia", ["bluefield, va"]) == ["bluefield, va"]
+    assert S.place_matches("Bluefield, West Virginia", ["bluefield, va"]) == []   # "west virginia" is not VA
+    dc = ["washington, dc"]
+    assert S.place_matches("Washington, DC", dc) == dc and S.place_matches("Washington, D.C.", dc) == dc
+    assert S.place_matches("Seattle, Washington", dc) == [] and S.place_matches("Remote - Washington", dc) == []
+
+
+def test_commutable_and_corridor_check_each_location_with_its_state():
+    other = rules.listing_from_row(_row(location_primary="Springfield, MO", workplace_type="hybrid",
+                                        locations='["Springfield, MO", "Chicago, IL"]'))
+    assert not S.is_commutable(other)                                     # IL elsewhere never vouches for MO
+    both = rules.listing_from_row(_row(location_primary="Springfield, MO", locations='["Springfield, IL"]'))
+    assert S.is_commutable(both)
+    jd = "Required Qualifications\n- Experience in GMP manufacturing\n"
+    assert rules.corridor_rule("", jd, ["US-MO-Springfield"]) == ([], [], {})
+    assert rules.corridor_rule("", jd, ["US-IL-Springfield"])[0] == ["corridor manufacturing (required: gmp)"]
 
 
 def test_assessment_gate_rule():

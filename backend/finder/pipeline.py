@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -127,6 +128,12 @@ def combine(rule_score: int, fit_prob: Optional[float], embed_sim: Optional[floa
     return final, band_for(final)
 
 
+def penalized_flags(flags: list) -> int:
+    """Flags that cost points: every flag except UNPENALIZED_FLAG_PATTERNS (already priced by a component)."""
+    patterns = [re.compile(p, re.I) for p in P.UNPENALIZED_FLAG_PATTERNS]
+    return sum(1 for f in flags if not any(rx.search(f) for rx in patterns))
+
+
 TITLE_REASONS = ("off-function title", "off-lane title")
 
 
@@ -209,7 +216,7 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
             rec = rules.screen_row(row, rv)
             apply_content_gate(rec, fit_prob)
             final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
-                                  rejected=rec.verdict == "reject", flags=len(rec.flags))
+                                  rejected=rec.verdict == "reject", flags=penalized_flags(rec.flags))
             recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
                          "rule_score": rec.rule_score, "fit_prob": fit_prob, "final_score": final, "band": band,
                          "reasons": rec.reasons, "flags": rec.flags, "top_terms": top})

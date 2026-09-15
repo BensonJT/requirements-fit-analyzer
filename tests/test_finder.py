@@ -608,7 +608,7 @@ def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
     assert mv == result["model_version"] and fit_prob > 0.5 and json.loads(top)
     if verdict != "reject":
         expected = pipeline.combine(rule_score, fit_prob, None, None, {"fit_weight": features.LOW_DATA_FIT_WEIGHT},
-                                    flags=len(json.loads(flags)))[0]
+                                    flags=pipeline.penalized_flags(json.loads(flags)))[0]
         assert final == expected
     # a new model version makes every row due again; rules-only screens stay 'none'
     assert len(pipeline.candidate_ids(con, version.rules_version(), mv)) == 0
@@ -706,3 +706,29 @@ def test_screen_row_decodes_entity_line_breaks():
                                 "Preferred Qualifications&#xa;- 10+ years of experience in banking")
     rec = rules.screen_row(row)
     assert rec.notes["max_years"] == 10 and "&#xa;" not in report.jd_body(row["description_text"])
+
+
+def test_required_years_phrasings():
+    cases = {
+        "Typically 10 or more years of progressive experience in process excellence.": [10],
+        "A minimum of ten (10) years of experience.": [10],
+        "At least eight years' experience leading teams.": [8],
+        "10-12 years of relevant experience": [10],
+        "five to seven years of experience": [5],
+        "(8) years of experience": [8],
+        "Experience: 12+ years": [12],
+        "15 years or more of experience in operations": [15],
+        "Must be 18 years old. Benefits vest after 3 years.": [],
+    }
+    for text, expected in cases.items():
+        assert rules.required_years(text) == expected, text
+    assert rules.level_rule("Senior Manager, AI Transformation & Process Excellence",
+                            "MINIMUM WORK EXPERIENCE:\nTypically 10 or more years of progressive experience in process "
+                            "excellence, consulting, business transformation.", 178_067)[2]["level"] == "senior"
+
+
+def test_component_priced_flags_cost_no_points():
+    flags = ["$110K ask sits above the $100,000 top", "local/hybrid -- judge on route, not radius",
+             "mid level (at most 6 yrs required)", "content fit borderline (fit 0.45)", "travel ceiling 30% (limit 25%)"]
+    assert pipeline.penalized_flags(flags) == 1
+    assert pipeline.combine(80, 0.9, None, None, flags=pipeline.penalized_flags(flags)) == (80, "strong")

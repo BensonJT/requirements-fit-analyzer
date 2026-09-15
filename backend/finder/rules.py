@@ -240,19 +240,39 @@ def coding_test_rule(title: str, text: str) -> RuleResult:
 
 
 # ---------------------------------------------------------------- level, workplace, country
-# "10+ years of experience", "5-7 years' experience", "(8) years ... experience", "experience: 10+ years".
-# A range counts by its lower bound. Only numbers tied to "experience" count, so "within 2 years of hire" does not.
-_YEARS = re.compile(
-    r"(?<![\d.])\(?(\d{1,2})\)?\s*(?:\+|plus)?\s*(?:(?:-|–|—|to)\s*\d{1,2}\s*\+?)?\s*(?:years?|yrs?)\b"
-    r"(?=[^.\n;]{0,80}?\bexperien)"
-    r"|\bexperien\w*[^.\n;\d]{0,30}?(?<![\d.])(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.I)
+# Years of experience. Each "year(s)/yr(s)" word counts when a number phrase ends right before it and "experience"
+# appears in the same sentence (after it, or before it as in "Experience: 12+ years"). Number phrases: "10+",
+# "10 or more", "10-12" / "5 to 7" (lower bound), "ten (10)", "eight". So "within 2 years of hire" and
+# "100 years serving clients" do not count.
+_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+              "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+              "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20}
+_NUM = r"(?:(?<![\d.,$])\d{1,2}(?![\d.,])|\b(?:" + "|".join(sorted(_NUM_WORDS, key=len, reverse=True)) + r")\b)"
+_YEAR_WORD = re.compile(r"\b(?:years?|yrs?)\b", re.I)
+_LEAD = re.compile(rf"({_NUM})\s*\)?\s*(?:\(\s*\d{{1,2}}\s*\)\s*)?(?:\+|plus)?\s*"
+                   rf"(?:(?:-|–|—|to)\s*{_NUM}\s*\)?\s*(?:\(\s*\d{{1,2}}\s*\)\s*)?\+?\s*)?"
+                   r"(?:or\s+(?:more|greater|longer)\s*)?\+?\s*$", re.I)
+_SENTENCE_END = re.compile(r"[.;\n]")
+
+
+def _number(token: str) -> int:
+    token = token.lower()
+    return int(token) if token.isdigit() else _NUM_WORDS[token]
 
 
 def required_years(text: str) -> list:
     """Every years-of-experience number in the JD, in order (company-history sized numbers dropped)."""
-    out = []
-    for m in _YEARS.finditer(text or ""):
-        n = int(m.group(1) or m.group(2))
+    out, text = [], text or ""
+    for m in _YEAR_WORD.finditer(text):
+        before = text[max(0, m.start() - 40):m.start()]
+        lead = _LEAD.search(before)
+        if not lead:
+            continue
+        after = _SENTENCE_END.split(text[m.end():m.end() + 100], 1)[0]
+        prior = _SENTENCE_END.split(text[max(0, m.start() - 80):m.start()])[-1]
+        if not re.search(r"experien", after + " " + prior, re.I) or re.match(r"\s*(?:old|of age)\b", after, re.I):
+            continue
+        n = _number(lead.group(1))
         if 0 < n <= P.LEVEL_YEARS_CAP:
             out.append(n)
     return out

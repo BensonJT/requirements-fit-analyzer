@@ -2,13 +2,11 @@
 
 Where the CSVs live is configuration, not code. Set JOBSEARCH_REGISTRY_DIR (in the
 environment or in the repo's gitignored .env) to a directory holding:
-- ats_registry.csv             the main registry
-- ats_registry_candidates.csv  optional staging file, merged in memory
+- ats_registry.csv             the registry (one file; a former candidates file was merged in 2026-09-15)
 Unset, it falls back to ./registry/, where ats_registry.example.csv is used if no
 ats_registry.csv exists — so a fresh clone runs against a handful of example boards.
 
-`employer` is the dedup key, case-insensitive; a row in the candidates file never
-overrides one already in the main registry. Rows whose `source` is "unresolved" are
+`employer` is the dedup key, case-insensitive; the first row for a name wins. Rows whose `source` is "unresolved" are
 skipped, as are rows on platforms without an adapter. Lines starting with # are comments.
 """
 import csv
@@ -23,7 +21,6 @@ REGISTRY_DIR = os.path.expanduser(os.environ.get("JOBSEARCH_REGISTRY_DIR") or os
 REGISTRY_CSV = os.path.join(REGISTRY_DIR, "ats_registry.csv")
 if not os.path.exists(REGISTRY_CSV):
     REGISTRY_CSV = os.path.join(REGISTRY_DIR, "ats_registry.example.csv")
-CANDIDATES_CSV = os.path.join(REGISTRY_DIR, "ats_registry_candidates.csv")
 
 from .adapters import IMPLEMENTED_PLATFORMS  # the platforms that have a working adapter
 
@@ -50,7 +47,7 @@ def load_registry(implemented_only=True, include_unresolved=False):
     seen = {}
     ordered = []
 
-    for path in (REGISTRY_CSV, CANDIDATES_CSV):
+    for path in (REGISTRY_CSV,):
         for row in _read_csv_rows(path):
             key = row["employer"].strip().lower()
             if key in seen:

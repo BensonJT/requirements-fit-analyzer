@@ -57,6 +57,17 @@ NAT and isn't reachable from the LAN.
   main.py --keywords ... --location Remote`), but treat it as a mirror, not the place new
   work starts.
 
+## Full pipeline order (the report is always last)
+`sweep_ats.py` runs the stages in this order and writes the vault report at the end: sweep → JD details → tracker
+sync → decision read-back → screen → **coverage** → (LLM, Phase 4) → **`Jobs_Found_*.md` + snapshots**. Run by hand
+in the same order, and never stop before the report — a run without it leaves the new screens invisible in the vault:
+```bash
+finder.py labels --report && finder.py train --report && finder.py rescreen-all && finder.py sync \
+  && finder.py evidence --rebuild && finder.py coverage && finder.py report
+```
+`finder.py report` excludes postings already surfaced as blocks in the last 14 days (`surfaced` table), so a second
+report the same day shows the next rows down, while its summary table still lists everything at or above the bar.
+
 ## Session continuity (STATUS.md)
 `docs/STATUS.md` is the session state file — read it first, update it last.
 - **Start:** Output the SESSION START CONFIRMATION block before doing anything else

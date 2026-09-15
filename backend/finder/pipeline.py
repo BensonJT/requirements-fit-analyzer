@@ -1,7 +1,7 @@
 """Screening pipeline: pick the rows that need a (re)screen, score them, write `screens` and
 `postings.screen_*`, and run the daily stage order inside the sweep.
 
-Phase 1 is rules only; `model` (Phase 2) and `encoder` (Phase 3) are accepted and ignored.
+`model` (Phase 2, from features.load_latest) adds fit_prob + top_terms; `encoder` (Phase 3) is accepted and ignored.
 """
 import json
 import os
@@ -122,23 +122,25 @@ def combine(rule_score: int, fit_prob: Optional[float], embed_sim: Optional[floa
 # Shape of one batch passed to DuckDB as a single JSON string. Binding Python lists as parameters
 # costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
 _BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
-                            "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON", "flags": "JSON",
-                            "joined": "VARCHAR"}])
+                            "fit_prob": "DOUBLE", "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
+                            "flags": "JSON", "top_terms": "JSON", "joined": "VARCHAR"}])
+_BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "final_score", "band", "reasons", "flags",
+               "top_terms")
 
 
 def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
     """INSERT OR REPLACE the batch into screens and mirror it into postings.screen_* (one transaction)."""
-    payload = json.dumps([{**{k: r[k] for k in ("posting_id", "verdict", "tier", "rule_score", "final_score", "band",
-                                                "reasons", "flags")},
-                           "joined": "; ".join(r["reasons"] + r["flags"])} for r in recs])
+    payload = json.dumps([{**{k: r.get(k) for k in _BATCH_KEYS}, "joined": "; ".join(r["reasons"] + r["flags"])}
+                          for r in recs])
     con.execute("BEGIN")
     try:
         con.execute("CREATE OR REPLACE TEMP TABLE screen_batch AS "
                     "SELECT unnest(json_transform($1, $2), recursive := true)", [payload, _BATCH_SHAPE])
         con.execute("""
             INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
-                                            rule_score, final_score, band, reasons, flags)
-            SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, final_score, band, reasons, flags
+                                            rule_score, fit_prob, final_score, band, reasons, flags, top_terms)
+            SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, final_score, band, reasons, flags,
+                   top_terms
             FROM screen_batch""", [rv, mv, now])
         con.execute("""
             UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
@@ -151,21 +153,38 @@ def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
         raise
 
 
+def model_scores(model: Optional[dict], rows: list) -> tuple:
+    """(fit_probs, top_terms) per row; None for every row when there is no model or no JD text."""
+    probs, terms = [None] * len(rows), [None] * len(rows)
+    if model is None:
+        return probs, terms
+    from . import features
+    idx = [i for i, r in enumerate(rows) if (r.get("description_text") or "").strip()]
+    if idx:
+        p, t = features.predict_with_terms(model, [features.doc_text(rows[i]["title"], rows[i]["description_text"])
+                                                   for i in idx])
+        for j, i in enumerate(idx):
+            probs[i], terms[i] = p[j], t[j]
+    return probs, terms
+
+
 def screen(con, *, since=None, full: bool = False, limit=None, model=None, encoder=None, log=print) -> dict:
     """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band."""
     t0, started = time.monotonic(), _now()
-    rv, mv = version.rules_version(), "none"
+    rv, mv = version.rules_version(), (model or {}).get("version", "none")
+    calib = {"fit_weight": (model or {}).get("fit_weight")}
     total = len(candidate_ids(con, rv, mv, since=since, limit=limit, full=full))
     verdicts, bands, done = Counter(), Counter(), 0
     for n_batch, rows in enumerate(iter_candidate_batches(con, rv, mv, since=since, limit=limit, full=full)):
         recs = []
-        for row in rows:
+        probs, terms = model_scores(model, rows)
+        for row, fit_prob, top in zip(rows, probs, terms):
             rec = rules.screen_row(row, rv)
-            final, band = combine(rec.rule_score, None, None, None, None, tier=rec.tier,
+            final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
                                   rejected=rec.verdict == "reject")
             recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
-                         "rule_score": rec.rule_score, "final_score": final, "band": band,
-                         "reasons": rec.reasons, "flags": rec.flags})
+                         "rule_score": rec.rule_score, "fit_prob": fit_prob, "final_score": final, "band": band,
+                         "reasons": rec.reasons, "flags": rec.flags, "top_terms": top})
             verdicts[rec.verdict] += 1
             bands[band] += 1
         if recs:
@@ -182,8 +201,9 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
 
 
 def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: bool = True, full: bool = False,
-          log=print) -> dict:
-    """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage."""
+          use_model: bool = True, log=print) -> dict:
+    """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage.
+    The newest trained fit model is used when one exists and scikit-learn is installed."""
     out = {}
     vault_dir = os.path.expanduser(vault_dir) if vault_dir else None
     if vault_dir:
@@ -193,13 +213,17 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         t = time.monotonic()
         out["read_back"] = report_mod.read_back(con, vault_dir)
         log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")
-    out["screen"] = screen(con, since=since, full=full, log=log)
+    model = None
+    if use_model:
+        from . import features
+        model = features.load_latest(con, log=log)
+    out["screen"] = screen(con, since=since, full=full, model=model, log=log)
     if llm_top:
         log("LLM stage: not built yet (Phase 4); skipped.")
     if report and vault_dir:
         t = time.monotonic()
         meta = {"since": since, "screen": out["screen"], "tracker": out.get("tracker"),
-                "read_back": out.get("read_back"), "stages": {"model": False, "embed": False, "llm": False}}
+                "read_back": out.get("read_back"), "stages": {"model": model is not None, "embed": False, "llm": False}}
         out["report"] = str(report_mod.write_jobs_found(con, vault_dir, meta))
         log(f"Report: {out['report']} ({time.monotonic() - t:.1f}s)")
     t = time.monotonic()

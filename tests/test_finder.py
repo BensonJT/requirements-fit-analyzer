@@ -8,6 +8,7 @@ import os
 import runpy
 import subprocess
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -17,7 +18,7 @@ from backend import profile as P  # noqa: E402
 from backend import screen as S  # noqa: E402
 from backend.ats import normalize as N  # noqa: E402
 from backend.ats import store  # noqa: E402
-from backend.finder import pipeline, report, rules, tracker_sync, version  # noqa: E402
+from backend.finder import features, labels, pipeline, report, rules, tracker_sync, version  # noqa: E402
 
 EXAMPLE = {k: v for k, v in runpy.run_path(os.path.join(ROOT, "backend", "profile_local.example.py")).items()
            if k.isupper()}
@@ -423,3 +424,168 @@ def test_sweep_run_screen_flag(tmp_path, monkeypatch):
     con = store.connect(db)
     assert con.execute("SELECT count(*) FROM screens").fetchone()[0] == 2
     assert (tmp_path / "snap" / "shortlist.csv").exists()
+
+
+# ---------------------------------------------------------------- Phase 2: labels + fit model
+FIT_JD = ("Lead process excellence and continuous improvement across operations. Map value streams, remove handoffs, "
+          "own the operating model and lean six sigma deployment with cross-functional stakeholders. ") * 12
+OFF_JD = ("Write production Java microservices, own Kubernetes deployments, on-call rotation, code reviews, "
+          "distributed systems design and CI pipelines for the platform engineering team. ") * 12
+
+
+def _vault(tmp_path):
+    js = tmp_path / "Professional" / "Areas" / "Job_Search"
+    (js / "Applications").mkdir(parents=True)
+    (js / "Search_Results").mkdir()
+    return tmp_path, js
+
+
+def _app(js, folder, status, company, role, jd):
+    d = js / "Applications" / folder
+    d.mkdir()
+    (d / "index.md").write_text(f"---\nstatus: {status}\nrole: {role}\ncompany: {company}\n---\n\n# x\n\n"
+                                f"## Job Description\n\nApply: https://jobs.example/{folder}\nRemote · Full-time\n\n"
+                                f"{jd}\n\n## Notes\nnot part of the JD\n", encoding="utf-8")
+
+
+def test_strip_boilerplate_and_jd_section():
+    text = "Lead CI.\nWe are an Equal Opportunity Employer and value everyone.\nBenefits: medical\nOwn the model."
+    assert labels.strip_boilerplate(text) == "Lead CI.\nWe are an\nOwn the model."
+    raw = "---\nstatus: applied\n---\n## Job Description\nApply: https://x\nRemote · FT\n\nBody line\n## Notes\nno"
+    assert labels.jd_section(raw) == "Body line"
+    assert labels.jd_section("## Other\nno") == ""
+
+
+def test_classify_passed_reason():
+    assert labels.classify_passed_reason("Posting closed November 18") == "stale"
+    assert labels.classify_passed_reason("Altamonte Springs FL, on-site, not commutable") == "logistics"
+    assert labels.classify_passed_reason("Below comp floor") == "logistics"
+    assert labels.classify_passed_reason("Remote, but the scope is sales operations") == "fit"
+    assert labels.classify_passed_reason("Plant-floor CI role") == "fit"
+
+
+def test_vault_label_loaders(tmp_path):
+    vault, js = _vault(tmp_path)
+    _app(js, "Acme_DirOpEx", "applied", "Acme", "Director, Operational Excellence", FIT_JD)
+    _app(js, "Beta_Pass", "not-pursuing", "Beta", "Software Engineer", OFF_JD)
+    _app(js, "Gamma_Short", "evaluating", "Gamma", "Lead", "too short")
+    (js / "Search_Results" / "Jobs_Found_20260101_0900.md").write_text(
+        "# Jobs Found — by hand\n\n# Company: Acme\n## Title: Director, Operational Excellence\nApply: https://x/1\n"
+        f"{FIT_JD}\n\n# Company: Delta\n## Title: Process Excellence Lead\nApply: https://x/2\n## Description:\n{FIT_JD}\n"
+        "---\n\n**Fit: ~80%.**\n\n---\n\n## Passed / Filtered Out\n\n| Company | Role | Reason |\n|---|---|---|\n"
+        "| **Epsilon** | [Plant CI Manager](https://x/3) | Plant-floor manufacturing scope |\n"
+        "| Zeta | Ops Lead, R-1 | Posting closed |\n| Eta | Analyst | On-site in Tampa |\n"
+        "| Company | Role | Reason |\n", encoding="utf-8")
+    (js / "Search_Results" / "Jobs_Found_20260102_0900.md").write_text(
+        "# Jobs Found — ATS pipeline (`jobsearch/finder.py`)\n\n# Company: Omega\n## Title: Pipeline Pick\n"
+        f"{FIT_JD}\n", encoding="utf-8")
+
+    apps = labels.load_applications(str(vault))
+    assert sorted((d.source_ref, d.label) for d in apps) == [("Acme_DirOpEx", 1), ("Beta_Pass", 0)]
+    acme = next(d for d in apps if d.company == "Acme")
+    assert acme.text.startswith("Lead process excellence") and "not part of the JD" not in acme.text
+    assert acme.url == "https://jobs.example/Acme_DirOpEx"
+
+    esc = labels.load_jobs_found_escalated(str(vault), apps)
+    assert [(d.company, d.title, d.label, d.weight) for d in esc] == [("Delta", "Process Excellence Lead", 1, 0.7)]
+    assert "## Description:" in esc[0].text and "Fit:" not in esc[0].text
+
+    passed, skipped = labels.load_jobs_found_passed(str(vault))
+    assert [(d.company, d.title, d.url, d.text) for d in passed] == [("Epsilon", "Plant CI Manager", "https://x/3", None)]
+    assert skipped == {"stale": 1, "logistics": 1}
+
+
+def _seed_label_corpus(con, n_each=40):
+    now = datetime(2026, 9, 15, 12, 0)
+    fit = [N.base(req_id=f"F{i}", title=f"Process Excellence Lead {i}", url=f"https://x/F{i}",
+                  location="Remote - USA", workplace_type="remote") for i in range(n_each)]
+    off = [N.base(req_id=f"O{i}", title=f"Software Engineer {i}", url=f"https://x/O{i}",
+                  location="Remote - USA", workplace_type="remote") for i in range(n_each)]
+    store.record_board(con, "Acme", "greenhouse", fit + off, now)
+    con.execute("UPDATE postings SET description_text = CASE WHEN req_id LIKE 'F%' THEN ? ELSE ? END, "
+                "description_fetched_at = ?", [FIT_JD, OFF_JD, now])
+
+
+def test_pseudo_negatives_and_sync_labels(tmp_path):
+    vault, js = _vault(tmp_path)
+    _app(js, "Acme_Lead", "applied", "Acme", "Process Excellence Lead 3", FIT_JD)
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_label_corpus(con, n_each=10)
+    pseudo = labels.pseudo_negatives(con, n=5, seed=7)
+    assert len(pseudo) == 5 and all(d.label == 0 and d.weight == 0.5 for d in pseudo)
+    assert all(d.title.startswith("Software Engineer") for d in pseudo)
+    assert [d.posting_id for d in pseudo] == [d.posting_id for d in labels.pseudo_negatives(con, n=5, seed=7)]
+
+    counts = labels.sync_labels(con, str(vault), n_pseudo=5, log=_quiet)
+    assert counts["by_source"][("application", 1)] == {"docs": 1, "with_text": 1, "matched": 1}
+    assert counts["pseudo_text"] == 5
+    labels.sync_labels(con, str(vault), n_pseudo=5, log=_quiet)   # rebuild, not append
+    assert con.execute("SELECT count(*) FROM label_docs").fetchone()[0] == 6
+    con.close()
+
+
+def test_training_set_dedupes_by_posting_and_company_title(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_label_corpus(con, n_each=2)
+    pid = con.execute("SELECT posting_id FROM postings WHERE req_id = 'F0'").fetchone()[0]
+    now = datetime(2026, 9, 15)
+    con.execute("INSERT INTO label_docs VALUES ('app1', 'application', 'f', NULL, 'Acme Inc', "
+                "'Process Excellence Lead 0', ?, 1, 1.0, ?)", [FIT_JD, now])
+    con.execute("INSERT INTO label_docs VALUES ('pn1', 'pseudo_neg', NULL, ?, 'Acme', 'x', ?, 0, 0.5, ?)",
+                [pid, OFF_JD, now])
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'tracker', 'Active', ?)", [pid, now])
+    rows = features.training_set(con)
+    assert [r["label_id"] for r in rows] == ["app1"]   # decision deduped to app1; pn1 may not relabel that posting
+    con.close()
+
+
+def _trained(tmp_path, con):
+    now = datetime(2026, 9, 15)
+    rows = []
+    for i in range(30):
+        rows.append([f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}", FIT_JD, 1, 1.0, now])
+        rows.append([f"n{i}", "jobs_found_passed", None, None, "Beta", f"Software Engineer {i}", OFF_JD, 0, 1.0, now])
+    con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    return features.train(con, cv=3, min_df=1, model_dir=str(tmp_path / "models"), log=_quiet)
+
+
+def test_train_predict_top_terms_and_load_latest(tmp_path):
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    assert features.load_latest(con, log=_quiet) is None
+    result = _trained(tmp_path, con)
+    assert result["cv_auc"] == 1.0 and result["n_pos"] == 30 and result["n_neg"] == 30
+    assert result["fit_weight"] == features.LOW_DATA_FIT_WEIGHT and len(result["warnings"]) == 2
+    kind, n_pos, notes = con.execute("SELECT kind, n_pos, notes FROM models").fetchone()
+    assert (kind, n_pos, json.loads(notes)["fit_weight"]) == ("tfidf_lr", 30, features.LOW_DATA_FIT_WEIGHT)
+    assert len(features.hard_negatives(result, k=5)) == 5
+
+    model = features.load_latest(con, log=_quiet)
+    assert model["version"] == result["model_version"]
+    fit_p, off_p = features.predict(model, [features.doc_text("Process Excellence Lead", FIT_JD),
+                                            features.doc_text("Software Engineer", OFF_JD)])
+    assert fit_p > 0.5 > off_p
+    terms = features.top_terms(model, features.doc_text("Process Excellence Lead", FIT_JD))
+    assert terms and all(c > 0 for _, c in terms) and len(terms) <= 6
+    assert any("excellence" in t or "process" in t for t, _ in terms)
+    con.close()
+
+
+def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_label_corpus(con, n_each=3)
+    result = _trained(tmp_path, con)
+    model = features.load_latest(con, log=_quiet)
+    pipeline.screen(con, model=model, log=_quiet)
+    rows = con.execute("SELECT model_version, fit_prob, top_terms, rule_score, final_score, verdict FROM screens "
+                       "WHERE posting_id IN (SELECT posting_id FROM postings WHERE req_id = 'F0')").fetchall()
+    mv, fit_prob, top, rule_score, final, verdict = rows[0]
+    assert mv == result["model_version"] and fit_prob > 0.5 and json.loads(top)
+    if verdict != "reject":
+        expected = pipeline.combine(rule_score, fit_prob, None, None, {"fit_weight": features.LOW_DATA_FIT_WEIGHT})[0]
+        assert final == expected
+    # a new model version makes every row due again; rules-only screens stay 'none'
+    assert len(pipeline.candidate_ids(con, version.rules_version(), mv)) == 0
+    assert len(pipeline.candidate_ids(con, version.rules_version(), "none")) == 6
+    con.close()

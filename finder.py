@@ -9,6 +9,8 @@ Usage:
     .venv/bin/python finder.py sync --verbose             # mirror Application_Tracker.md
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
     .venv/bin/python finder.py shortlist --days 7 --n 30
+    .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
+    .venv/bin/python finder.py train --report                 # TF-IDF + LR on the labels
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -24,7 +26,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(REPO, ".env"))
 from backend.ats import store  # noqa: E402
-from backend.finder import pipeline, report, tracker_sync, version  # noqa: E402
+from backend.finder import features, labels, pipeline, report, tracker_sync, version  # noqa: E402
 from backend.screen import company_keys, company_matches, norm_company, similar_title  # noqa: E402
 
 
@@ -39,12 +41,13 @@ def _latest_counts(con) -> dict:
 
 def cmd_screen(con, a):
     since = _utcnow() - timedelta(hours=a.since_hours) if a.since_hours else None
-    pipeline.screen(con, since=since, full=a.full, limit=a.limit)
+    model = None if a.no_model else features.load_latest(con)
+    pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model)
 
 
 def cmd_rescreen_all(con, a):
     before = _latest_counts(con)
-    pipeline.screen(con, full=True)
+    pipeline.screen(con, full=True, model=None if a.no_model else features.load_latest(con))
     after = _latest_counts(con)
     print(f"{'verdict':<10} {'before':>8} {'after':>8} {'diff':>8}")
     for v in sorted(set(before) | set(after)):
@@ -55,11 +58,14 @@ def cmd_report(con, a):
     if not a.out and not a.vault:
         sys.exit("report: set JOBSEARCH_VAULT_DIR or pass --out")
     since = _utcnow() - timedelta(hours=a.since_hours)
+    latest = con.execute("SELECT model_version FROM screens ORDER BY screened_at DESC LIMIT 1").fetchone()
+    mv = latest[0] if latest else "none"
     funnel = con.execute("""SELECT s.verdict, count(*) FROM vw_screen_latest s JOIN postings p USING (posting_id)
                             WHERE p.status = 'active' AND p.first_seen_at >= ? GROUP BY 1""", [since]).fetchall()
     meta = {"since": since, "screen": None, "passed_since": since,
             "funnel": {"screened": sum(n for _, n in funnel), "verdict": dict(funnel)},
-            "rules_version": version.rules_version(), "model_version": "none"}
+            "rules_version": version.rules_version(), "model_version": mv,
+            "stages": {"model": mv != "none", "embed": False, "llm": False}}
     path = report.write_jobs_found(con, a.vault, meta, max_blocks=a.max_blocks, block_min_band=a.block_min_band,
                                    table_min=a.table_min, out_path=a.out)
     print(path)
@@ -118,6 +124,33 @@ def cmd_shortlist(con, a):
               f"{(title or '')[:60]:<60} {(loc or '')[:24]:<24} {age:>3} {pid}")
 
 
+def cmd_labels(con, a):
+    if not a.vault:
+        sys.exit("labels: set JOBSEARCH_VAULT_DIR or pass --vault")
+    counts = labels.sync_labels(con, a.vault, n_pseudo=a.pseudo, seed=a.seed)
+    if a.report:
+        pos_ok, neg_ok = counts["pos_text"] >= 250, counts["neg_text"] >= features.LOW_DATA_MIN
+        print(f"{'source':<22} {'label':>5} {'docs':>6} {'text':>6} {'matched':>7}")
+        for (source, label), c in sorted(counts["by_source"].items()):
+            print(f"{source:<22} {label:>5} {c['docs']:>6} {c['with_text']:>6} {c['matched']:>7}")
+        print(f"positives with text {counts['pos_text']} ({'ok' if pos_ok else 'below 250'}) · non-pseudo negatives "
+              f"with text {counts['neg_text']} ({'ok' if neg_ok else 'below 150: low-data warning path'}) · "
+              f"after dedupe for training: {len(features.training_set(con))} docs")
+
+
+def cmd_train(con, a):
+    result = features.train(con, C=a.C, cv=a.cv)
+    print("Hard negatives (highest held-out fit_prob among label-0 docs):")
+    for prob, source, label_id, company, title in features.hard_negatives(result):
+        ref = con.execute("SELECT source_ref FROM label_docs WHERE label_id = ?", [label_id]).fetchone()
+        print(f"  {prob:.2f}  {source:<20} {(company or '')[:28]:<28} {(title or '')[:60]:<60} "
+              f"{(ref[0] if ref and ref[0] else label_id)[:60]}")
+    if a.report:
+        print("Signal AUCs over labeled rows that have a screen (fit = held-out probability):")
+        for name, auc_all, auc_real, n_all, n_real in features.signal_report(con, result):
+            print(f"  {name:<10} all {auc_all}  (n={n_all})   non-pseudo {auc_real}  (n={n_real})")
+
+
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="override the DuckDB path")
@@ -129,11 +162,12 @@ def main():
     s.add_argument("--full", action="store_true", help="re-screen every active row")
     s.add_argument("--since-hours", type=float, help="only rows first seen / given a JD in the last N hours")
     s.add_argument("--limit", type=int)
-    s.add_argument("--no-model", action="store_true", help="skip the TF-IDF model (Phase 2; no-op until built)")
+    s.add_argument("--no-model", action="store_true", help="rules only: skip the trained fit model")
     s.add_argument("--no-embed", action="store_true", help="skip embeddings (Phase 3; no-op until built)")
     s.set_defaults(func=cmd_screen)
 
     s = sub.add_parser("rescreen-all", parents=[common], help="screen --full, then the verdict-count diff")
+    s.add_argument("--no-model", action="store_true", help="rules only: skip the trained fit model")
     s.set_defaults(func=cmd_rescreen_all)
 
     s = sub.add_parser("report", parents=[common], help="write a Jobs_Found file")
@@ -159,6 +193,18 @@ def main():
     s.add_argument("--days", type=int, default=7)
     s.add_argument("--n", type=int, default=30)
     s.set_defaults(func=cmd_shortlist)
+
+    s = sub.add_parser("labels", parents=[common], help="rebuild label_docs from the vault")
+    s.add_argument("--report", action="store_true", help="per-source table and the Phase 2 thresholds")
+    s.add_argument("--pseudo", type=int, default=1500, help="pseudo-negatives to sample (default 1500)")
+    s.add_argument("--seed", type=int, default=7)
+    s.set_defaults(func=cmd_labels)
+
+    s = sub.add_parser("train", parents=[common], help="train the TF-IDF + logistic regression fit model")
+    s.add_argument("--cv", type=int, default=5)
+    s.add_argument("--C", type=float, default=4.0)
+    s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
+    s.set_defaults(func=cmd_train)
 
     a = ap.parse_args()
     con = store.connect(a.db)

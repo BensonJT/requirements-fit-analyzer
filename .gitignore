@@ -164,3 +164,8 @@ output/
 backend/profile_local.py
 # Terms that must never be committed (checked before every commit)
 .personal_patterns
+
+# Finder: trained models, lock-free exports, personal LLM rubric
+db/models/
+db/snapshots/
+backend/finder/rubric_local.py

@@ -123,6 +123,43 @@ BLOCKED_POSTERS = {
 }
 AI_GIG_TITLE_TERMS = ["ai trainer", "train ai", "ai training", "expert opportunity", "data annotation"]
 
+# ---- Finder (backend/finder/): JD-text rules and scoring. Neutral structure, no personal values. ----
+# Rule points feed rule_score (0-100). See docs/SPRINT_PLAN.md section 4.2.
+RULE_POINTS = {"tier1": 30, "tier2": 15, "tier3": 8, "extra_hit": 5, "extra_hit_cap": 10, "senior": 5, "remote": 10,
+               "commutable_hybrid": 5, "comp_ask": 10, "comp_floor": 5, "comp_posted": 2, "flag": -5, "flag_floor": -25}
+# Weighted mean of the signals present (weights renormalized over what exists).
+SCORE_WEIGHTS = {"rule": 0.40, "fit": 0.35, "embed": 0.25}
+SCORE_BANDS = [(85, "very_strong"), (70, "strong"), (50, "partial"), (30, "weak"), (0, "none")]
+LLM_BLEND = 0.5
+TIER_CAP = {3: 80}
+
+# Tier 3: the secondary data / analytics lane, matched on title when no function term hits.
+DATA_LANE_ENABLED = True
+DATA_LANE_TERMS = ["business intelligence", " bi ", "data engineer", "analytics engineer", "data model", "reporting analyst",
+                   "operations analyst", "data analytics", "insights"]
+# Tier 3 only: a coding test or algorithmic take-home closes the secondary lane.
+CODING_TEST_TERMS = ["hackerrank", "codility", "codesignal", "coding assessment", "coding challenge", "coding test",
+                     "live coding", "technical assessment", "take-home assignment", "take-home exercise"]
+
+# Business-process vocabulary that outweighs plant vocabulary in the discipline test.
+LANE_PROCESS_TERMS = ["handoff", "hand-off", "approval", "decision rights", "cycle time", "sla", "intake", "workflow",
+                      "stakeholder", "cross-functional", "service level", "process map", "value stream"]
+# Employers that put every applicant through a timed cognitive test.
+ASSESSMENT_GATE_TERMS = ["ccat", "cognitive aptitude", "criteria corp", "aptitude test", "cognitive assessment"]
+# Sales / revenue operations scope. Case-insensitive except the bare acronym CRO. "pipeline" only in its
+# sales sense, so data pipelines and talent pipelines do not trip it.
+SALES_OPS_PATTERN = (r"(?i:\b(?:gtm|go-to-market|quota|cpq|sales enablement|revenue operations|chief revenue officer"
+                     r"|(?:sales|revenue|deal|opportunity) pipeline|pipeline (?:management|generation|coverage))\b)|\bCRO\b")
+LARGE_TEAM_MARKERS = ["performance reviews", "headcount growth", "build the org", "scale the team", "build and scale",
+                      "hiring plan", "build the practice", "grow the team"]
+BOILERPLATE_PATTERNS = [r"equal opportunity employer.*", r"eeo statement.*", r"benefits?:.*", r"about (us|the company).*",
+                        r"reasonable accommodation.*"]   # applied per line/paragraph
+# Heading lines that open and close the Required block of a JD ("requirements" / "qualifications" added:
+# they are the two most common plain-text headings in the corpus).
+REQUIRED_HEADINGS = (r"required|requirements|basic qualifications|minimum qualifications|qualifications|what you.ll need"
+                     r"|must have|what you have|what you bring")
+PREFERRED_HEADINGS = r"preferred|nice to have|desired|bonus|sets you apart"
+
 # ---- Personal settings: NOT in the repo. ----
 # Pay thresholds and home location are set in backend/profile_local.py (gitignored).
 # Copy backend/profile_local.example.py to backend/profile_local.py and fill it in.
@@ -133,6 +170,12 @@ HOURLY_ANNUALIZE = 2_000   # hourly x this = annual
 HOME = None                # e.g. "Springfield, IL"; used for local search lanes
 LOCAL_RADIUS_KM = 80
 COMMUTABLE_PLACES = []     # lowercase place names that count as commutable
+
+TRAVEL_MAX_PCT = None      # travel percent limit; None skips the travel rule
+MAX_DIRECT_REPORTS = None  # direct-report limit; None skips the team-size rule
+DOMAIN_TENURE_TERMS = []   # industries where "N+ years in <industry>" is a gate worth flagging
+CORRIDOR_PLACES = []       # places where a Required-block plant term means a manufacturing role
+FAITH_COMP_FLOOR = None    # comp floor when FAITH_SIGNALS fire
 
 REMOTE_TERMS = ["remote", "work from home", "telework", "anywhere in the u", "virtual"]
 

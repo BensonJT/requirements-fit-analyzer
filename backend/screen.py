@@ -75,6 +75,8 @@ def annual_top(job: Listing) -> Optional[float]:
 
 
 def is_remote(job: Listing) -> bool:
+    if job.extra.get("workplace_type") == "remote":  # the ATS's own flag (finder rows)
+        return True
     text = f"{job.title} {job.location} {job.description[:600]}".lower()
     if _has(text, P.REMOTE_TERMS):
         return True
@@ -84,11 +86,14 @@ def is_remote(job: Listing) -> bool:
 
 
 def is_commutable(job: Listing) -> bool:
+    """A commutable place is named on the listing. A `hybrid` workplace flag alone is not
+    commutable: hybrid in another metro is still out of the area."""
     locs = " | ".join([job.location] + job.locations).lower()
     return bool(_has(locs, P.COMMUTABLE_PLACES))
 
 
-def screen(job: Listing, tracker_rows=None, recent_titles=None) -> Listing:
+def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker: bool = False) -> Listing:
+    """Card-level screen. `skip_tracker=True` bypasses section 9 (the finder dedups in SQL)."""
     title = f" {job.title.lower()} "
     company = job.company.lower()
     desc = job.description.lower()
@@ -152,7 +157,7 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None) -> Listing:
     if top is not None and P.COMP_FLOOR and top < P.COMP_FLOOR:
         reasons.append(f"comp: band top ${top:,.0f} under the ${P.COMP_FLOOR:,} floor")
     elif top is not None and P.COMP_ASK and top < P.COMP_ASK:
-        flags.append(f"$190K ask sits above the ${top:,.0f} top")
+        flags.append(f"${P.COMP_ASK / 1000:,.0f}K ask sits above the ${top:,.0f} top")
 
     # 7. Location -- remote anywhere, or inside the commute radius
     remote = is_remote(job)
@@ -170,7 +175,7 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None) -> Listing:
         flags.append("faith-based signal -- $140K-$180K floor applies")
 
     # 9. Already tracked / already surfaced
-    if tracker_rows:
+    if tracker_rows and not skip_tracker:
         ck = norm_company(job.company)
         hits = [r for r in tracker_rows if company_matches(ck, r["company_keys"])]
         same_role = [r for r in hits if similar_title(job.title, r["role"])]
@@ -179,7 +184,7 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None) -> Listing:
             reasons.append(f"already in Application_Tracker ({r['section']} {r['date']}: {r['role'][:60]})")
         elif hits:
             flags.append(f"employer has {len(hits)} tracker row(s)")
-    if recent_titles:
+    if recent_titles and not skip_tracker:
         key = (norm_company(job.company), norm_title(job.title))
         if key in recent_titles:
             reasons.append(f"already surfaced in {recent_titles[key]}")

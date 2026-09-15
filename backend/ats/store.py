@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # v3 (2026-09-15): finder tables, no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -108,6 +108,67 @@ CREATE TABLE IF NOT EXISTS board_runs (
     error             VARCHAR,
     ran_at            TIMESTAMP
 );
+
+-- ---- Finder (backend/finder/) ----
+-- One row per posting per rules/model version; vw_screen_latest picks the newest.
+CREATE TABLE IF NOT EXISTS screens (
+    posting_id      VARCHAR NOT NULL,
+    rules_version   VARCHAR NOT NULL,          -- finder.version.rules_version()
+    model_version   VARCHAR NOT NULL DEFAULT 'none',
+    screened_at     TIMESTAMP NOT NULL,
+    verdict         VARCHAR NOT NULL,          -- candidate | review | reject
+    tier            INTEGER,                   -- 1 precise | 2 broad | 3 data lane | NULL no function hit
+    rule_score      INTEGER NOT NULL,          -- 0-100
+    fit_prob        DOUBLE,                    -- Phase 2
+    embed_sim       DOUBLE,                    -- Phase 3 (raw cosine)
+    llm_score       INTEGER,                   -- Phase 4
+    final_score     INTEGER NOT NULL,          -- 0-100
+    band            VARCHAR NOT NULL,          -- very_strong | strong | partial | weak | none
+    reasons         JSON,
+    flags           JSON,
+    top_terms       JSON,                      -- [["lean six sigma", 0.41], ...]
+    llm_notes       VARCHAR,
+    PRIMARY KEY (posting_id, rules_version, model_version)
+);
+
+-- Mirror of the vault's Application_Tracker.md, rebuilt every run (the markdown stays the source of truth).
+CREATE TABLE IF NOT EXISTS tracker (
+    section VARCHAR NOT NULL, date_applied VARCHAR, company VARCHAR NOT NULL, role VARCHAR NOT NULL,
+    status VARCHAR, posting_id VARCHAR, matched_posting_id VARCHAR, match_kind VARCHAR, synced_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    posting_id VARCHAR NOT NULL, decision VARCHAR NOT NULL,   -- build | pass | hold
+    reason VARCHAR, source VARCHAR NOT NULL,                  -- file | cli | tracker
+    source_ref VARCHAR, decided_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, source, decided_at)
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, model VARCHAR NOT NULL,
+    vector FLOAT[384] NOT NULL, embedded_at TIMESTAMP NOT NULL, PRIMARY KEY (posting_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS label_docs (
+    label_id VARCHAR PRIMARY KEY, source VARCHAR NOT NULL,    -- application | jobs_found_escalated | jobs_found_passed | tracker | pseudo_neg
+    source_ref VARCHAR, posting_id VARCHAR, company VARCHAR, title VARCHAR, text VARCHAR,
+    label INTEGER NOT NULL, weight DOUBLE DEFAULT 1.0, loaded_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS models (
+    model_version VARCHAR PRIMARY KEY, kind VARCHAR NOT NULL,  -- tfidf_lr | embed_centroid
+    trained_at TIMESTAMP NOT NULL, n_pos INTEGER, n_neg INTEGER, cv_auc DOUBLE, cv_precision_at_20 DOUBLE,
+    embed_lo DOUBLE, embed_hi DOUBLE, path VARCHAR, notes VARCHAR
+);
+
+-- Jobs_Found files already read back for decisions (re-read only when mtime changes).
+CREATE TABLE IF NOT EXISTS readback_log (file VARCHAR PRIMARY KEY, mtime DOUBLE NOT NULL, read_at TIMESTAMP NOT NULL);
+
+-- Postings written as blocks into a Jobs_Found file; surfacing is not a decision.
+CREATE TABLE IF NOT EXISTS surfaced (
+    posting_id VARCHAR NOT NULL, file VARCHAR NOT NULL, surfaced_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, file)
+);
 """
 
 VIEWS = """
@@ -187,6 +248,38 @@ CREATE OR REPLACE MACRO text_match(pattern) AS TABLE
       AND regexp_matches(coalesce(title, '') || '\n' || description_text, pattern, 'i')
     ORDER BY employer, title;
 
+-- ---- Finder views ----
+CREATE OR REPLACE VIEW vw_screen_latest AS
+    SELECT * FROM screens QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY screened_at DESC) = 1;
+
+CREATE OR REPLACE VIEW vw_decisions AS
+    SELECT * FROM decisions QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY decided_at DESC) = 1;
+
+-- Active, not rejected, not decided, not already in the tracker; best first.
+CREATE OR REPLACE VIEW vw_shortlist AS
+    SELECT p.posting_id, p.employer, p.title, p.location_primary, p.workplace_type, p.employment_type,
+           p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
+           date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
+           s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.embed_sim, s.llm_score,
+           s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at
+    FROM postings p
+    JOIN vw_screen_latest s USING (posting_id)
+    LEFT JOIN vw_decisions d USING (posting_id)
+    LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
+    WHERE p.status = 'active' AND s.verdict != 'reject' AND d.posting_id IS NULL AND t.matched_posting_id IS NULL
+    ORDER BY s.final_score DESC, p.first_seen_at DESC;
+
+CREATE OR REPLACE MACRO vw_scored_new(days) AS TABLE
+    SELECT * FROM vw_shortlist WHERE days_since_first_seen <= days::INTEGER ORDER BY final_score DESC;
+
+CREATE OR REPLACE VIEW vw_label_set AS
+    SELECT label_id, source, posting_id, company, title, text, label, weight FROM label_docs WHERE text IS NOT NULL
+    UNION ALL
+    SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0
+    FROM vw_decisions d JOIN postings p USING (posting_id)
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL;
+
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS
     SELECT posting_id, employer, title, location_primary, status,
@@ -205,6 +298,8 @@ def connect(db_path=None):
     con.execute(SCHEMA)
     if not con.execute("SELECT count(*) FROM schema_info").fetchone()[0]:
         con.execute("INSERT INTO schema_info VALUES (?)", [SCHEMA_VERSION])
+    else:  # v2 -> v3 added tables only (CREATE IF NOT EXISTS above), so just record the version
+        con.execute("UPDATE schema_info SET version = ? WHERE version < ?", [SCHEMA_VERSION, SCHEMA_VERSION])
     con.execute(VIEWS)
     return con
 

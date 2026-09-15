@@ -7,3 +7,6 @@ lxml
 
 # Testing
 pytest
+
+# Finder (optional): scikit-learn numpy scipy joblib
+# Embeddings (optional): sentence-transformers torch  (or: fastembed)

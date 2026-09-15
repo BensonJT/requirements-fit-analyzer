@@ -6,6 +6,7 @@ so parallel boards don't violate the ~1 req/s/host politeness rule — pages wit
 board are still sequential with a small delay). ALL DuckDB writes happen on the main
 thread as results arrive, because a DuckDB connection is not shared across threads.
 """
+import os
 import queue
 import time
 import uuid
@@ -147,13 +148,17 @@ def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PAT
 
 
 def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_pages=None,
-        detail_budget=300, detail_all=False, skip_sweep=False, new_detail_cap=5000, log=print):
-    """One sweep plus two detail passes:
+        detail_budget=300, detail_all=False, skip_sweep=False, new_detail_cap=5000,
+        screen=True, report=True, llm_top=0, full_screen=False, log=print):
+    """One sweep plus two detail passes, then the finder stage:
     1. NEW postings from this run get their JD fetched automatically, every title, no
        prefilter, up to `new_detail_cap` (a safety cap for a board's first-ever sweep,
        where every posting counts as new). Anything over the cap falls to the backlog.
     2. BACKLOG: up to `detail_budget` older postings still missing a JD, newest first,
        title-prefiltered unless `detail_all`.
+    3. FINDER (`screen=True`): tracker sync, decision read-back, screen, Jobs_Found report
+       (only when JOBSEARCH_VAULT_DIR is set and `report`), snapshots. A finder failure is
+       logged and never costs the sweep its run log.
     """
     rows = load_registry()
     if platform:
@@ -177,6 +182,8 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
                                  title_pattern=None if detail_all else DETAIL_TITLE_PATTERN,
                                  label="Backlog details")
             details += n
+        if screen:
+            _run_finder(con, stats, report=report, llm_top=llm_top, full_screen=full_screen, log=log)
         if stats:
             store.log_run(con, stats["run_id"], stats["started"], _now(), stats["attempted"], stats["succeeded"],
                           stats["failed"], stats["seen"], stats["new"], stats["reopened"], stats["closed"],
@@ -187,3 +194,18 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
         return stats
     finally:
         con.close()
+
+
+def _run_finder(con, stats, report=True, llm_top=0, full_screen=False, log=print):
+    """The finder stage on the sweep's connection; imported lazily so the sweep never needs it."""
+    try:
+        from backend.finder import pipeline
+        vault_dir = os.getenv("JOBSEARCH_VAULT_DIR") or None
+        pipeline.daily(con, since=stats["started"] if stats else None, vault_dir=vault_dir, llm_top=llm_top,
+                       report=report and bool(vault_dir), full=full_screen, log=log)
+    except Exception as e:  # noqa: BLE001 — the sweep's own results must still be logged
+        try:
+            con.execute("ROLLBACK")
+        except Exception:  # noqa: BLE001 — no open transaction
+            pass
+        log(f"Finder stage FAILED: {type(e).__name__}: {e}")

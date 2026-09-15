@@ -9,7 +9,7 @@ leveraging intelligent search and application tracking to help the user manage
 their career growth efficiently.
 
 ## Current Scope
-Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engine). `sweep.py` is the older aggregator pre-screen with a rule engine (`backend/screen.py` + `backend/profile.py`). No LLM call anywhere.
+Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engine). `sweep.py` is the older aggregator pre-screen with a rule engine (`backend/screen.py` + `backend/profile.py`). No LLM call unless `--llm-top` is passed. The finder layer (`backend/finder/`, `finder.py`) scores the corpus and runs as the last stage of `sweep_ats.py`.
 - **`sweep.py`** (aggregator discovery — Adzuna, Jooble, USAJobs): stable, in regular use.
   Replaced the original March-2026 `main.py` harvester's keyword list. Every result gets a
   live-verification step against the employer's own site before it's trusted — see
@@ -30,9 +30,11 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - `backend/ats/registry.py` — loads the vault's `ats_registry.csv` (single file since 2026-09-15)
 - `backend/ats/adapters.py` — `list_jobs(row)` + `fetch_detail(row, posting)` per platform
 - `backend/ats/normalize.py` — one shape for every platform's fields
-- `backend/ats/store.py` — DuckDB schema v2, transactional upsert/close, views + macros
-- `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget)
-- `tests/test_ats.py` — run with `.venv/bin/python -m pytest -q`
+- `backend/ats/store.py` — DuckDB schema v3 (finder tables added), transactional upsert/close, views + macros
+- `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget, then the finder stage)
+- **`finder.py`** — finder CLI: screen, rescreen-all, report, mark, sync, shortlist
+- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back)
+- `tests/test_ats.py`, `tests/test_finder.py` — run with `.venv/bin/python -m pytest -q`
 - `db/` — the DuckDB job store (gitignored contents; see `db/README.md`)
 - `docs/STATUS.md` — session state (read first, update last)
 

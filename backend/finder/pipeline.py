@@ -1,0 +1,208 @@
+"""Screening pipeline: pick the rows that need a (re)screen, score them, write `screens` and
+`postings.screen_*`, and run the daily stage order inside the sweep.
+
+Phase 1 is rules only; `model` (Phase 2) and `encoder` (Phase 3) are accepted and ignored.
+"""
+import json
+import os
+import time
+from collections import Counter
+from datetime import datetime, timezone
+from typing import Optional
+
+from backend import profile as P
+
+from . import report as report_mod
+from . import rules, tracker_sync, version
+
+BATCH = 500
+
+# Columns the rules read (raw_json is left out: large and unused).
+ROW_COLUMNS = ("posting_id", "employer", "platform", "req_id", "title", "url", "location_primary", "locations",
+               "country", "workplace_type", "employment_type", "job_level", "pay_min", "pay_max", "pay_interval",
+               "posted_at", "description_text", "first_seen_at", "description_fetched_at")
+
+# New, JD changed since the last screen, or screened under another rules/model version.
+RESCREEN_SQL = """
+SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
+WHERE p.status = 'active' AND (s.posting_id IS NULL OR s.rules_version != ? OR s.model_version != ?
+      OR s.screened_at < p.description_fetched_at)"""
+
+
+def _now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _candidate_sql(rv: str, mv: str, since=None, limit=None, full: bool = False, columns: str = "p.posting_id"):
+    """(sql, params) selecting `columns` for the rows to screen, newest first."""
+    if full:
+        sql, params = "SELECT p.posting_id FROM postings p WHERE p.status = 'active'", []
+    else:
+        sql, params = RESCREEN_SQL, [rv, mv]
+    sql = sql.replace("SELECT p.posting_id", f"SELECT {columns}", 1)
+    if since is not None:
+        sql += " AND (p.first_seen_at >= ? OR p.description_fetched_at >= ?)"
+        params += [since, since]
+    sql += " ORDER BY p.first_seen_at DESC, p.posting_id"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    return sql, params
+
+
+def candidate_ids(con, rv: str, mv: str, since=None, limit=None, full: bool = False) -> list:
+    """Posting ids to screen, newest first. `since` keeps rows first seen or given a JD since then."""
+    sql, params = _candidate_sql(rv, mv, since=since, limit=limit, full=full)
+    return [r[0] for r in con.execute(sql, params).fetchall()]
+
+
+def iter_candidate_batches(con, rv: str, mv: str, since=None, limit=None, full: bool = False, batch: int = BATCH):
+    """Dict rows to screen, streamed in batches from a separate cursor. The cursor reads one snapshot,
+    so the writes made between batches on `con` never shift what it returns."""
+    sql, params = _candidate_sql(rv, mv, since=since, limit=limit, full=full,
+                                 columns=", ".join(f"p.{c}" for c in ROW_COLUMNS))
+    reader = con.cursor()
+    try:
+        reader.execute(sql, params)
+        while rows := reader.fetchmany(batch):
+            yield [dict(zip(ROW_COLUMNS, r)) for r in rows]
+    finally:
+        reader.close()
+
+
+def fetch_rows(con, ids: list) -> list:
+    """Postings rows as dicts, in the order of `ids`."""
+    if not ids:
+        return []
+    cur = con.execute(f"SELECT {', '.join(ROW_COLUMNS)} FROM postings "
+                      "WHERE posting_id IN (SELECT unnest(json_transform(?, '[\"VARCHAR\"]')))", [json.dumps(ids)])
+    by_id = {r[0]: dict(zip(ROW_COLUMNS, r)) for r in cur.fetchall()}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def candidates(con, rv: str, mv: str, since=None, limit=None) -> list:
+    """Dict rows needing a screen, ordered first_seen_at DESC."""
+    return fetch_rows(con, candidate_ids(con, rv, mv, since=since, limit=limit))
+
+
+def band_for(score: int) -> str:
+    for threshold, name in P.SCORE_BANDS:
+        if score >= threshold:
+            return name
+    return P.SCORE_BANDS[-1][1]
+
+
+def combine(rule_score: int, fit_prob: Optional[float], embed_sim: Optional[float], llm_score: Optional[int],
+            calib: Optional[dict] = None, *, tier: Optional[int] = None, rejected: bool = False) -> tuple:
+    """(final_score, band). Weighted mean of the signals present, weights renormalized; tier cap;
+    LLM blend last. A hard reject is (0, 'none'). `calib` may carry embed_lo, embed_hi, fit_weight."""
+    if rejected:
+        return 0, "none"
+    calib = calib or {}
+    weights = dict(P.SCORE_WEIGHTS)
+    if calib.get("fit_weight") is not None:
+        weights["fit"] = calib["fit_weight"]
+    signals = {"rule": float(rule_score)}
+    if fit_prob is not None:
+        signals["fit"] = 100.0 * fit_prob
+    lo, hi = calib.get("embed_lo"), calib.get("embed_hi")
+    if embed_sim is not None and lo is not None and hi is not None and hi > lo:
+        signals["embed"] = 100.0 * min(1.0, max(0.0, (embed_sim - lo) / (hi - lo)))
+    total = sum(weights[k] for k in signals)
+    final = sum(weights[k] * v for k, v in signals.items()) / total if total else float(rule_score)
+    cap = P.TIER_CAP.get(tier)
+    if cap is not None:
+        final = min(final, cap)
+    if llm_score is not None:
+        final = (1 - P.LLM_BLEND) * final + P.LLM_BLEND * llm_score
+    final = int(final + 0.5)
+    return final, band_for(final)
+
+
+# Shape of one batch passed to DuckDB as a single JSON string. Binding Python lists as parameters
+# costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
+_BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
+                            "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON", "flags": "JSON",
+                            "joined": "VARCHAR"}])
+
+
+def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
+    """INSERT OR REPLACE the batch into screens and mirror it into postings.screen_* (one transaction)."""
+    payload = json.dumps([{**{k: r[k] for k in ("posting_id", "verdict", "tier", "rule_score", "final_score", "band",
+                                                "reasons", "flags")},
+                           "joined": "; ".join(r["reasons"] + r["flags"])} for r in recs])
+    con.execute("BEGIN")
+    try:
+        con.execute("CREATE OR REPLACE TEMP TABLE screen_batch AS "
+                    "SELECT unnest(json_transform($1, $2), recursive := true)", [payload, _BATCH_SHAPE])
+        con.execute("""
+            INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
+                                            rule_score, final_score, band, reasons, flags)
+            SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, final_score, band, reasons, flags
+            FROM screen_batch""", [rv, mv, now])
+        con.execute("""
+            UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
+                                screen_reasons = b.joined, screened_at = $1
+            FROM screen_batch b WHERE postings.posting_id = b.posting_id""", [now])
+        con.execute("DROP TABLE screen_batch")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
+def screen(con, *, since=None, full: bool = False, limit=None, model=None, encoder=None, log=print) -> dict:
+    """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band."""
+    t0, started = time.monotonic(), _now()
+    rv, mv = version.rules_version(), "none"
+    total = len(candidate_ids(con, rv, mv, since=since, limit=limit, full=full))
+    verdicts, bands, done = Counter(), Counter(), 0
+    for n_batch, rows in enumerate(iter_candidate_batches(con, rv, mv, since=since, limit=limit, full=full)):
+        recs = []
+        for row in rows:
+            rec = rules.screen_row(row, rv)
+            final, band = combine(rec.rule_score, None, None, None, None, tier=rec.tier,
+                                  rejected=rec.verdict == "reject")
+            recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
+                         "rule_score": rec.rule_score, "final_score": final, "band": band,
+                         "reasons": rec.reasons, "flags": rec.flags})
+            verdicts[rec.verdict] += 1
+            bands[band] += 1
+        if recs:
+            _write_batch(con, recs, rv, mv, _now())
+        done += len(rows)
+        if n_batch % 20 == 19:
+            log(f"  screened {done}/{total} ({time.monotonic() - t0:.0f}s)")
+    stats = {"screened": done, "started": started, "seconds": round(time.monotonic() - t0, 1),
+             "verdict": dict(verdicts), "band": dict(bands), "rules_version": rv, "model_version": mv}
+    log(f"Screen: {done} rows in {stats['seconds']}s — " +
+        ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items())) + " | bands " +
+        ", ".join(f"{k} {v}" for k, v in sorted(bands.items())) + f" | rules {rv} · model {mv}")
+    return stats
+
+
+def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: bool = True, full: bool = False,
+          log=print) -> dict:
+    """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage."""
+    out = {}
+    vault_dir = os.path.expanduser(vault_dir) if vault_dir else None
+    if vault_dir:
+        t = time.monotonic()
+        out["tracker"] = tracker_sync.sync(con, vault_dir, log=log)
+        log(f"Tracker sync: {out['tracker']} ({time.monotonic() - t:.1f}s)")
+        t = time.monotonic()
+        out["read_back"] = report_mod.read_back(con, vault_dir)
+        log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")
+    out["screen"] = screen(con, since=since, full=full, log=log)
+    if llm_top:
+        log("LLM stage: not built yet (Phase 4); skipped.")
+    if report and vault_dir:
+        t = time.monotonic()
+        meta = {"since": since, "screen": out["screen"], "tracker": out.get("tracker"),
+                "read_back": out.get("read_back"), "stages": {"model": False, "embed": False, "llm": False}}
+        out["report"] = str(report_mod.write_jobs_found(con, vault_dir, meta))
+        log(f"Report: {out['report']} ({time.monotonic() - t:.1f}s)")
+    t = time.monotonic()
+    out["snapshots"] = [str(p) for p in report_mod.snapshots(con)]
+    log(f"Snapshots: {len(out['snapshots'])} files ({time.monotonic() - t:.1f}s)")
+    return out

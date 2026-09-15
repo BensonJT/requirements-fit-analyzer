@@ -17,6 +17,7 @@ Usage:
     .venv/bin/python sweep_ats.py --employer "capital one"
     .venv/bin/python sweep_ats.py --platform workday --detail-budget 0
     .venv/bin/python sweep_ats.py --skip-sweep --detail-budget 1000   # JD backfill only
+    .venv/bin/python sweep_ats.py --no-screen           # skip the finder stage (screen/report/snapshots)
 """
 import argparse
 import sys
@@ -40,10 +41,15 @@ def main():
     ap.add_argument("--detail-all", action="store_true", help="ignore the title prefilter when choosing JDs to fetch")
     ap.add_argument("--skip-sweep", action="store_true", help="only run the detail stage")
     ap.add_argument("--db", help="override the DuckDB path")
+    ap.add_argument("--no-screen", action="store_true", help="skip the finder stage entirely")
+    ap.add_argument("--no-report", action="store_true", help="screen and snapshot, but write no Jobs_Found file")
+    ap.add_argument("--llm-top", type=int, default=0, help="LLM-score the top N shortlist rows (Phase 4)")
+    ap.add_argument("--full-screen", action="store_true", help="re-screen every active posting, not just new/changed")
     a = ap.parse_args()
     run(db_path=a.db, platform=a.platform, limit=a.limit, employer=a.employer, workers=a.workers,
         max_pages=a.max_pages, detail_budget=a.detail_budget, detail_all=a.detail_all, skip_sweep=a.skip_sweep,
-        new_detail_cap=a.new_detail_cap)
+        new_detail_cap=a.new_detail_cap, screen=not a.no_screen, report=not a.no_report, llm_top=a.llm_top,
+        full_screen=a.full_screen)
 
 
 if __name__ == "__main__":

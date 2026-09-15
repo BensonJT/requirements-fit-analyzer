@@ -32,8 +32,8 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - `backend/ats/normalize.py` — one shape for every platform's fields
 - `backend/ats/store.py` — DuckDB schema v3 (finder tables added), transactional upsert/close, views + macros
 - `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget, then the finder stage)
-- **`finder.py`** — finder CLI: screen, rescreen-all, report, mark, sync, shortlist, labels, train
-- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored). scikit-learn is optional and imported lazily
+- **`finder.py`** — finder CLI: screen, rescreen-all, report, mark, sync, shortlist, labels, train, evidence, coverage, setup-check
+- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
 - `tests/test_ats.py`, `tests/test_finder.py` — run with `.venv/bin/python -m pytest -q`
 - `db/` — the DuckDB job store (gitignored contents; see `db/README.md`)
 - `docs/STATUS.md` — session state (read first, update last)

@@ -1,7 +1,8 @@
 """Screening pipeline: pick the rows that need a (re)screen, score them, write `screens` and
 `postings.screen_*`, and run the daily stage order inside the sweep.
 
-`model` (Phase 2, from features.load_latest) adds fit_prob + top_terms; `encoder` (Phase 3) is accepted and ignored.
+`model` (Phase 2, from features.load_latest) adds fit_prob + top_terms. Requirement coverage (Phase 3a) runs after
+the screen on new / changed survivors and is stored and shown only: it carries weight 0 in the score until step 3b.
 """
 import json
 import os
@@ -235,8 +236,34 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
     return stats
 
 
+def coverage_stage(con, *, since=None, log=print) -> Optional[dict]:
+    """Coverage for survivors missing it, when an embedding library, the evidence manifest and built evidence exist;
+    otherwise one log line saying why it was skipped. Never raises: the sweep must finish without it."""
+    from . import embed, evidence
+    t = time.monotonic()
+    path = evidence.manifest_path()
+    if not path.exists():
+        log(f"Coverage: skipped (no evidence manifest at {path.name})")
+        return None
+    if embed.available() is None:
+        log("Coverage: skipped (no embedding library installed)")
+        return None
+    try:
+        manifest = evidence.load_manifest(str(path))
+        if evidence.stored_version(con, manifest.embed_model) is None:
+            log("Coverage: skipped (evidence not built; run `finder.py evidence --rebuild`)")
+            return None
+        from . import coverage
+        stats = coverage.cover(con, manifest, embed.load_encoder(), since=since, log=log)
+        log(f"Coverage stage: {stats['covered']} postings ({time.monotonic() - t:.1f}s)")
+        return stats
+    except Exception as exc:  # logged, never fatal to the sweep
+        log(f"Coverage: failed ({type(exc).__name__}: {exc}); continuing without it")
+        return None
+
+
 def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: bool = True, full: bool = False,
-          use_model: bool = True, log=print) -> dict:
+          use_model: bool = True, use_coverage: bool = True, log=print) -> dict:
     """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage.
     The newest trained fit model is used when one exists and scikit-learn is installed."""
     out = {}
@@ -253,12 +280,14 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         from . import features
         model = features.load_latest(con, log=log)
     out["screen"] = screen(con, since=since, full=full, model=model, log=log)
+    if use_coverage:
+        out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
     if llm_top:
         log("LLM stage: not built yet (Phase 4); skipped.")
     if report and vault_dir:
         t = time.monotonic()
         meta = {"since": since, "screen": out["screen"], "tracker": out.get("tracker"),
-                "read_back": out.get("read_back"), "stages": {"model": model is not None, "embed": False, "llm": False}}
+                "read_back": out.get("read_back"), "stages": {"model": model is not None, "embed": bool(out.get("coverage")), "llm": False}}
         out["report"] = str(report_mod.write_jobs_found(con, vault_dir, meta))
         log(f"Report: {out['report']} ({time.monotonic() - t:.1f}s)")
     t = time.monotonic()

@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 3  # v3 (2026-09-15): finder tables, no postings changes
+SCHEMA_VERSION = 4  # v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -169,6 +169,35 @@ CREATE TABLE IF NOT EXISTS surfaced (
     posting_id VARCHAR NOT NULL, file VARCHAR NOT NULL, surfaced_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, file)
 );
+
+-- ---- Requirement coverage (sprint plan §15 / §16) ----
+-- The user's evidence, embedded (text stays in this local file; see evidence.local.toml).
+CREATE TABLE IF NOT EXISTS evidence_units (
+    unit_id VARCHAR PRIMARY KEY, source VARCHAR NOT NULL, kind VARCHAR NOT NULL, ref VARCHAR, text VARCHAR NOT NULL,
+    weight DOUBLE NOT NULL, model VARCHAR NOT NULL, vector FLOAT[384] NOT NULL, content_hash VARCHAR,
+    embedded_at TIMESTAMP NOT NULL
+);
+-- A JD's requirement units, embedded once per (JD hash, splitter); spec = specificity weight (§16.3).
+CREATE TABLE IF NOT EXISTS requirement_units (
+    posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, splitter VARCHAR NOT NULL, ord INTEGER NOT NULL,
+    unit_hash VARCHAR NOT NULL, text VARCHAR NOT NULL, section VARCHAR NOT NULL, grp VARCHAR NOT NULL,
+    weight DOUBLE NOT NULL, klass VARCHAR NOT NULL, spec DOUBLE, model VARCHAR NOT NULL, vector FLOAT[384],
+    embedded_at TIMESTAMP NOT NULL, PRIMARY KEY (posting_id, description_hash, splitter, ord)
+);
+CREATE TABLE IF NOT EXISTS coverage (
+    posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, evidence_version VARCHAR NOT NULL,
+    model VARCHAR NOT NULL, calibration VARCHAR NOT NULL,
+    coverage_required DOUBLE, coverage_role DOUBLE,            -- 0-100; NULL under 3 work units in that group
+    n_required INTEGER, n_required_strong INTEGER, n_required_partial INTEGER,
+    n_role INTEGER, n_role_strong INTEGER, n_role_partial INTEGER,
+    gaps JSON, matches JSON, notes JSON, scored_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, evidence_version, model, calibration)
+);
+-- Hard negatives for calibration that are not decisions: audit list + the fit model's confident mistakes (§16.1).
+CREATE TABLE IF NOT EXISTS hard_negatives (
+    posting_id VARCHAR NOT NULL, source VARCHAR NOT NULL, note VARCHAR, refreshed_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, source)
+);
 """
 
 VIEWS = """
@@ -253,7 +282,23 @@ CREATE OR REPLACE VIEW vw_screen_latest AS
     SELECT * FROM screens QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY screened_at DESC) = 1;
 
 CREATE OR REPLACE VIEW vw_decisions AS
-    SELECT * FROM decisions QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY decided_at DESC) = 1;
+    SELECT *, CASE WHEN decision != 'pass' THEN NULL
+                   WHEN regexp_matches(lower(coalesce(reason, '')), '^(function|nuance|logistics|comp|other)\\b')
+                   THEN regexp_extract(lower(reason), '^(function|nuance|logistics|comp|other)\\b', 1)
+                   ELSE 'other' END AS reason_code
+    FROM decisions QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY decided_at DESC) = 1;
+
+-- Newest coverage per posting for its current JD text.
+CREATE OR REPLACE VIEW vw_coverage_latest AS
+    SELECT c.* FROM coverage c JOIN postings p ON p.posting_id = c.posting_id AND coalesce(p.description_hash, '') = c.description_hash
+    QUALIFY row_number() OVER (PARTITION BY c.posting_id ORDER BY c.scored_at DESC) = 1;
+
+-- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
+CREATE OR REPLACE VIEW vw_hard_negatives AS
+    SELECT posting_id, 'decision:function' AS source, reason AS note FROM vw_decisions
+    WHERE decision = 'pass' AND reason_code = 'function'
+    UNION
+    SELECT posting_id, source, note FROM hard_negatives;
 
 -- Active, not rejected, not decided, not already in the tracker; best first.
 CREATE OR REPLACE VIEW vw_shortlist AS
@@ -261,9 +306,11 @@ CREATE OR REPLACE VIEW vw_shortlist AS
            p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
            date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
            s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.embed_sim, s.llm_score,
-           s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at
+           s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at,
+           c.coverage_required, c.coverage_role
     FROM postings p
     JOIN vw_screen_latest s USING (posting_id)
+    LEFT JOIN vw_coverage_latest c USING (posting_id)
     LEFT JOIN vw_decisions d USING (posting_id)
     LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
     WHERE p.status = 'active' AND s.verdict != 'reject' AND d.posting_id IS NULL AND t.matched_posting_id IS NULL

@@ -153,6 +153,12 @@ Four things in this repo are tuned to the author's own search. Change them befor
 | The commute-zone view | `vw_dmv_or_remote_active` in `backend/ats/store.py` | Matches the DC / Northern Virginia / Maryland area. Copy the view and swap in your own city and state patterns. |
 | The pay and location rules | `backend/profile_local.py` (copy from `profile_local.example.py`) | Only the older aggregator sweep and rule screen read these. Gitignored, so your numbers stay local. |
 
+### Your context (finder)
+
+The finder ranks postings against your own background: pay and places in `backend/profile_local.py`, and what you have done in `evidence.local.toml` (resume bullets, a bio, a LinkedIn PDF, articles). Requirement coverage matches each JD requirement by meaning against that evidence. [`docs/SETUP_CONTEXT.md`](docs/SETUP_CONTEXT.md) covers what to gather and how to write evidence that matches. `finder.py setup-check` verifies the setup.
+
+**Privacy.** Local only: the DuckDB file, evidence and embeddings, models and snapshots (all gitignored; the fit model and coverage run offline). Gemini free tier (optional Phase 4 `public` prompts): JD requirement units, the public rubric and a neutral role description, never your evidence. Gemini with billing, or the Claude Code batch files: also the personal rubric and claim guards, still never evidence text.
+
 ## Usage
 
 ```bash

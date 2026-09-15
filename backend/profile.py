@@ -257,6 +257,10 @@ DOMAIN_TENURE_TERMS = []   # industries where "N+ years in <industry>" is a gate
 CORRIDOR_PLACES = []       # places where a Required-block plant term means a manufacturing role; "name, st" pins the state
 FAITH_COMP_FLOOR = None    # comp floor when FAITH_SIGNALS fire
 
+# Posting ids (or "employer|title") the user has read and called wrong-function: coverage calibration negatives
+# (sprint plan §16.1). A calibration input, exempt from the rules version.
+AUDIT_NEGATIVES = []
+
 REMOTE_TERMS = ["remote", "work from home", "telework", "anywhere in the u", "virtual"]
 
 # Seniority words that earn a small bonus (Principal IC primary; Sr Mgr/Dir JD-gated).

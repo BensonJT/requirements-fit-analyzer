@@ -11,6 +11,11 @@ Usage:
     .venv/bin/python finder.py shortlist --days 7 --n 30
     .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
     .venv/bin/python finder.py train --report                 # TF-IDF + LR on the labels
+    .venv/bin/python finder.py setup-check                    # personal files, optional dependencies, DB
+    .venv/bin/python finder.py evidence --check               # evidence manifest: sources, units, samples
+    .venv/bin/python finder.py evidence --rebuild             # embed new evidence units
+    .venv/bin/python finder.py coverage [--all] [--limit N]   # requirement coverage for survivors
+    .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -27,6 +32,8 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(os.path.join(REPO, ".env"))
 from backend.ats import store  # noqa: E402
 from backend.finder import features, labels, pipeline, report, tracker_sync, version  # noqa: E402
+
+PASS_REASON_CODES = ("function", "nuance", "logistics", "comp", "other")
 from backend.screen import company_keys, company_matches, norm_company, similar_title  # noqa: E402
 
 
@@ -105,6 +112,11 @@ def cmd_mark(con, a):
             print(f"  {pid}  {status:<6}  {employer} | {title}")
         sys.exit(1)
     pid, employer, title, _ = hits[0]
+    if a.decision == "pass":
+        code = re.match(r"\s*(\w+)", a.reason or "")
+        if not code or code.group(1).lower() not in PASS_REASON_CODES:
+            sys.exit(f"mark pass: --reason must start with one of {', '.join(PASS_REASON_CODES)} "
+                     '(e.g. --reason "function: clinical operations, not process work")')
     con.execute("INSERT INTO decisions VALUES (?, ?, ?, 'cli', NULL, ?)", [pid, a.decision, a.reason, _utcnow()])
     print(f"{a.decision}: {pid}  {employer} | {title}")
 
@@ -117,11 +129,14 @@ def cmd_sync(con, a):
 
 def cmd_shortlist(con, a):
     rows = con.execute("""SELECT final_score, band, tier, employer, title, location_primary, days_since_first_seen,
-                                 posting_id FROM vw_scored_new(?) LIMIT ?""", [a.days, a.n]).fetchall()
-    print(f"{'score':>5} {'band':<11} {'t':>1} {'employer':<28} {'title':<60} {'location':<24} {'age':>3} posting_id")
-    for score, band, tier, employer, title, loc, age, pid in rows:
-        print(f"{score:>5} {band:<11} {tier if tier is not None else '-':>1} {(employer or '')[:28]:<28} "
-              f"{(title or '')[:60]:<60} {(loc or '')[:24]:<24} {age:>3} {pid}")
+                                 posting_id, coverage_required, coverage_role FROM vw_scored_new(?) LIMIT ?""",
+                       [a.days, a.n]).fetchall()
+    cov = lambda x: "-" if x is None else f"{x:.0f}"  # noqa: E731
+    print(f"{'score':>5} {'band':<11} {'t':>1} {'req':>3} {'role':>4} {'employer':<28} {'title':<60} {'location':<24} "
+          f"{'age':>3} posting_id")
+    for score, band, tier, employer, title, loc, age, pid, c_req, c_role in rows:
+        print(f"{score:>5} {band:<11} {tier if tier is not None else '-':>1} {cov(c_req):>3} {cov(c_role):>4} "
+              f"{(employer or '')[:28]:<28} {(title or '')[:60]:<60} {(loc or '')[:24]:<24} {age:>3} {pid}")
 
 
 def cmd_labels(con, a):
@@ -152,6 +167,40 @@ def cmd_train(con, a):
         print("Signal AUCs over labeled rows that have a screen (fit = held-out probability):")
         for name, auc_all, _, n_all, _ in features.signal_report(con, result):
             print(f"  {name:<10} AUC {auc_all}  (n={n_all})")
+
+
+def _manifest(a):
+    from backend.finder import evidence
+    path = evidence.manifest_path(a.manifest)
+    if not path.exists():
+        sys.exit(f"no evidence manifest at {path}: copy evidence.example.toml to evidence.local.toml "
+                 "(see docs/SETUP_CONTEXT.md)")
+    return evidence.load_manifest(str(path))
+
+
+def cmd_evidence(con, a):
+    from backend.finder import embed, evidence
+    manifest = _manifest(a)
+    ok = evidence.check(manifest)
+    if a.rebuild and ok:
+        evidence.rebuild(con, manifest, embed.load_encoder())
+    if not ok:
+        sys.exit(1)
+
+
+def cmd_coverage(con, a):
+    from backend.finder import coverage, embed
+    manifest = _manifest(a)
+    encoder = embed.load_encoder()
+    if a.calibrate:
+        coverage.calibrate(con, manifest, encoder, n_pseudo=a.pseudo, hard_top=a.hard_top)
+        return
+    coverage.cover(con, manifest, encoder, posting_ids=a.posting or None, all_rows=a.all, limit=a.limit)
+
+
+def cmd_setup_check(con, a):
+    from backend.finder import setup_check
+    sys.exit(0 if setup_check.run(con, manifest=a.manifest) else 1)
 
 
 def main():
@@ -185,7 +234,8 @@ def main():
     s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")
     s.add_argument("target", help='posting_id, posting URL, or "employer|title"')
     s.add_argument("decision", choices=report.DECISIONS)
-    s.add_argument("--reason")
+    s.add_argument("--reason", help="for pass, start with a code: " + " | ".join(PASS_REASON_CODES) +
+                   ' (e.g. "function: clinical ops"); only function passes become calibration negatives')
     s.set_defaults(func=cmd_mark)
 
     s = sub.add_parser("sync", parents=[common], help="mirror Application_Tracker.md into the tracker table")
@@ -208,6 +258,26 @@ def main():
     s.add_argument("--C", type=float, default=4.0)
     s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
     s.set_defaults(func=cmd_train)
+
+    s = sub.add_parser("evidence", parents=[common], help="check / embed the evidence manifest")
+    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
+    s.add_argument("--check", action="store_true", help="list sources, unit counts and samples (the default)")
+    s.add_argument("--rebuild", action="store_true", help="embed new units and drop units no longer produced")
+    s.set_defaults(func=cmd_evidence)
+
+    s = sub.add_parser("coverage", parents=[common], help="requirement coverage for screen survivors")
+    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
+    s.add_argument("--all", action="store_true", help="re-cover every survivor, not only new / changed ones")
+    s.add_argument("--limit", type=int)
+    s.add_argument("--posting", action="append", help="cover this posting id (repeatable)")
+    s.add_argument("--calibrate", action="store_true", help="choose thresholds against hard negatives (§16.1)")
+    s.add_argument("--pseudo", type=int, default=300, help="pseudo-negatives for the sanity AUC (default 300)")
+    s.add_argument("--hard-top", type=int, default=200, help="highest-fit unlabeled postings used as hard negatives")
+    s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
+    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
+    s.set_defaults(func=cmd_setup_check)
 
     a = ap.parse_args()
     con = store.connect(a.db)

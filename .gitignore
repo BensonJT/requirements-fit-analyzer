@@ -169,3 +169,7 @@ backend/profile_local.py
 db/models/
 db/snapshots/
 backend/finder/rubric_local.py
+
+# Finder Phase 3: personal evidence manifest, LLM batch files
+evidence.local.toml
+db/batches/

@@ -732,3 +732,369 @@ def test_component_priced_flags_cost_no_points():
              "mid level (at most 6 yrs required)", "content fit borderline (fit 0.45)", "travel ceiling 30% (limit 25%)"]
     assert pipeline.penalized_flags(flags) == 1
     assert pipeline.combine(80, 0.9, None, None, flags=pipeline.penalized_flags(flags)) == (80, "strong")
+
+
+# ---------------------------------------------------------------- Phase 3a: evidence, requirements, coverage
+import hashlib  # noqa: E402
+import re  # noqa: E402
+from argparse import Namespace  # noqa: E402
+
+from backend.finder import coverage, embed, evidence, requirements, setup_check  # noqa: E402
+
+FIXTURES = os.path.join(ROOT, "tests", "fixtures", "evidence")
+REQ_JD = """About the role
+Lead process excellence for operations.
+
+Responsibilities
+- Map value streams across teams and remove handoffs to cut cycle time.
+- Own the operating model for intake and approvals with stakeholders.
+
+Required Qualifications
+- 8+ years of experience in process improvement leading cross-functional teams
+- Lean six sigma black belt certification and deployment of kaizen events
+- Advanced dashboards built in Power BI for executive reporting
+- Hands-on experience deploying workloads on AWS cloud infrastructure
+- 10+ years of experience.
+- 7+ years in retail banking operations
+- Ability to travel up to 25% of the time
+
+Preferred Qualifications
+- Experience with SQL and Python automation of reporting pipelines
+
+Benefits
+- Medical, dental and vision coverage for you and your family
+"""
+OFF_REQ_JD = """Responsibilities
+- Write production Java microservices and own Kubernetes deployments.
+- Design distributed systems with message queues and caching layers.
+- Review pull requests and mentor engineers on the platform team.
+Requirements
+- Strong Java and Go programming for backend services
+- Experience operating Kubernetes clusters in production
+- Deep knowledge of CI pipelines and infrastructure as code tooling
+"""
+
+
+class FakeEncoder:
+    """Deterministic bag-of-words vectors: shared words mean a higher cosine. No model download."""
+    name, dim, backend = "fake", 384, "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def encode(self, texts, query=False, batch_size=64):
+        import numpy as np
+        self.calls += 1
+        out = np.zeros((len(texts), 384), dtype=np.float32)
+        for i, text in enumerate(texts):
+            for word in re.findall(r"[a-z]{3,}", text.lower()):
+                out[i, int(hashlib.md5(word.encode()).hexdigest(), 16) % 384] += 1.0
+        return embed.normalize(out)
+
+
+def _evidence_manifest(tmp_path, extra: str = ""):
+    path = tmp_path / "evidence.toml"
+    path.write_text(f'''not_in_record = ["Power BI"]
+light_in_record = ["AWS"]
+{extra}
+[[source]]
+name = "bullets"
+type = "csv"
+path = "{FIXTURES}/bullets.csv"
+text_columns = ["context", "bullet"]
+ref_columns = ["role"]
+kind = "achievement"
+
+[[source]]
+name = "articles"
+type = "markdown"
+path = "{FIXTURES}/articles"
+exclude = ["BACKLOG.md"]
+kind = "method"
+
+[[source]]
+name = "portfolio"
+type = "html"
+path = "{FIXTURES}/about.html"
+kind = "narrative"
+
+[[guard]]
+name = "guards"
+path = "{FIXTURES}/guards.csv"
+text_columns = ["do_not_claim"]
+''')
+    return evidence.load_manifest(str(path))
+
+
+def test_manifest_sources_units_guards_and_example(tmp_path):
+    m = _evidence_manifest(tmp_path)
+    assert (m.not_in_record, m.light_in_record, [s.kind for s in m.sources]) == (
+        ["Power BI"], ["AWS"], ["achievement", "method", "narrative"])
+    units = evidence.iter_units(m)
+    texts = " | ".join(u.text for u in units)
+    assert all(15 <= len(u.text) <= evidence.MAX_UNIT for u in units)
+    assert "value stream" in texts and "Short row" not in texts                       # csv; a stub row is dropped
+    assert "handoff between two teams" in texts and "title: Example" not in texts     # markdown minus frontmatter
+    assert "Ideas that are not evidence" not in texts                                 # excluded file
+    assert "forty green belts" in texts and "never counts" not in texts               # html minus nav/script/footer
+    assert any(u.ref == "about › About" for u in units)
+    assert "Never claim" not in texts and evidence.guard_texts(m) == ["Never claim a certification in Tool X."]
+    assert evidence.check(m, log=_quiet)
+    example = evidence.load_manifest(os.path.join(ROOT, "evidence.example.toml"))    # the committed example works
+    assert evidence.check(example, log=_quiet) and evidence.iter_units(example)
+
+
+def test_evidence_long_split_duplicates_skips_and_broken_manifests(tmp_path):
+    long_text = " ".join(f"Sentence number {i} describes a measurable process improvement result." for i in range(40))
+    (tmp_path / "a.txt").write_text(long_text + "\n\nShared paragraph about value stream mapping across teams.\n")
+    (tmp_path / "b.txt").write_text("Shared paragraph about value stream mapping across teams.\n\nAI USAGE: load this "
+                                    "file only when drafting marketing copy for the practice.\n")
+    (tmp_path / "m.toml").write_text(f'''[[source]]
+name = "a"
+type = "text"
+path = "{tmp_path}/a.txt"
+kind = "narrative"
+[[source]]
+name = "b"
+type = "text"
+path = "{tmp_path}/b.txt"
+kind = "achievement"
+skip_patterns = ["(?i)^ai usage"]
+''')
+    units = evidence.iter_units(evidence.load_manifest(str(tmp_path / "m.toml")))
+    shared = [u for u in units if u.text.startswith("Shared paragraph")]
+    assert len(shared) == 1 and (shared[0].source, shared[0].weight) == ("b", 1.0)       # kept once, highest weight
+    assert not any("AI USAGE" in u.text for u in units)
+    assert sum(1 for u in units if u.source == "a") >= 3 and all(len(u.text) <= 600 for u in units)
+    (tmp_path / "missing.toml").write_text('[[source]]\nname = "x"\ntype = "csv"\npath = "/nonexistent/x.csv"\n'
+                                           'kind = "achievement"\n')
+    assert not evidence.check(evidence.load_manifest(str(tmp_path / "missing.toml")), log=_quiet)
+    (tmp_path / "bad.toml").write_text('[[source]]\nname = "x"\ntype = "csv"\npath = "x.csv"\nkind = "hobby"\n')
+    with pytest.raises(ValueError):
+        evidence.load_manifest(str(tmp_path / "bad.toml"))
+
+
+def test_evidence_rebuild_float384_and_cosine(tmp_path):
+    pytest.importorskip("numpy")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    m = _evidence_manifest(tmp_path)
+    enc = FakeEncoder()
+    stats = evidence.rebuild(con, m, enc, log=_quiet)
+    assert stats["embedded"] == stats["units"] > 0 and stats["evidence_version"] == evidence.stored_version(con, m.embed_model)
+    assert con.execute("SELECT typeof(vector) FROM evidence_units LIMIT 1").fetchone()[0] == "FLOAT[384]"
+    units, matrix = evidence.load_matrix(con, m.embed_model)
+    assert matrix.shape == (len(units), 384)
+    cos = con.execute("SELECT max(array_cosine_similarity(vector, ?::FLOAT[384])) FROM evidence_units",
+                      [matrix[0].tolist()]).fetchone()[0]
+    assert cos == pytest.approx(1.0, abs=1e-4)
+    assert evidence.rebuild(con, m, enc, log=_quiet)["embedded"] == 0                   # nothing new to embed
+    con.close()
+
+
+def test_split_requirements_sections_weights_and_classes():
+    units = requirements.split_requirements(REQ_JD)
+    by_text = {u.text: u for u in units}
+    assert by_text["Lead process excellence for operations."].section == "responsibility"
+    value = next(u for u in units if u.text.startswith("Map value streams"))
+    assert (value.section, value.group, value.weight, value.klass) == ("responsibility", "role", 0.8, "work")
+    years = by_text["Process improvement leading cross-functional teams"]                # §16.4: skill content kept
+    assert (years.section, years.group, years.weight, years.klass) == ("required", "required", 1.0, "work")
+    assert by_text["10+ years of experience."].klass == "level"
+    assert by_text["7+ years in retail banking operations"].klass == "domain"
+    assert by_text["Ability to travel up to 25% of the time"].klass == "logistics"
+    sql = next(u for u in units if "SQL" in u.text)
+    assert (sql.section, sql.group, sql.weight) == ("preferred", "required", 0.4)
+    assert not any("dental" in u.text for u in units)                                    # benefits section dropped
+    body = requirements.split_requirements("We need someone to map processes across finance teams. "
+                                           "You will build dashboards for weekly operating reviews.")
+    assert [(u.section, u.weight) for u in body] == [("body", 0.7), ("body", 0.7)]
+    assert requirements.classify("10+ years in process improvement leading cross-functional teams") == (
+        "work", "Process improvement leading cross-functional teams")
+    capped = requirements.split_requirements(REQ_JD, max_units=3)
+    assert len(capped) == 3 and all(u.weight == 1.0 for u in capped)
+
+
+def test_rejoin_lines_glues_split_sentences_and_drops_labels():
+    lines = requirements.rejoin_lines("Aetna is seeking a\nVP\n,\n Chief Operating Officer with\ndeep experience")
+    assert lines == ["Aetna is seeking a VP, Chief Operating Officer with deep experience"]
+    units = requirements.split_requirements("Responsibilities\nEnterprise Operational Leadership\n"
+                                            "Serves as the strategic operations advisor to the medical officers.\n")
+    assert [u.text for u in units] == ["Serves as the strategic operations advisor to the medical officers."]
+
+
+def test_credit_row_kind_weight_scales_credit_not_similarity():
+    np = pytest.importorskip("numpy")
+    arg = np.array([0, 1, 2, 3])
+    assert coverage.KINDS == ("achievement", "duty", "narrative", "method")
+    band, credit, idx, cos = coverage.credit_row(np.array([0.5, 0.5, 0.5, 0.85]), arg, 0.72, 0.62, None)
+    assert (band, round(credit, 2), idx) == ("strong", 0.7, 3)                           # method unit still strong
+    band, credit, idx, _ = coverage.credit_row(np.array([0.65, 0.5, 0.5, 0.85]), arg, 0.72, 0.62, None)
+    assert (band, round(credit, 2), idx) == ("strong", 0.7, 3)                           # 0.7 beats partial 0.5
+    band, credit, idx, _ = coverage.credit_row(np.array([0.80, 0.5, 0.5, 0.5]), arg, 0.72, 0.62, None)
+    assert (band, credit, idx) == ("strong", 1.0, 0)
+    assert coverage.credit_row(np.array([0.9, 0.5, 0.5, 0.5]), arg, 0.72, 0.62, "light_in_record")[:2] == ("partial", 0.5)
+    assert coverage.credit_row(np.array([0.9, 0.9, 0.9, 0.9]), arg, 0.72, 0.62, "not_in_record")[:2] == ("gap", 0.0)
+    missing = np.array([-1, -1, -1, 3])                                                  # only method evidence exists
+    assert coverage.credit_row(np.array([-1, -1, -1, 0.7]), missing, 0.72, 0.62, None)[:3] == ("partial", 0.35, 3)
+    assert coverage.term_cap("Dashboards in Power BI and AWS", ["Power BI"], ["AWS"]) == ("not_in_record", "power bi")
+    assert coverage.term_cap("Deploy on AWS", ["Power BI"], ["AWS"]) == ("light_in_record", "aws")
+
+
+def test_score_doc_math_null_under_three_and_gaps():
+    ev = [{"ref": "Role A", "source": "bullets", "kind": "achievement"}]
+    units = [{"text": t, "grp": g, "weight": 1.0, "spec": None, "klass": "work"}
+             for t, g in (("req one", "required"), ("req two", "required"), ("req three", "required"),
+                          ("role one", "role"), ("role two", "role"))]
+    credits = [("strong", 1.0, 0, 0.8), ("partial", 0.5, 0, 0.65), ("gap", 0.0, 0, 0.3),
+               ("strong", 1.0, 0, 0.9), ("gap", 0.0, 0, 0.1)]
+    out = coverage.score_doc(units, credits, ev)
+    assert out["coverage_required"] == 50.0 and out["coverage_role"] is None             # role has 2 work units
+    assert (out["n_required"], out["n_required_strong"], out["n_required_partial"]) == (3, 1, 1)
+    assert out["gaps"] == ["req three", "role two"]                                      # Required gaps first
+    assert [mt[0] for mt in out["matches"]] == ["req one", "role one", "req two"]            # credit x weight order
+    assert out["notes"]["sources"] == {"bullets": 3}
+    units[0]["spec"] = 0.2                                                               # a generic strong line counts less
+    assert coverage.score_doc(units, credits, ev)["coverage_required"] == pytest.approx(100 * (0.2 + 0.5) / 2.2, abs=0.1)
+    assert coverage.primary({"coverage_required": None, "coverage_role": 40.0}) == 40.0
+
+
+def test_specificity_and_doc_frequencies():
+    np = pytest.importorskip("numpy")
+    assert coverage.specificity(1, 100) == 1.0 and coverage.specificity(100, 100) == 0.2
+    assert coverage.specificity(10, 100) == pytest.approx(0.5)
+    same = np.tile(embed.normalize(np.ones((1, 384), np.float32)), (3, 1))
+    other = embed.normalize(np.eye(1, 384, 5, dtype=np.float32))
+    ref = np.vstack([same, other])
+    owners = ["A", "B", "C", "D"]
+    assert coverage.doc_frequencies(same[:1], ["A"], ref, owners) == [3]                 # B and C, not its own posting
+    assert coverage.doc_frequencies(other, ["Z"], ref, owners) == [2]
+
+
+def _covered_posting(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    store.record_board(con, "Acme", "greenhouse", [N.base(req_id="C1", title="Process Excellence Lead", url="https://x/C1",
+                                                          location="Remote - USA", workplace_type="remote")], now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h1', description_fetched_at = ?",
+                [REQ_JD, now])
+    return con, con.execute("SELECT posting_id FROM postings").fetchone()[0]
+
+
+def test_cover_writes_rows_caches_units_and_leaves_scores_alone(tmp_path):
+    pytest.importorskip("numpy")
+    con, pid = _covered_posting(tmp_path)
+    pipeline.screen(con, log=_quiet)
+    before = con.execute("SELECT final_score, band, verdict FROM vw_screen_latest").fetchall()
+    m = _evidence_manifest(tmp_path)
+    evidence.rebuild(con, m, FakeEncoder(), log=_quiet)
+    stats = coverage.cover(con, m, FakeEncoder(), posting_ids=[pid], log=_quiet)
+    assert stats["covered"] == 1
+    c_req, c_role, n_req, n_role, notes, gaps, matches = con.execute(
+        "SELECT coverage_required, coverage_role, n_required, n_role, notes, gaps, matches FROM vw_coverage_latest "
+        "WHERE posting_id = ?", [pid]).fetchone()
+    assert (n_req, n_role) == (5, 3) and all(v is None or 0 <= v <= 100 for v in (c_req, c_role))
+    notes, matches = json.loads(notes), json.loads(matches)
+    assert notes["domain"] == ["7+ years in retail banking operations"]
+    assert (notes["level_lines"], notes["logistics_lines"]) == (1, 1)
+    assert {c[1]: c[2] for c in notes["capped"]} == {"not_in_record": "power bi", "light_in_record": "aws"}
+    assert not any("Power BI" in mt[0] for mt in matches)
+    assert not any("AWS" in mt[0] and mt[5] == "strong" for mt in matches)
+    n_units = con.execute("SELECT count(*) FROM requirement_units").fetchone()[0]
+    counting = FakeEncoder()
+    coverage.cover(con, m, counting, posting_ids=[pid], log=_quiet)
+    assert counting.calls == 0 and con.execute("SELECT count(*) FROM requirement_units").fetchone()[0] == n_units
+    assert con.execute("SELECT final_score, band, verdict FROM vw_screen_latest").fetchall() == before   # 3a: weight 0
+    shortlist = con.execute("SELECT coverage_required, coverage_role FROM vw_shortlist WHERE posting_id = ?", [pid]).fetchall()
+    assert shortlist in ([], [(c_req, c_role)])
+    # survivors without coverage under the current versions: none left for this posting
+    ev_version = evidence.stored_version(con, m.embed_model)
+    assert pid not in coverage.survivor_ids(con, evidence_version=ev_version, model=m.embed_model, calibration="default")
+    con.close()
+
+
+def test_hard_negative_view_and_pass_reason_codes(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    con.executemany("INSERT INTO decisions VALUES (?, 'pass', ?, 'cli', NULL, ?)",
+                    [["a" * 20, "function: clinical operations", now], ["b" * 20, "nuance", now],
+                     ["c" * 20, "travel is too much", now]])
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", ["d" * 20, now])
+    con.execute("INSERT INTO hard_negatives VALUES (?, 'audit', NULL, ?)", ["e" * 20, now])
+    codes = dict(con.execute("SELECT posting_id, reason_code FROM vw_decisions").fetchall())
+    assert codes == {"a" * 20: "function", "b" * 20: "nuance", "c" * 20: "other", "d" * 20: None}
+    assert sorted(con.execute("SELECT posting_id, source FROM vw_hard_negatives").fetchall()) == [
+        ("a" * 20, "decision:function"), ("e" * 20, "audit")]
+    con.close()
+
+
+def test_mark_pass_requires_a_reason_code(tmp_path):
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    with pytest.raises(SystemExit):
+        finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="travel is too much"))
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="logistics: travel"))
+    finder.cmd_mark(con, Namespace(target=pid, decision="hold", reason=None))
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 2
+    con.close()
+
+
+def test_setup_check_passes_on_example_and_fails_on_broken_manifest(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    assert setup_check.run(con, manifest=os.path.join(ROOT, "evidence.example.toml"), log=_quiet)
+    (tmp_path / "broken.toml").write_text('[[source]]\nname = "x"\ntype = "pdf"\npath = "/nonexistent/x.pdf"\n'
+                                          'kind = "narrative"\n')
+    lines = []
+    assert not setup_check.run(con, manifest=str(tmp_path / "broken.toml"), log=lines.append)
+    assert any(line.startswith("BLOCK") for line in lines)
+    con.close()
+
+
+def test_coverage_stage_skips_cleanly_without_manifest(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    monkeypatch.setenv("JOBSEARCH_EVIDENCE", str(tmp_path / "none.toml"))
+    lines = []
+    assert pipeline.coverage_stage(con, log=lines.append) is None
+    assert lines and "skipped" in lines[0]
+    con.close()
+
+
+def test_fit_stanza_coverage_parts():
+    parts = report.coverage_parts(50.0, 62.4, 5, 2, 1, 3, 1, 1, '["gap a", "gap | b"]',
+                                  '[["req", "Role A", 0.81, "bullets", "achievement", "strong"]]')
+    assert parts == ["coverage required 50 (2 of 5 strong, 1 partial)", "role 62 (1 of 3 strong, 1 partial)"]
+    detail = report.coverage_detail(50.0, 62.4, 5, 2, 1, 3, 1, 1, '["gap a", "gap | b"]',
+                                    '[["req", "Role A", 0.81, "bullets", "achievement", "strong"]]')
+    assert detail[0].startswith("gaps: gap a; gap") and "|" not in detail[0]
+    assert detail[1] == "matched: req ← Role A (bullets, 0.81)"
+    assert report.coverage_parts() == [] and report.coverage_detail() == []
+
+
+def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatch):
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    off = [N.base(req_id=f"O{i}", title=f"Software Engineer {i}", url=f"https://x/O{i}", location="Remote - USA",
+                  workplace_type="remote") for i in range(6)]
+    store.record_board(con, "Acme", "greenhouse", off, now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'off', description_fetched_at = ?",
+                [OFF_REQ_JD, now])
+    rows = [[f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}",
+             REQ_JD + f"\n- Run operating reviews for region number {i} with finance partners", 1, 1.0, now]
+            for i in range(6)]
+    rows += [[f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}", OFF_REQ_JD, 0, 1.0, now]
+             for i in range(6)]
+    con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
+    pipeline.screen(con, model=features.load_latest(con, log=_quiet), log=_quiet)
+    monkeypatch.setattr(P, "AUDIT_NEGATIVES", [con.execute("SELECT posting_id FROM postings LIMIT 1").fetchone()[0],
+                                               "Acme|not an id"])
+    m = _evidence_manifest(tmp_path)
+    evidence.rebuild(con, m, FakeEncoder(), log=_quiet)
+    result = coverage.calibrate(con, m, FakeEncoder(), n_pseudo=5, hard_top=5, log=_quiet)
+    assert (result["n_pos"], result["n_hard"]) == (6, 6)
+    assert 0.54 <= result["partial"] < result["strong"] <= 0.90
+    assert {"coverage_required", "coverage_role", "fit_heldout", "blend_0.75"} <= set(result["aucs"])
+    assert dict(con.execute("SELECT source, count(*) FROM hard_negatives GROUP BY 1").fetchall()) == {"audit": 1, "fit_top": 5}
+    calib = coverage.current_calibration(con)
+    assert calib["version"] == result["version"] and calib["strong"] == result["strong"]
+    con.close()

@@ -10,3 +10,5 @@ pytest
 
 # Finder (optional): scikit-learn numpy scipy joblib
 # Embeddings (optional): sentence-transformers torch  (or: fastembed)
+#   CPU torch: pip install --index-url https://download.pytorch.org/whl/cpu torch
+# PDF evidence without poppler's pdftotext (optional): pypdf

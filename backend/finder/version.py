@@ -20,9 +20,13 @@ def _stable(value):
     return value
 
 
+# Calibration inputs, not rules: changing them re-calibrates coverage but never re-screens the corpus.
+VERSION_EXEMPT = {"AUDIT_NEGATIVES"}
+
+
 def profile_constants() -> dict:
-    """Every uppercase name in backend.profile (personal overrides included via its star import)."""
-    return {k: v for k, v in vars(P).items() if k.isupper()}
+    """Every uppercase name in backend.profile (personal overrides included via its star import), minus VERSION_EXEMPT."""
+    return {k: v for k, v in vars(P).items() if k.isupper() and k not in VERSION_EXEMPT}
 
 
 def rules_version() -> str:

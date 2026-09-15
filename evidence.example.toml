@@ -1,0 +1,32 @@
+# Copy to evidence.local.toml (gitignored) and point each source at your own files.
+# Paths may be absolute, start with ~, or be relative to this file. See docs/SETUP_CONTEXT.md.
+embed_model = "BAAI/bge-small-en-v1.5"
+not_in_record = ["Tool X", "Certification Y"]      # a requirement naming one is always a gap
+light_in_record = ["Cloud Z"]                     # a requirement naming one scores at most partial
+
+[[source]]
+name = "resume_bullets"
+type = "csv"                                      # csv | markdown | pdf | html | text
+path = "tests/fixtures/evidence/bullets.csv"
+text_columns = ["context", "bullet"]              # joined per row
+ref_columns = ["role"]                            # shown as the match reference
+kind = "achievement"                              # achievement 1.0 | duty 0.9 | narrative 0.8 | method 0.7
+
+[[source]]
+name = "articles"
+type = "markdown"
+path = "tests/fixtures/evidence/articles"
+include = ["**/*.md"]
+exclude = ["BACKLOG.md"]
+kind = "method"
+
+[[source]]
+name = "portfolio"
+type = "html"
+path = "tests/fixtures/evidence/about.html"
+kind = "narrative"
+
+[[guard]]                                         # never embedded; Phase 4 prompt material only
+name = "claim_guards"
+path = "tests/fixtures/evidence/guards.csv"
+text_columns = ["do_not_claim"]

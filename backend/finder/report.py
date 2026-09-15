@@ -99,6 +99,31 @@ def _coverage_rows(con, meta: dict) -> list:
     return rows
 
 
+def coverage_parts(c_req=None, c_role=None, n_req=None, n_req_s=None, n_req_p=None, n_role=None, n_role_s=None,
+                   n_role_p=None, gaps=None, matches=None) -> list:
+    """Fit-stanza coverage figures (§15.4 / §16.3): required (the gated one) and role, with their counts."""
+    out = []
+    if c_req is not None:
+        out.append(f"coverage required {c_req:.0f} ({n_req_s} of {n_req} strong, {n_req_p} partial)")
+    if c_role is not None:
+        out.append(f"role {c_role:.0f} ({n_role_s} of {n_role} strong, {n_role_p} partial)")
+    return out
+
+
+def coverage_detail(c_req=None, c_role=None, n_req=None, n_req_s=None, n_req_p=None, n_role=None, n_role_s=None,
+                    n_role_p=None, gaps=None, matches=None) -> list:
+    """Gaps and the best matched requirement for the stanza (each trimmed; pipes and newlines removed)."""
+    out = []
+    gap_list = [_cell(g)[:140] for g in _as_list(gaps)]
+    if gap_list:
+        out.append("gaps: " + "; ".join(gap_list))
+    match_list = _as_list(matches)
+    if match_list:
+        m = match_list[0]
+        out.append(f"matched: {_cell(m[0])[:100]} ← {_cell(m[1])[:60]} ({m[3]}, {m[2]:.2f})")
+    return out
+
+
 def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_blocks: int = 15,
                      block_min_band: str = "strong", table_min: int = 50, table_cap: int = 150,
                      passed_cap: int = 200, out_path=None) -> Path:
@@ -117,8 +142,10 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
     bands = _allowed_bands(block_min_band)
     blocks = con.execute(f"""
         SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier, v.rule_score,
-               v.fit_prob, v.embed_sim, v.top_terms, v.flags, p.description_text
-        FROM vw_shortlist v JOIN postings p USING (posting_id)
+               v.fit_prob, v.embed_sim, v.top_terms, v.flags, p.description_text,
+               c.coverage_required, c.coverage_role, c.n_required, c.n_required_strong, c.n_required_partial,
+               c.n_role, c.n_role_strong, c.n_role_partial, c.gaps, c.matches
+        FROM vw_shortlist v JOIN postings p USING (posting_id) LEFT JOIN vw_coverage_latest c USING (posting_id)
         WHERE v.band IN (SELECT unnest(?::VARCHAR[]))
           AND v.posting_id NOT IN (SELECT posting_id FROM surfaced
                                    WHERE surfaced_at >= now() - INTERVAL {SURFACED_DAYS} DAY)
@@ -188,12 +215,14 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
     if not blocks:
         w.append(f"_No row reached the block bar ({' / '.join(bands)}) this run._\n")
     for (pid, employer, title, url, score, band, tier, rule_score, fit_prob, embed_sim, top_terms, flags,
-         text) in blocks:
+         text, *cov) in blocks:
         parts = [f"profile {rule_score}"]
+        parts.extend(coverage_parts(*cov))
         if fit_prob is not None:
             parts.append(f"fit {fit_prob:.2f}")
         if embed_sim is not None:
             parts.append(f"embed {embed_sim:.2f}")
+        parts.extend(coverage_detail(*cov))
         terms = [t[0] if isinstance(t, (list, tuple)) else str(t) for t in _as_list(top_terms)]
         if terms:
             parts.append("top terms: " + ", ".join(terms))

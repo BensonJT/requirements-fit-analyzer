@@ -348,3 +348,82 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
 - **Component points:** `LEVEL_POINTS` senior 100 (years ≥ 8, band top at the ask, or unambiguous senior title) · mid 50 · not stated 60. `LOCATION_POINTS` remote 100 · commutable hybrid 80 · commutable on-site or unstated 70 · nationwide unverified 60. `PAY_POINTS` band top at the ask 100 · at the floor 75 · not posted 60 (unposted pay is unknown until a screening conversation). `TITLE_POINTS` tier 1 100 · tier 2 70 · tier 3 50 · no function term 30 · off-lane 0.
 - `RULE_POINTS`, `SCORE_WEIGHTS`, `rules.rule_points` and `rules.rule_max` are removed. The Fit stanza reads `profile N · fit x · …`.
 - **Fixes (same day, found on the Henry Schein R134977 bullseye):** (1) `required_years` reads "10 or more years", "15 years or more of experience", "a minimum of ten (10) years", "at least eight years'", "five to seven years", "(8) years" and "Experience: 12+ years" (number phrase before the year word, "experience" in the same sentence). (2) Flags already priced by a component cost no points (`UNPENALIZED_FLAG_PATTERNS`: ask above band top, local/hybrid, nationwide listing, mid level, few years asked, content fit borderline, faith signal); they stay visible and still send a posting to review.
+
+## 15. Amendment — Phase 3 becomes requirement coverage; Phase 4 gets a review ledger; context is configuration (2026-09-15, user decision; replaces §9 and extends §10)
+
+**Why.** The TF-IDF fit model (§8, §13) scores shared vocabulary, not context: senior roles in another function that use the same words (transformation, governance, change management) score as high as bullseyes. Context comes from sentences. Phase 3 therefore matches each requirement in a JD, by meaning, against evidence of what the user has actually done. Industry is never a negative by itself: a healthcare JD that asks for work the user has done covers well. The fit model stays as the cheap first gate (`FIT_REJECT`).
+
+### 15.1 Evidence (the user's background as data)
+
+- **Manifest, not code.** `evidence.local.toml` at the repo root (gitignored; path overridable with `JOBSEARCH_EVIDENCE`), parsed with `tomllib`. Committed `evidence.example.toml` uses neutral fixture files under `tests/fixtures/evidence/`. Sample shape:
+  ```toml
+  embed_model = "BAAI/bge-small-en-v1.5"
+  not_in_record = ["Tool X", "Certification Y"]     # never counted as covered; listed as a gap when a requirement names one
+
+  [[source]]
+  name = "resume_bullets"
+  type = "csv"                  # csv | markdown | pdf | html | text
+  path = "~/evidence/resume_bullets.csv"
+  text_columns = ["context_statement", "bullet"]   # joined per row
+  ref_columns = ["position", "project"]            # shown in the report as the match reference
+  kind = "achievement"          # achievement 1.0 | duty 0.9 | narrative 0.8 | method 0.7 (unit weight)
+
+  [[source]]
+  name = "articles"
+  type = "markdown"
+  path = "~/evidence/articles"
+  include = ["**/*.md"]
+  exclude = ["BACKLOG.md"]
+  kind = "method"
+
+  [[guard]]                     # never embedded as evidence; Phase 4 prompt material only
+  name = "claim_guards"
+  path = "~/evidence/guards.csv"
+  text_columns = ["do_not_claim"]
+  ```
+- **`backend/finder/evidence.py`**: `load_manifest(path)`, `iter_units(manifest)` → `EvidenceUnit(unit_id, source, kind, ref, text, weight)`. CSV = one unit per row (text columns joined; long rows split at sentence ends); markdown = paragraphs and list items, headings kept as `ref`; pdf = `pdftotext -layout` when on PATH, else optional `pypdf`, then paragraphs; html = `beautifulsoup4` visible text (nav, footer, script, style dropped), then paragraphs. Units 40–600 chars (longer split at sentence ends; shorter merged with the next in the same section). `unit_id = sha1(source|ref|text)[:20]`. Exact-duplicate text across sources is kept once (highest weight).
+- **Table** (append to `SCHEMA`): `evidence_units(unit_id PK, source, kind, ref, text, weight, model, vector FLOAT[384], content_hash, embedded_at)`. `evidence_version = sha1(sorted unit_ids + embed_model)[:12]`; a changed file changes the version, and only new unit_ids are embedded.
+- **CLI**: `finder.py evidence --check` (every source: path found, units, chars, 3 sample units, the `not_in_record` list; exit 1 on a missing path) · `finder.py evidence --rebuild` (embed missing units).
+
+### 15.2 Requirement units (the JD as claims to cover)
+
+- **`backend/finder/requirements.py`**: `split_requirements(text) -> list[Requirement(text, section, weight, klass)]`. HTML-unescape and `strip_boilerplate` first. Sections by heading (reuse `rules._heading_lines`): `REQUIRED_HEADINGS` → weight 1.0; new `RESPONSIBILITY_HEADINGS` (`responsibilit|what you.ll do|duties|the role|key accountabilities|in this role`) → 0.8; `PREFERRED_HEADINGS` → 0.4; about-the-company, benefits, pay, EEO sections dropped; no headings → every sentence at 0.7. Units = list items, else sentences; 25–400 chars (split on `;`); at most 40 per JD (highest weight first).
+- **Classes** (excluded from the coverage denominator, never scored as gaps; the rules already handle them): `level` (a years-of-experience line with no other skill content), `logistics` (location, travel, schedule, clearance, pay, work authorization), `domain` (an industry-tenure line matching `domain_tenure_rule`, shown as a note). Everything else is `work`.
+
+### 15.3 Coverage (`backend/finder/coverage.py`, `backend/finder/embed.py`)
+
+- **Encoder** (`embed.py`, the §9 loader): `EMBED_MODEL = "BAAI/bge-small-en-v1.5"`, 384-d, normalized; sentence-transformers, else fastembed, else a clear install hint; `JOBSEARCH_EMBED_BACKEND` overrides. bge query instruction on the requirement side only.
+- **Match**: each `work` requirement → cosine to every evidence unit (in memory: numpy matrix of evidence vectors; evidence is small); best score times the unit weight → `strong` (≥ `COVER_STRONG`), `partial` (≥ `COVER_PARTIAL`), else `gap`. A requirement naming a `not_in_record` term is a `gap` regardless. Keep the best evidence `ref` per requirement.
+- **Score**: `coverage = 100 · Σ w·credit / Σ w` over `work` units (strong 1.0, partial 0.5, gap 0). Fewer than 3 `work` units → coverage NULL (not enough to judge).
+- **Calibration** (`finder.py coverage --calibrate`): score the labeled positives (vw_label_set, career-site text where matched) and 1,500 pseudo-negatives; pick `COVER_STRONG` / `COVER_PARTIAL` to maximize the positives-vs-pseudo AUC of `coverage` on a grid (defaults 0.72 / 0.62 until calibrated); then `COVERAGE_REJECT` = positives' 5th percentile, `COVERAGE_REVIEW` = 15th. Stored as a `models` row of kind `coverage` (notes JSON holds the thresholds); `pipeline.combine` reads the newest.
+- **Table**: `coverage(posting_id, description_hash, evidence_version, model, coverage DOUBLE, n_work, n_strong, n_partial, gaps JSON, matches JSON, notes JSON, scored_at, PRIMARY KEY (posting_id, description_hash, evidence_version, model))`. `gaps` = the three highest-weight uncovered requirement texts; `matches` = up to five `[requirement, evidence ref, score]`; `notes` = domain lines. Screens pick up coverage by join; a posting is re-covered only when its JD hash or the evidence version changes.
+- **Which rows**: only rows that survive every hard rule and the fit gate (hundreds to low thousands). `finder.py coverage [--all] [--limit N]`; the daily sweep covers new or changed survivors after `screen`, then re-screens those rows so the final score uses coverage.
+
+### 15.4 Scoring (updates §14)
+
+- Content = `CONTENT_BLEND` (`{"coverage": 0.75, "fit": 0.25}`) over the signals present; coverage NULL → fit alone (the §14 behaviour). The §9 centroid similarity is dropped.
+- Content gate: coverage < `COVERAGE_REJECT` → reason `requirements not covered (N of M; gaps: …)`; < `COVERAGE_REVIEW` → flag `coverage borderline (N of M)`. The fit gate (§14) still runs first and decides which rows get coverage at all.
+- Fit stanza: `**Fit: ~88%.** profile 95 · coverage 84 (12 of 14 strong, 1 partial) · fit 0.97 · gaps: <gap 1>; <gap 2> · matched: <requirement> ← <evidence ref> · flags: …`.
+
+### 15.5 Phase 4 review ledger (extends §10)
+
+- **Table** `llm_reviews(posting_id, description_hash, rubric_version, scorer, score INTEGER, lane, level, blockers JSON, notes, reviewed_at, PRIMARY KEY (posting_id, description_hash, rubric_version, scorer))`. `rubric_version = sha1(RUBRIC_PUBLIC + RUBRIC_PERSONAL + not_in_record)[:12]`. **A posting whose (description_hash, rubric_version) already has a review from any scorer is never sent again** unless `--force`.
+- **Daily (free Gemma)**: `finder.py llm --top N` reviews the top N by final score among new or changed survivors with no review. Throttle from `.env`: `GEMINI_RPM`, `GEMINI_TPM` (tokens estimated as chars / 4, prompt + expected output); sleep to stay under both; 429 / 5xx back off (2 s, 8 s) then fall to the next model in `GEMINI_API_MODEL`. The JD is trimmed to its requirement and responsibility units (§15.2) to cut tokens.
+- **Backlog (Claude Code on the user's subscription, human-run)**: `finder.py llm-batch export --n 200 --out <dir>` writes numbered batch files (rubric, the claim guards, and per posting: id, title, employer, requirement units, the coverage gaps) plus the exact JSON schema to return; the user runs a Claude Code session over the batch; `finder.py llm-batch import <dir>` validates each JSON result and writes `llm_reviews` with `scorer = 'claude-code'`. No API calls are made for this path.
+- `combine` blends `llm_score` last (§6 `LLM_BLEND`) using the newest review for the current rubric version.
+
+### 15.6 Public users: context is configuration
+
+- **Four personal files, each with a committed example**: `.env` (paths, keys, rate limits), `backend/profile_local.py` (pay, places, limits), `backend/finder/rubric_local.py` (candidate profile prose for the LLM), `evidence.local.toml` (what the user has done). Code never names a person, employer or path.
+- **`docs/SETUP_CONTEXT.md`**: what to gather (resume achievements as CSV or markdown, a bio, a LinkedIn PDF export, articles or portfolio pages), how to write evidence that matches well (one accomplishment per unit, the context included, the verb and the object explicit), a `not_in_record` list for tools and certifications the user does not hold, and a minimum setup (a single resume PDF works; coverage improves with achievement bullets).
+- **Privacy statement in the guide and the README**: the DuckDB file, embeddings, models and snapshots stay local and gitignored; the fit model and coverage run offline; the LLM tier sends the JD requirement units, the rubric and the claim guards, and never evidence text.
+- **`finder.py setup-check`**: `.env` keys present, `profile_local.py` imports, the evidence manifest parses and every path exists, optional dependencies (scikit-learn, sentence-transformers or fastembed, pdftotext or pypdf) with the install line for each missing one, DB schema version. Exit 1 on anything blocking.
+- **Contributors**: the `.personal_patterns` pre-commit scan stays documented in CLAUDE.md; tests use only `tests/fixtures/evidence/` and the example profile.
+
+### 15.7 Phase 3 acceptance (replaces the §11 Phase 3 line)
+
+- [ ] Tests (fake encoder, no model download): manifest parsing and every source type, unit splitting bounds, duplicate collapse, `FLOAT[384]` insert and `array_cosine_similarity`; `split_requirements` sections, weights, the three excluded classes; coverage credit math, `not_in_record` gap, NULL under 3 work units; combine with coverage + fit, coverage NULL fallback, the coverage gate; ledger never re-sends a reviewed (hash, rubric) pair; batch export / import round trip with a malformed result rejected.
+- [ ] `finder.py setup-check` and `evidence --check` pass on the builder's machine (every source found, unit counts printed) and fail clearly on a broken example.
+- [ ] `coverage --calibrate` prints thresholds and the positives-vs-pseudo AUC for coverage, fit and the blend; the paired vault-copy vs career-site-copy coverage gap is below 5 points (coverage should not care where a JD was copied from).
+- [ ] Eyeball (record in STATUS): the Henry Schein R134977 bullseye covers ≥ 80 with its gaps listed; CVS "Vice President & Chief Operating Officer, Medical Affairs", Novartis "Director, AI Foundations Engineer" and Centene "Senior Director, Medical Economics" each cover at least 20 points below it, with gaps that name the missing work; a JD in an unfamiliar industry asking for familiar work covers well (find one and record it); the top 30 of vw_shortlist before and after is listed, with the count of rows whose title has no function term.
+- [ ] Coverage of all survivors finishes in < 15 min on CPU; the sweep still runs with no embedding library installed (coverage skipped, logged).

@@ -435,3 +435,56 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
 - [ ] `finder.py llm-batch export --n 20` writes files a Claude Code session can work through without other context (rubric, guards, schema, per-posting units and coverage gaps); importing the results updates final scores through the §6 `LLM_BLEND`, visible in `vw_shortlist`.
 - [ ] Privacy: a test asserts no evidence-unit text appears in any Gemma prompt or batch file (only requirement units, the rubric and the guards).
 - [ ] Eyeball (record in STATUS): for the top 20 after coverage, the LLM `lane` agrees with the user's read on the bullseye (Henry Schein R134977 → primary) and on the three context misfires named in §15.7; disagreements listed.
+
+## 16. Amendment — Phase 3/4 audit findings (2026-09-16, Fable audit of §15; binding over §15 where they differ)
+
+**Verdict.** §15's direction stands: sentence-level requirement coverage against the user's evidence is the right lever for the near-miss problem, the review ledger is sound, and context-as-configuration is sound. Seven changes below make it measurable and keep it from reproducing the vocabulary flaw one level down.
+
+### 16.1 Calibrate against near misses, not random postings (replaces the §15.3 calibration paragraph)
+
+- **Hard-negative set** (`vw_hard_negatives`, new view): (a) postings the user marked `pass --reason function` (new `--reason` code `function`; nuance / logistics / comp passes stay context only, honouring §13); (b) an `audit_negatives` list in `profile_local.py` of posting ids the user has read and called wrong-function (seed: CVS VP & COO Medical Affairs, Novartis Dir AI Foundations Engineer, Centene Sr Dir Medical Economics, Humana Creative Operations Director, Centene VP Medicare Care Management, GE Vernova Plant Leader); (c) the 200 highest-fit unlabeled postings under the current fit model that carry no function term in the title (the model's own confident mistakes; refreshed each calibration, listed in the report so the user can promote any real fit to a label).
+- **Calibration target**: choose `COVER_STRONG` / `COVER_PARTIAL` on the grid to maximize AUC of **positives vs hard negatives**. Report positives-vs-pseudo AUC as a sanity figure only. `COVERAGE_REJECT` / `COVERAGE_REVIEW` = positives' 5th / 15th percentile as before, but the report must also print the hard-negative median so the user sees the separation, not just the thresholds.
+- **Precondition**: `finder.py mark` gains `--reason function|nuance|logistics|comp|other`; existing pass rows default to `other`.
+
+### 16.2 Kind weight scales credit, not similarity (replaces "best score times the unit weight" in §15.3)
+
+- Compare the **raw cosine** to `COVER_STRONG` / `COVER_PARTIAL`. Credit = band credit × evidence kind weight (strong 1.0 · partial 0.5, × achievement 1.0 / duty 0.9 / narrative 0.8 / method 0.7). Rationale: bge-small cosines for related sentences sit in a narrow band (~0.75–0.90); multiplying by 0.7 pushed every article and bio unit below the strong threshold by construction, which made seven of the nine evidence sources decorative.
+- `matches` JSON records the evidence **source and kind** per requirement; the §15.7 eyeball adds a source histogram (which sources drive coverage on the top 30) so the user can see whether bullets or narrative carry the score.
+
+### 16.3 Specific requirements count more than generic ones (adds to §15.2 and §15.3)
+
+- **Specificity weight.** After requirement units are embedded for the survivor set, each unit's weight is multiplied by `spec = clamp(log(N / df) / log(N), 0.2, 1.0)` where `df` = the number of distinct postings holding a near-duplicate unit (cosine ≥ `REQ_DUP` = 0.92 to any of that posting's units; computed with a single matrix product over the survivor units, cached in `requirement_units(posting_id, description_hash, unit_hash, text, section, weight, klass, vector)`). "Lead cross-functional teams" appears in thousands of JDs and drops to ~0.2; "map value streams for a shared-services function" stays ~1.0. Stored per unit so the report can show it.
+- **Two figures, one gate.** `coverage_required` (Required + Preferred sections) and `coverage_role` (Responsibility sections; every-sentence JDs count as role) are both stored. **The gate and the blend use `coverage_required`**; `coverage_role` is reported in the fit stanza and used only when `coverage_required` is NULL (< 3 work units in Required). Rationale: responsibilities describe the seat and match every senior generalist; requirements describe the person.
+- Cap stays 40 units per JD, chosen by section weight × specificity.
+
+### 16.4 Years lines keep their skill content (replaces the `level` class in §15.2)
+
+- A years-of-experience line is **not dropped**. `required_years` (rules) still reads the number for level. For coverage, strip the years phrase (`\b\d+\+?\s*(or more\s*)?years?\b[^,;:]*?(of|in)?\s*(experience|exp)\b(\s*(in|with|of))?`, the phrasings §14 parses) and keep the remainder as a `work` unit at the section weight when ≥ 25 chars remain ("10+ years in process improvement leading cross-functional teams" → "process improvement leading cross-functional teams"). Only a line with nothing left ("10+ years of experience.") is class `level`.
+
+### 16.5 Three tiers of record, not two (adds to §15.1 and §15.3)
+
+- `evidence.local.toml` gains `light_in_record = ["AWS", "Azure", "GCP", …]`: a requirement naming a light term can score at most **partial**, whatever the cosine (the user has touched the tool, task-driven, and is not a solutions engineer for it). `not_in_record` stays a forced gap. Both lists are term-matched on the requirement text with word bounds, case-insensitive; a requirement naming both a light and a not-in-record term is a gap. The report names the tier that capped the requirement.
+
+### 16.6 Coverage is proven before it is weighted (replaces the §15.4 blend rollout)
+
+- Phase 3 ships in two steps. **3a**: coverage computed and stored, shown in the fit stanza and `vw_shortlist` as columns, **weight 0** in content; the §15.7 eyeball runs on 3a. **3b** (only after the eyeball passes: Henry Schein R134977 ≥ 80 and each named misfire ≥ 20 points below it on `coverage_required`): set `CONTENT_BLEND` from the calibration report (the blend weight that maximizes positives-vs-hard-negative AUC on the grid {0.5, 0.6, 0.75, 0.9}, default 0.75) and turn on the coverage gate. Phase 4 does not start until 3b is on.
+
+### 16.7 Ledger: a rubric edit must not strand the backlog (replaces the last line of §15.5)
+
+- `combine` blends the **newest review for the posting's current description_hash from any rubric version**; a review whose rubric_version is not current is flagged `llm review stale (rubric)` and is not re-sent unless `--force` or `finder.py llm --refresh-stale --top N` (which re-reviews only the top N stale rows under the daily throttle). Rationale: with "never re-review" as the default, a wording change to the rubric would otherwise zero the LLM signal for every reviewed posting with no path back short of `--force` over the whole backlog.
+- `rubric_version` also hashes `RESPONSIBILITY_HEADINGS` and the unit-splitter version, so a splitter change is visible as staleness rather than silently reviewing different prompts under one version.
+
+### 16.8 Privacy: what leaves the machine, by path (replaces the privacy statement in §15.6)
+
+- **Google AI Studio, unpaid tier:** Google's Gemini API terms allow prompts and responses to be used to improve Google products and to be read by human reviewers. Treat anything sent on a free key as retained. **Paid tier** (billing enabled on the Cloud project): inputs are not used for training and are held only for abuse monitoring.
+- Therefore two prompt profiles, chosen in `.env` by `LLM_PROMPT_PROFILE`:
+  - `public` (default; safe on the free tier): sends the JD's requirement units, `rubric.RUBRIC_PUBLIC`, and a **neutral role description** (`RUBRIC_LANE`: the target function, level and lane in generic terms, committed in `rubric.py`). Never sends `RUBRIC_PERSONAL`, the claim guards, `not_in_record` / `light_in_record`, or evidence text.
+  - `personal` (paid tier, or a local model): adds `RUBRIC_PERSONAL` and the claim guards. `finder.py llm` refuses `personal` unless `GEMINI_PAID_TIER=1` is set, and says why.
+  - The **Claude Code batch path** (§15.5) always uses `personal`; the files stay on disk, gitignored under `db/batches/`.
+- The README privacy paragraph states the three paths in one line each. `git grep` of `.personal_patterns` stays the pre-commit guard; `db/batches/`, `evidence.local.toml`, `rubric_local.py`, `profile_local.py` are gitignored and `setup-check` confirms it.
+
+### 16.9 Acceptance additions
+
+- §15.7 adds: hard-negative view populated (count printed); calibration report prints positives-vs-hard-negative AUC for `coverage_required`, `coverage_role`, fit, and each blend weight; specificity weights spot-checked (the five most generic and five most specific units on the survivor set listed); a years line with content yields a work unit (test); a `light_in_record` term caps at partial (test); step 3a runs with weight 0 and the stanza shows both coverage figures.
+- §15.8 adds: the `public` profile prompt contains no string from `RUBRIC_PERSONAL`, the guards file, or the evidence store (test); `personal` refuses without `GEMINI_PAID_TIER=1` (test); a stale-rubric review still blends and is flagged (test).
+- §12 (Phase 5) adds: Batch Mode skill documents the new fit-stanza fields (coverage required / role, gaps, matched, review staleness).

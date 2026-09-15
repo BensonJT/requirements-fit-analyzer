@@ -291,7 +291,7 @@ Rules: a blank line before and after every `---`; one block per escalated row; t
 - `predict(model, texts)`, `top_terms(model, text, k=6)` (tf-idf row × `coef_`, top positive contributions), `load_latest(con)`.
 - Also print a **hard-negatives** list: top 20 `fit_prob` among label 0 docs, with source refs.
 
-## 9. Phase 3 details (embeddings)
+## 9. Phase 3 details (embeddings) — SUPERSEDED by §15 (requirement coverage); the encoder loader and FLOAT[384] storage carry over, the centroid does not
 
 - `EMBED_MODEL = "BAAI/bge-small-en-v1.5"`, `EMBED_DIM = 384`. `load_encoder(backend=None)`: try `sentence_transformers.SentenceTransformer`, else `fastembed.TextEmbedding`, else raise with an install hint; `JOBSEARCH_EMBED_BACKEND` overrides.
 - `chunks(text, size=1500, max_chunks=4)` after `strip_boilerplate`; encode chunks, mean-pool, L2-normalize.
@@ -299,7 +299,7 @@ Rules: a blank line before and after every `---`; one block per escalated row; t
 - `positive_centroid(con, encoder)`: mean of label-1 `vw_label_set` texts (encode on the fly; cache `db/models/centroid_<version>.npy`). `similarity(con, posting_ids, centroid)` via `array_cosine_similarity(vector, ?::FLOAT[384])`. `calibrate(con, centroid)`: `embed_lo` = 10th percentile of label-0 cosines, `embed_hi` = 90th percentile of label-1 cosines; insert a `models` row of kind `embed_centroid`.
 - Full-corpus embed (`--all`) is a one-time background job (~45–90 min CPU); the daily path embeds only screen survivors.
 
-## 10. Phase 4 details (optional LLM)
+## 10. Phase 4 details (optional LLM) — EXTENDED by §15.5 (review ledger, rate limits, Claude Code batch path); where they differ §15.5 wins
 
 - `llm.py`: `httpx` POST to `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=…` with `response_mime_type: application/json`; prompt = `rubric.RUBRIC_PUBLIC` + `rubric_local.RUBRIC_PERSONAL` + title/employer/JD (trimmed to 12k chars); parse `{"score": int, "lane": str, "level": str, "blockers": [str], "notes": str}`. Models from `GEMINI_API_MODEL` in order; on 429/5xx/timeout back off (2 s, 8 s) then fall to the next model. Pace ≤ 30 requests/min.
 - `score_top(con, n, rules_version, model_version)`: top n of `vw_shortlist` without `llm_score` for the current versions; `UPDATE screens SET llm_score, llm_notes, final_score, band`. `--dry-run` prints the prompts and calls nothing.
@@ -317,8 +317,8 @@ Phase 1 (rules, report, snapshots, tracker, decisions):
 - [ ] `git grep --untracked … .personal_patterns` empty; `git status` shows no `db/models`, `db/snapshots`, `rubric_local.py`, `profile_local.py`.
 
 Phase 2: `finder labels --report` shows ≥ 250 positive docs with text and ≥ 150 non-pseudo negatives with text (or the warning path is exercised); `finder train --report` 5-fold AUC ≥ 0.85; positives' mean `fit_prob` > 0.7; the hard-negative list is printed and plausible; `top_terms` in the Fit stanza reads sensibly.
-Phase 3: `FLOAT[384]` insert and cosine query proven by a test with a fake encoder; Applications JDs' cosine to the centroid clearly above the corpus median (print both); `--no-embed` works.
-Phase 4: `finder llm --top 5 --dry-run` prints prompts without a call; a real run stores five `llm_score`s; model fallback path unit-tested with a mocked 429.
+Phase 3 (superseded by §15.7): `FLOAT[384]` insert and cosine query proven by a test with a fake encoder; Applications JDs' cosine to the centroid clearly above the corpus median (print both); `--no-embed` works.
+Phase 4 (superseded by §15.8): `finder llm --top 5 --dry-run` prints prompts without a call; a real run stores five `llm_score`s; model fallback path unit-tested with a mocked 429.
 Phase 5: vault edits listed in §12 done; STATUS.md rewritten; README section "Finding" added.
 
 Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test suite, run `finder.py shortlist --days 30 --n 30`, open the newest pipeline Jobs_Found file, spot-check 10 rows against the rules in the vault skills, run the eyeball SQL above, diff `profile.py` against this spec, and check that no personal value leaked into a tracked file.
@@ -427,3 +427,11 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
 - [ ] `coverage --calibrate` prints thresholds and the positives-vs-pseudo AUC for coverage, fit and the blend; the paired vault-copy vs career-site-copy coverage gap is below 5 points (coverage should not care where a JD was copied from).
 - [ ] Eyeball (record in STATUS): the Henry Schein R134977 bullseye covers ≥ 80 with its gaps listed; CVS "Vice President & Chief Operating Officer, Medical Affairs", Novartis "Director, AI Foundations Engineer" and Centene "Senior Director, Medical Economics" each cover at least 20 points below it, with gaps that name the missing work; a JD in an unfamiliar industry asking for familiar work covers well (find one and record it); the top 30 of vw_shortlist before and after is listed, with the count of rows whose title has no function term.
 - [ ] Coverage of all survivors finishes in < 15 min on CPU; the sweep still runs with no embedding library installed (coverage skipped, logged).
+
+### 15.8 Phase 4 acceptance (replaces the §11 Phase 4 line)
+
+- [ ] Tests (no network): prompt assembly from `rubric.RUBRIC_PUBLIC` + `rubric_local.RUBRIC_PERSONAL` + claim guards + requirement units; JSON result validation (score 0–100, lane, level, blockers list) with a malformed reply rejected and logged; the throttle never exceeds `GEMINI_RPM` or `GEMINI_TPM` over a simulated minute; 429 → back off → next model in `GEMINI_API_MODEL` (mocked); a (posting, description_hash, rubric_version) already in `llm_reviews` from any scorer is never selected again, and a changed JD hash or rubric version makes it eligible; `llm-batch export` → hand-written result files → `import` round trip writes `scorer = 'claude-code'` rows and refuses ids that were not exported.
+- [ ] `finder.py llm --top 5 --dry-run` prints the five prompts and their estimated tokens and makes no call; a real run with the free key stores five `llm_reviews` rows and re-running it selects five different postings.
+- [ ] `finder.py llm-batch export --n 20` writes files a Claude Code session can work through without other context (rubric, guards, schema, per-posting units and coverage gaps); importing the results updates final scores through the §6 `LLM_BLEND`, visible in `vw_shortlist`.
+- [ ] Privacy: a test asserts no evidence-unit text appears in any Gemma prompt or batch file (only requirement units, the rubric and the guards).
+- [ ] Eyeball (record in STATUS): for the top 20 after coverage, the LLM `lane` agrees with the user's read on the bullseye (Henry Schein R134977 → primary) and on the three context misfires named in §15.7; disagreements listed.

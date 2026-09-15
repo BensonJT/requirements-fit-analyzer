@@ -169,7 +169,7 @@ COMP_ASK = None            # small score bonus when the band top reaches this
 HOURLY_ANNUALIZE = 2_000   # hourly x this = annual
 HOME = None                # e.g. "Springfield, IL"; used for local search lanes
 LOCAL_RADIUS_KM = 80
-COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state ("springfield, il")
+COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state, "name, st?" also accepts no state
 
 TRAVEL_MAX_PCT = None      # travel percent limit; None skips the travel rule
 MAX_DIRECT_REPORTS = None  # direct-report limit; None skips the team-size rule

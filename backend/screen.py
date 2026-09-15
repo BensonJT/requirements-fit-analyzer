@@ -116,23 +116,28 @@ def place_matches(location: str, places) -> list:
     The string is split on ';' and '|' so several locations in one field are judged separately.
     An entry "name, st" (st = a US state code) pins the state: the segment must name that state.
     So "springfield, il" matches "Springfield, IL", "US-IL-Springfield" and "Springfield, Illinois",
-    but not "Springfield, MO", "Springfield, Ontario", "8351 W Springfield" or a bare "Springfield"
-    (a city with no state is ambiguous). An entry without a state code matches anywhere.
+    but not "Springfield, MO", "Springfield, Ontario" or a bare "Springfield".
+    "name, st?" makes the state optional: the segment may name that state or no US state at all, so a
+    bare "Springfield" matches but "Springfield, MO" still does not. An entry without a state matches anywhere.
     """
     hits = []
     for entry in places or []:
         name, _, code = entry.rpartition(",")
         code = code.strip().upper()
+        optional = code.endswith("?")
+        code = code.rstrip("?")
         if not name.strip() or code not in _STATES:
-            name, code = entry, None
+            name, code, optional = entry, None, False
         name = name.strip().lower()
         if not name:
             continue
         for segment in re.split(r"[;|]", location or ""):
             if not re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", segment.lower()):
                 continue
-            if code and code not in states_in(segment):
-                continue
+            if code:
+                states = states_in(segment)
+                if code not in states and not (optional and not states):
+                    continue
             hits.append(entry)
             break
     return hits

@@ -109,6 +109,11 @@ def test_place_matching_pins_the_state():
                 "Indianapolis-8351 W Springfield", "Springfield, MO; Peoria, IL", "Springfield"):
         assert S.place_matches(loc, places) == [], loc
     assert S.place_matches("Chatham, NJ", places) == ["chatham"]          # no state on the entry: anywhere
+    optional = ["chatham, il?"]                                            # state optional: that state or none
+    for loc in ("Chatham", "Chatham (Hybrid)", "Chatham, IL", "US-IL-Chatham"):
+        assert S.place_matches(loc, optional) == optional, loc
+    for loc in ("Chatham, NJ", "NJ - Chatham", "Chatham, New Jersey; Peoria, IL"):
+        assert S.place_matches(loc, optional) == [], loc
     assert S.place_matches("Bluefield, Virginia", ["bluefield, va"]) == ["bluefield, va"]
     assert S.place_matches("Bluefield, West Virginia", ["bluefield, va"]) == []   # "west virginia" is not VA
     dc = ["washington, dc"]

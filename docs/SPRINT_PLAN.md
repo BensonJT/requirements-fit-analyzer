@@ -481,6 +481,7 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
   - `public` (default; safe on the free tier): sends the JD's requirement units, `rubric.RUBRIC_PUBLIC`, and a **neutral role description** (`RUBRIC_LANE`: the target function, level and lane in generic terms, committed in `rubric.py`). Never sends `RUBRIC_PERSONAL`, the claim guards, `not_in_record` / `light_in_record`, or evidence text.
   - `personal` (paid tier, or a local model): adds `RUBRIC_PERSONAL` and the claim guards. `finder.py llm` refuses `personal` unless `GEMINI_PAID_TIER=1` is set, and says why.
   - The **Claude Code batch path** (§15.5) always uses `personal`; the files stay on disk, gitignored under `db/batches/`.
+- **Owner's setting (2026-09-16):** the key in use has billing enabled, so `personal` is allowed; data terms follow the project's billing status, not the volume. Cost stays zero because Gemma models are priced at $0 on the Gemini API and `GEMINI_RPM` / `GEMINI_TPM` / `GEMINI_DAILY_CAP` (new, requests per day) hold usage inside the free quota. `finder.py llm` prints requests used today against the cap. The builder verifies the $0 Gemma price on the pricing page at build time; a non-zero price makes `--top` default to 0 until the user sets it.
 - The README privacy paragraph states the three paths in one line each. `git grep` of `.personal_patterns` stays the pre-commit guard; `db/batches/`, `evidence.local.toml`, `rubric_local.py`, `profile_local.py` are gitignored and `setup-check` confirms it.
 
 ### 16.9 Acceptance additions

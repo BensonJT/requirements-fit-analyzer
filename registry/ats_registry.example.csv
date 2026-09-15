@@ -7,3 +7,4 @@ Dandy,ashby,dandy,,,,example,Ashby: org slug from jobs.ashbyhq.com/<slug> (URL-e
 Credence,workable,credence,,,,example,Workable: account slug from apply.workable.com/<slug>
 Biblica,bamboohr,biblica,,,,example,BambooHR: subdomain from <sub>.bamboohr.com
 ServiceNow,smartrecruiters,ServiceNow,,,,example,"SmartRecruiters: company id, CASE-SENSITIVE (a wrong id returns 200 with zero jobs)"
+Microsoft,eightfold,https://apply.careers.microsoft.com,microsoft.com,,,example,"Eightfold: careers host URL + company domain (from the site's ?domain= query); ~2,200 postings, 10 per page"

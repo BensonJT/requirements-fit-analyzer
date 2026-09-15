@@ -478,6 +478,149 @@ def smartrecruiters_detail(row, posting):
 
 
 # ================================================================ dispatch
+
+# ================================================================ Eightfold
+# Two public API flavors exist, and a tenant answers one or the other:
+#   apply/v2/jobs  — richer list (Liberty Mutual); 403 on some tenants (Microsoft)
+#   pcsx/search    — thin list (Microsoft, Omnicell); wraps the payload in {"data": ...}
+# Both page 10 at a time no matter what `num` says. The list's job_description is a
+# truncated preview on apply/v2 and absent on pcsx, so the detail call
+# (apply/v2/jobs/<id>, which works even where the apply/v2 list is refused) always
+# supplies the JD. Registry: identifier_1 = host URL, identifier_2 = domain.
+EIGHTFOLD_PAGE = 10
+
+
+def _eightfold_base(row):
+    host = row["identifier_1"].rstrip("/")
+    domain = row["identifier_2"]
+    if not host.startswith("http") or not domain:
+        raise ValueError(f"{row['employer']}: Eightfold row needs host URL (identifier_1) and domain (identifier_2)")
+    return host, domain
+
+
+def _eightfold_workplace(value, *locs):
+    v = (value or "").lower()
+    if v.startswith("remote"):
+        return "remote"
+    return N.workplace_type(v or None, *locs)
+
+
+def _eightfold_position(host, p):
+    """One list record (either flavor) -> normalized posting. Never sets
+    description_text: the list JD is a preview, and the detail stage fills it."""
+    ef_id = p.get("id")
+    locs = [l for l in (p.get("locations") or []) if l]
+    if p.get("location") and p["location"] not in locs:
+        locs.insert(0, p["location"])
+    url = p.get("canonicalPositionUrl") or (host + p["positionUrl"] if p.get("positionUrl") else f"{host}/careers/job/{ef_id}")
+    posted = p.get("postedTs") or p.get("t_update") or p.get("creationTs") or p.get("t_create")
+    # Eightfold's own id is the unique key; a display_job_id is reused when one req is
+    # posted in several locations (Microsoft: 21 of 2,240 on 2026-09-15). The display id
+    # stays in raw_json.
+    return N.base(
+        req_id=str(ef_id),
+        title=p.get("name") or p.get("posting_name"),
+        url=url,
+        location_primary=locs[0] if locs else None,
+        locations=N.locations_json(locs),
+        workplace_type=_eightfold_workplace(p.get("work_location_option") or p.get("workLocationOption"), *locs),
+        job_family=p.get("department") or None,
+        posted_at=N.parse_date(posted),
+        raw_json=N.raw({k: v for k, v in p.items() if k != "job_description"}),
+        _ef_id=ef_id,
+    )
+
+
+def _eightfold_pages(c, url, host, max_pages):
+    """One ordered pass over a board. Returns (postings, count, truncated)."""
+    out, start, total, pages = [], 0, None, 0
+    while True:
+        data = _request(c, "GET", f"{url}&start={start}&num={EIGHTFOLD_PAGE}").json()
+        if "data" in data and "positions" not in data:  # pcsx wrapper
+            data = data["data"] or {}
+        positions = data.get("positions") or []
+        if total is None:
+            total = int(data.get("count") or 0)
+        out.extend(_eightfold_position(host, p) for p in positions)
+        pages += 1
+        start += EIGHTFOLD_PAGE
+        if not positions or start >= total:
+            return out, total, False
+        if max_pages and pages >= max_pages:
+            return out, total, True
+        time.sleep(PAGE_DELAY)
+
+
+def eightfold_jobs(row, max_pages=None):
+    host, domain = _eightfold_base(row)
+    with client() as c:
+        base = None
+        for cand in (f"{host}/api/apply/v2/jobs?domain={domain}", f"{host}/api/pcsx/search?domain={domain}"):
+            resp = c.get(f"{cand}&start=0&num=1")
+            if resp.status_code == 403:
+                continue
+            resp.raise_for_status()
+            base = cand
+            break
+        if base is None:
+            raise RuntimeError(f"{row['employer']}: both Eightfold list endpoints refused (403)")
+
+        # Pages shift while a long pull runs: a posting the employer refreshes jumps to
+        # the top of the timestamp order and everything under it moves one slot, so a
+        # 224-page pull (Microsoft) both repeats and skips postings. A second pass in the
+        # other order fills most gaps; if the union is still short of the board's own
+        # count, the pull is reported truncated so nothing gets closed on its account.
+        seen = {}
+        truncated = False
+        for order in ("timestamp", "relevance"):
+            got, total, cut = _eightfold_pages(c, f"{base}&sort_by={order}", host, max_pages)
+            truncated = truncated or cut
+            for p in got:
+                seen.setdefault(p["req_id"], p)
+            if cut or len(seen) >= total:
+                break
+    # The board's own count also moves during a long pull (Microsoft: 2,240 -> 2,237 in
+    # 200 s), so an exact match is rare on a big board. A union within 0.5% (at least 3)
+    # of the count is treated as complete; a missed posting that was already in the DB
+    # is closed and then reopened on the next run, which is self-healing.
+    out = list(seen.values())
+    if truncated or len(out) < total - max(3, int(total * 0.005)):
+        return Truncated(out)
+    return out
+
+
+def _eightfold_detail_fields(d, posting):
+    locs = [l for l in (d.get("locations") or []) if l]
+    if d.get("location") and d["location"] not in locs:
+        locs.insert(0, d["location"])
+    text = N.html_to_text(d.get("job_description"))
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        location_primary=locs[0] if locs else posting.get("location_primary"),
+        locations=N.locations_json(locs) if locs else posting.get("locations"),
+        workplace_type=_eightfold_workplace(d.get("work_location_option"), *locs) or posting.get("workplace_type"),
+        job_family=d.get("department") or posting.get("job_family"),
+        posted_at=N.parse_date(d.get("t_update") or d.get("t_create")) or posting.get("posted_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def eightfold_detail(row, posting):
+    host, domain = _eightfold_base(row)
+    ef_id = posting.get("_ef_id")
+    if ef_id is None:
+        m = re.search(r"/job/(\d+)", posting.get("url") or "")
+        if not m:
+            raise ValueError("posting has no Eightfold id to fetch detail with")
+        ef_id = m.group(1)
+    with client() as c:
+        d = _request(c, "GET", f"{host}/api/apply/v2/jobs/{ef_id}?domain={domain}").json()
+    if not d.get("id"):
+        raise Gone(f"empty detail for {ef_id}")
+    return _eightfold_detail_fields(d, posting)
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -487,6 +630,7 @@ _LIST = {
     "workable": workable_jobs,
     "bamboohr": bamboohr_jobs,
     "smartrecruiters": smartrecruiters_jobs,
+    "eightfold": eightfold_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -494,6 +638,7 @@ _DETAIL = {
     "workable": workable_detail,
     "bamboohr": bamboohr_detail,
     "smartrecruiters": smartrecruiters_detail,
+    "eightfold": eightfold_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

@@ -124,3 +124,86 @@ def test_detail_candidates_since_limits_to_new_postings(tmp_path):
     backlog = store.detail_candidates(con, ["workday"], None, 100, employers=["Acme"])
     assert {r[3] for r in backlog} == {"OLD1", "OLD2", "NEW1"}
     assert store.detail_candidates(con, ["greenhouse"], None, 100, since=run_start) == []
+
+
+# ---------------------------------------------------------------- eightfold
+from backend.ats import adapters as A  # noqa: E402
+
+_PCSX_POS = {"id": 1970393556997347, "displayJobId": "200055573", "name": "Cloud & AI Solution Engineer",
+             "locations": ["Nigeria, Multiple Locations, Multiple Locations"], "postedTs": 1789480465,
+             "department": "Solution Engineering", "workLocationOption": "onsite",
+             "atsJobId": "200055573", "positionUrl": "/careers/job/1970393556997347"}
+_V2_POS = {"id": 618519792883, "name": "Remote Inside Sales Representative", "location": "Butte, Montana, United States",
+           "locations": ["Butte, Montana, United States"], "department": "Sales", "t_update": 1789478940,
+           "display_job_id": "2026-261870", "job_description": "Apply Today - a truncated preview",
+           "work_location_option": "remote_local", "canonicalPositionUrl": "https://libertymutual.eightfold.ai/careers/job/618519792883"}
+
+
+def test_eightfold_pcsx_position_maps_thin_list():
+    p = A._eightfold_position("https://apply.careers.microsoft.com", _PCSX_POS)
+    assert p["req_id"] == "1970393556997347"      # Eightfold id, not the reusable display id
+    assert p["title"] == "Cloud & AI Solution Engineer"
+    assert p["url"] == "https://apply.careers.microsoft.com/careers/job/1970393556997347"
+    assert p["location_primary"] == "Nigeria, Multiple Locations, Multiple Locations"
+    assert p["workplace_type"] == "onsite"
+    assert p["posted_at"] == date(2026, 9, 15)
+    assert p["description_text"] is None          # list never supplies the JD
+    assert p["_ef_id"] == 1970393556997347
+
+
+def test_eightfold_v2_position_keys_on_eightfold_id_and_drops_preview():
+    p = A._eightfold_position("https://libertymutual.eightfold.ai", _V2_POS)
+    assert p["req_id"] == "618519792883"
+    assert p["raw_json"] and "2026-261870" in p["raw_json"]
+    assert p["workplace_type"] == "remote"
+    assert p["description_text"] is None
+    assert "job_description" not in p["raw_json"]
+
+
+def test_eightfold_detail_fields_fill_description_and_pay():
+    d = {"id": 618519792883, "location": "Butte, Montana, United States", "locations": [],
+         "work_location_option": None, "t_update": 1789478940,
+         "job_description": "<b>Pay</b><br>The range is $85,000 - $105,000 annually."}
+    posting = A._eightfold_position("https://libertymutual.eightfold.ai", _V2_POS)
+    f = A._eightfold_detail_fields(d, posting)
+    assert f["description_text"].startswith("Pay")
+    assert (f["pay_min"], f["pay_max"], f["pay_interval"], f["pay_source"]) == (85000, 105000, "year", "text")
+    assert f["workplace_type"] == "remote"         # falls back to the list's flag
+    assert f["location_primary"] == "Butte, Montana, United States"
+
+
+def test_eightfold_registered():
+    assert "eightfold" in A.IMPLEMENTED_PLATFORMS and "eightfold" in A.DETAIL_PLATFORMS
+
+
+def test_eightfold_union_of_two_orders_and_truncation(monkeypatch):
+    """Simulates page drift: the timestamp pass misses one posting, the relevance pass
+    has it; a board whose union is still short is reported Truncated."""
+    calls = []
+
+    def fake_pages(c, url, host, max_pages):
+        calls.append(url)
+        if "timestamp" in url:
+            return [A._eightfold_position(host, {"id": 1, "name": "A"}), A._eightfold_position(host, {"id": 2, "name": "B"})], 3, False
+        return [A._eightfold_position(host, {"id": 2, "name": "B"}), A._eightfold_position(host, {"id": 3, "name": "C"})], 3, False
+
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url): return FakeResp()
+
+    monkeypatch.setattr(A, "_eightfold_pages", fake_pages)
+    monkeypatch.setattr(A, "client", lambda: FakeClient())
+    row = {"employer": "X", "identifier_1": "https://x.eightfold.ai", "identifier_2": "x.com"}
+    got = A.eightfold_jobs(row)
+    assert sorted(p["req_id"] for p in got) == ["1", "2", "3"]
+    assert len(calls) == 2 and not getattr(got, "truncated", False)
+
+    # Still short after both passes -> Truncated, so the close pass is skipped.
+    monkeypatch.setattr(A, "_eightfold_pages", lambda c, u, h, m: ([A._eightfold_position(h, {"id": 1, "name": "A"})], 5, False))
+    got = A.eightfold_jobs(row)
+    assert getattr(got, "truncated", False) and len(got) == 1

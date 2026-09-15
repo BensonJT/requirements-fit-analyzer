@@ -22,7 +22,7 @@ flowchart LR
     R[Registry CSV<br/>employer → ATS + ids] --> P[Pull every board<br/>8 in parallel]
     P --> U[Upsert<br/>one transaction per board]
     U --> C[Close postings missing<br/>from a clean pull]
-    C --> N[Fetch JDs for NEW postings<br/>Workday · Oracle · Workable ·<br/>BambooHR · SmartRecruiters]
+    C --> N[Fetch JDs for NEW postings<br/>Workday · Oracle · Workable ·<br/>BambooHR · SmartRecruiters · Eightfold]
     N --> B[Fetch JDs for older backlog<br/>small budget, newest first]
     B --> D[(DuckDB<br/>postings)]
 ```
@@ -67,11 +67,13 @@ Run b2213154 done in 17.4 min: 124 boards ok, 1 failed, 76431 live postings, 549
 | Workable | title, locations, workplace type, date | yes | account slug |
 | BambooHR | title, location, department | yes | subdomain |
 | SmartRecruiters | title, location, remote/hybrid, date, level | yes | company ID (case-sensitive) |
+| Eightfold | title, locations, workplace flag, date, department | yes | host URL, domain |
 
 **Not supported:**
 - **iCIMS** answers scripted requests with a human-verification page.
 - **Dayforce** returns 403 even with cookies and CSRF tokens.
-- **Taleo, Eightfold, Phenom, SuccessFactors, ADP, UKG, and Paylocity** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
+- **Taleo** has no public JSON. Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
+- **Phenom, SuccessFactors, ADP, UKG, and Paylocity** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
 
 ## Setup
 
@@ -127,11 +129,13 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 | `https://apply.workable.com/credence/j/...` | `workable` | `credence` |
 | `https://biblica.bamboohr.com/careers/64` | `bamboohr` | `biblica` |
 | `https://jobs.smartrecruiters.com/ServiceNow/...` | `smartrecruiters` | `ServiceNow` |
+| `https://apply.careers.microsoft.com/careers/job/123` | `eightfold` | `https://apply.careers.microsoft.com`, `microsoft.com` |
 
 **Things that trip people up:**
 - **Vanity careers sites hide the ATS.** A branded site like `careers.example.com` is often a front end for Workday or Oracle. Click Apply and watch where you land.
 - **A Workday tenant name isn't always the company name.** Amentum's jobs live on the `pae` tenant from a company it acquired. RTX's live on `globalhr`.
 - **Workday's data center and site slug must match exactly.** A wrong data center returns 422, and a missing site slug returns 405.
+- **Eightfold's domain is the company's email domain, not the careers host.** Microsoft is `microsoft.com` on `apply.careers.microsoft.com`; Liberty Mutual is `libertymutual.com` on `libertymutual.eightfold.ai`. Some tenants answer only one of Eightfold's two list APIs, and the adapter tries both.
 
 Set `source` to `unresolved` to keep a row in the file without sweeping it.
 
@@ -242,6 +246,7 @@ The first sweep of a large Workday or Oracle board is the expensive part, becaus
 - **Only the employers you register.** It will not discover a company you've never heard of. Pair it with a job board for discovery.
 - **Adapters depend on undocumented endpoints.** They are the endpoints the vendors' own career sites use, and they have been stable, but a vendor can change one without notice. Check `vw_board_health` after each run.
 - **`first_seen_at` is when *you* started watching, not when the job was posted.** The day you add a board, every posting on it is new, so `new_postings(1)` will look like a hiring spree. Use `posted_at`, or `posted_within(days)`, for the job's real age. After the first sweep the two agree.
+- **Eightfold pages shift under a long pull.** The board is read ten postings at a time, and an employer refreshing a posting mid-pull moves it to the top and shifts every page below. The adapter reads the board in two orders and unions them. If the union is still more than half a percent short of the board's own count, the pull is marked truncated and closes nothing.
 - **Workday list dates are relative.** "Posted 3 Days Ago" is converted against the run date. "Posted 30+ Days Ago" stays empty until the detail fetch supplies the real date.
 - **Workday and Oracle rows are thin until their detail fetch runs.** Before that, a multi-site Workday posting has no location, and `workplace_type` is usually empty. Views that filter on location will miss those rows.
 - **Pay is often parsed from description text.** When the ATS has no salary field, a conservative regex pulls the first dollar range from the description. `pay_source` says which kind you're looking at. Treat `text` values as hints.

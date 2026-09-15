@@ -90,5 +90,5 @@ If `docs/SPRINT_PLAN.md` exists, it is a binding contract.
 This repo is public on GitHub (`origin` = git@github.com:BensonJT/jobsearch.git).
 - **Never commit personal data**: pay figures, home location, vault paths, names. Those go in
   gitignored `.env` (`JOBSEARCH_REGISTRY_DIR`, `JOBSEARCH_VAULT_DIR`) and `backend/profile_local.py`.
-- Before any commit, run: `git grep --untracked -n -i -E -f .personal_patterns -- . ':!.personal_patterns'` — must be empty. `.personal_patterns` is gitignored and holds the terms that must never appear.
+- Before any commit, run: `git grep --untracked -n -i -E -f .personal_patterns -- . ':!.personal_patterns' ':!LICENSE'` — must be empty. `.personal_patterns` is gitignored and holds the terms that must never appear.
 - The registry CSVs live outside the repo (vault); `registry/ats_registry.example.csv` is the public sample.

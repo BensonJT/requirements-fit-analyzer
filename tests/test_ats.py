@@ -215,7 +215,7 @@ def test_paylocity_positions_map_embedded_pagedata():
              "JobLocation": {"Name": "LI-Remote", "Metro": "US, Remote", "Country": "USA"},
              "IsRemote": False, "IsInternal": False, "HiringDepartment": "General & Administrative",
              "PublishedDate": "2026-08-31T14:34:33-05:00",
-             "Description": "<p>About Logos</p><p>Salary range $120,000 - $150,000 per year.</p>"},
+             "Description": "<p>About Logos</p><p>Salary range $120,000 - $145,000 per year.</p>"},
             {"JobId": 1, "JobTitle": "Internal only", "IsInternal": True, "Description": ""}]
     out = A._paylocity_positions(jobs)
     assert len(out) == 1
@@ -232,11 +232,11 @@ def test_paylocity_positions_map_embedded_pagedata():
 def test_paylocity_detail_strips_header_and_parses_pay():
     html = """<html><body><div class="job-preview-details"><div><a>Apply</a></div>
     <div><span>Job Type</span><span>Full-time</span></div><div>Description</div>
-    <div><p>About Logos</p><p>The salary range is $120,000 - $150,000 annually.</p></div></div></body></html>"""
+    <div><p>About Logos</p><p>The salary range is $120,000 - $145,000 annually.</p></div></div></body></html>"""
     f = A._paylocity_detail_fields(html, {})
     assert f["description_text"].startswith("About Logos")
     assert f["employment_type"] is not None
-    assert (f["pay_min"], f["pay_max"], f["pay_interval"], f["pay_source"]) == (120000, 150000, "year", "text")
+    assert (f["pay_min"], f["pay_max"], f["pay_interval"], f["pay_source"]) == (120000, 145000, "year", "text")
 
 
 def test_paylocity_pagedata_regex_finds_block():

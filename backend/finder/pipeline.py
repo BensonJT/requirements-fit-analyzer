@@ -161,8 +161,8 @@ def model_scores(model: Optional[dict], rows: list) -> tuple:
     from . import features
     idx = [i for i, r in enumerate(rows) if (r.get("description_text") or "").strip()]
     if idx:
-        p, t = features.predict_with_terms(model, [features.doc_text(rows[i]["title"], rows[i]["description_text"])
-                                                   for i in idx])
+        p, t = features.predict_with_terms(model, [features.doc_text(rows[i]["title"], rows[i]["description_text"],
+                                                                     rows[i]["employer"]) for i in idx])
         for j, i in enumerate(idx):
             probs[i], terms[i] = p[j], t[j]
     return probs, terms

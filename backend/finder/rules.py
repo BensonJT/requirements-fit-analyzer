@@ -9,6 +9,7 @@ written for ~500-character aggregator snippets and matches substrings, so on a f
 "implant" counts as "plant". `discipline_rule` re-runs that test on the full JD with word
 boundaries and a business-process counterweight, and its output replaces section 4's.
 """
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ SUPERSEDED_PREFIXES = (
     "different discipline (plant/industrial",
     "plant/manufacturing vocabulary on listing",
     "engineer title -- apply the discipline test",
+    "below target level (",   # superseded by level_rule: years + pay decide level, not "associate"
 )
 
 
@@ -237,6 +239,90 @@ def coding_test_rule(title: str, text: str) -> RuleResult:
     return ([f"coding-test signal ({hits[0]})"], [], {}) if hits else ([], [], {})
 
 
+# ---------------------------------------------------------------- level, workplace, country
+# "10+ years of experience", "5-7 years' experience", "(8) years ... experience", "experience: 10+ years".
+# A range counts by its lower bound. Only numbers tied to "experience" count, so "within 2 years of hire" does not.
+_YEARS = re.compile(
+    r"(?<![\d.])\(?(\d{1,2})\)?\s*(?:\+|plus)?\s*(?:(?:-|–|—|to)\s*\d{1,2}\s*\+?)?\s*(?:years?|yrs?)\b"
+    r"(?=[^.\n;]{0,80}?\bexperien)"
+    r"|\bexperien\w*[^.\n;\d]{0,30}?(?<![\d.])(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.I)
+
+
+def required_years(text: str) -> list:
+    """Every years-of-experience number in the JD, in order (company-history sized numbers dropped)."""
+    out = []
+    for m in _YEARS.finditer(text or ""):
+        n = int(m.group(1) or m.group(2))
+        if 0 < n <= P.LEVEL_YEARS_CAP:
+            out.append(n)
+    return out
+
+
+def level_rule(title: str, text: str, annual_top: Optional[float] = None) -> RuleResult:
+    """Level from the MOST years any line asks for (one '2+ years of X' line in a 10+ years JD is not the
+    level) plus the pay band; a title counts only when unambiguous (Director, VP, Principal, Head of, Chief).
+
+    junior (< LEVEL_YEARS_MID) = reason, unless a senior title or a band top at the floor says otherwise (flag);
+    mid = flag unless a senior title or a band top at the ask; early-career title = reason.
+    """
+    years = required_years(text)
+    most = max(years) if years else None
+    senior_title = find_terms(P.SENIOR_LEVEL_TITLE_TERMS, title)
+    early = find_terms(P.EARLY_CAREER_TITLE_TERMS, title)
+    pay_floor = annual_top is not None and bool(P.COMP_FLOOR) and annual_top >= P.COMP_FLOOR
+    pay_ask = annual_top is not None and bool(P.COMP_ASK) and annual_top >= P.COMP_ASK
+    level = None if most is None else ("senior" if most >= P.LEVEL_YEARS_SENIOR
+                                       else "mid" if most >= P.LEVEL_YEARS_MID else "junior")
+    reasons, flags = [], []
+    if early and not senior_title:
+        reasons.append(f"early-career title ({early[0]})")
+    if level == "junior":
+        if senior_title or pay_floor:
+            flags.append(f"few years asked (at most {most}) -- {'title' if senior_title else 'pay band'} says senior")
+        else:
+            reasons.append(f"junior level (at most {most} yrs required)")
+    elif level == "mid" and not (senior_title or pay_ask):
+        flags.append(f"mid level (at most {most} yrs required)")
+    notes = {"max_years": most, "level": level, "senior": level == "senior" or bool(senior_title) or pay_ask}
+    return reasons, flags, notes
+
+
+_DAYS = r"(?:\d|one|two|three|four|five)(?:\s*(?:-|–|to|or)\s*(?:\d|one|two|three|four|five))?\s*(?:\(\d\)\s*)?days?"
+_WEEK = r"\s*(?:a|per|each|every|/)\s*week"
+_HYBRID_TEXT = re.compile(
+    rf"\b(?:hybrid|in-office|in office|on-?site|in-person|in person)\b[^.\n]{{0,100}}?\b{_DAYS}{_WEEK}\b"
+    rf"|\b{_DAYS}{_WEEK}\b[^.\n]{{0,80}}?\b(?:office|on-?site|in[- ]person)\b", re.I)
+_ONSITE_TEXT = re.compile(r"\b(?:(?:this|the)\s+(?:role|position|job)\s+is\s+(?:fully\s+|100%\s+)?on-?site"
+                          r"|(?:fully|100%)\s+(?:on-?site|in[- ]office))\b", re.I)
+
+
+def workplace_from_text(text: str) -> Optional[str]:
+    """'onsite' or 'hybrid' when the JD states an in-office requirement in days per week; else None."""
+    if _ONSITE_TEXT.search(text or ""):
+        return "onsite"
+    if _HYBRID_TEXT.search(text or ""):
+        return "hybrid"
+    return None
+
+
+_US_TEXT = re.compile(r"(?<![a-z])(?:united states|u\.s\.a?\.?|usa|us)(?![a-z])", re.I)
+
+
+def non_us_rule(country: Optional[str], locations) -> RuleResult:
+    """Hard reject when no location is in the US: the ATS country code says so, or every location segment
+    names a non-US place. One US segment anywhere keeps the posting; a bare "Remote" never rejects."""
+    segments = [seg.strip() for loc in locations if loc for seg in re.split(r"[;|]", str(loc)) if seg.strip()]
+    if any(S.states_in(seg) or _US_TEXT.search(seg) for seg in segments):
+        return [], [], {}
+    code = (country or "").strip().upper()
+    if code and code not in ("US", "USA", "UNITED STATES"):
+        return [f"outside the US (country {code})"], [], {}
+    named = [find_terms(P.NON_US_TERMS, seg) for seg in segments]
+    if segments and all(named):
+        return [f"outside the US ({named[0][0]})"], [], {}
+    return [], [], {}
+
+
 JD_RULES = (travel_rule, direct_reports_rule, domain_tenure_rule, discipline_rule,
             assessment_gate_rule, sales_ops_rule)
 
@@ -279,14 +365,22 @@ def tier_for(title: str) -> Optional[int]:
     return None
 
 
-def rule_points(listing: S.Listing, tier: Optional[int], flags: list) -> int:
-    """rule_score before the clamp: tier, extra function hits, level, location, comp, flags."""
+def rule_max() -> int:
+    """The most rule points a posting can earn: tier 1 + extra hits + senior + remote + comp at the ask."""
+    pts = P.RULE_POINTS
+    return (pts["tier1"] + pts["extra_hit_cap"] + pts["senior"] + max(pts["remote"], pts["commutable_hybrid"])
+            + pts["comp_ask"])
+
+
+def rule_points(listing: S.Listing, tier: Optional[int], flags: list, senior: bool = False) -> int:
+    """Raw rule points (before rescaling): tier, extra function hits, level, location, comp, flags.
+    `senior` comes from level_rule (years, pay, or an unambiguous title)."""
     pts = P.RULE_POINTS
     title = f" {listing.title.lower()} "
     score = {1: pts["tier1"], 2: pts["tier2"], 3: pts["tier3"]}.get(tier, 0)
     hits = len(S._has(title, P.TITLE_FUNCTION_TERMS))
     score += min(max(hits - 1, 0) * pts["extra_hit"], pts["extra_hit_cap"])
-    if S._has(title, P.SENIOR_TITLE_TERMS):
+    if senior:
         score += pts["senior"]
     if S.is_remote(listing):
         score += pts["remote"]
@@ -305,10 +399,18 @@ def rule_points(listing: S.Listing, tier: Optional[int], flags: list) -> int:
 
 
 def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
-    """Card-level screen + JD rules + tier + rule points for one postings row."""
-    title, text = row.get("title") or "", row.get("description_text") or ""
-    listing = listing_from_row(row)
+    """Card-level screen + JD rules + tier + rule points for one postings row.
+    rule_score is rescaled to 0-100 against rule_max(), so it blends with fit on the same scale."""
+    title = row.get("title") or ""
+    # Some boards store line breaks as the entity "&#xa;"; decode so headings and sentences split correctly.
+    text = html.unescape(row.get("description_text") or "")
+    listing = listing_from_row({**row, "description_text": text})
     reasons, flags, notes = [], [], {}
+    if not listing.extra.get("workplace_type"):
+        inferred = workplace_from_text(text)
+        if inferred:
+            listing.extra["workplace_type"] = inferred
+            notes["workplace_inferred"] = inferred
 
     # Capped hours: an hourly rate is not an annual salary, so treat comp as not posted.
     h_reasons, h_flags, h_notes = hours_cap_rule(title, text, row.get("employment_type"))
@@ -322,6 +424,8 @@ def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
 
     results = [rule(title, text) for rule in JD_RULES]
     results.append(corridor_rule(title, text, [listing.location, *listing.locations]))
+    results.append(non_us_rule(row.get("country"), [listing.location, *listing.locations]))
+    results.append(level_rule(title, text, listing.annual_top))
     results.append((h_reasons, h_flags, h_notes))
     tier = tier_for(title)
     if tier == 3:
@@ -333,6 +437,8 @@ def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
         notes.update(n)
 
     verdict = "reject" if reasons else ("review" if flags else "candidate")
-    score = max(0, min(100, rule_points(listing, tier, flags)))
+    raw = rule_points(listing, tier, flags, senior=bool(notes.get("senior")))
+    top = rule_max()
+    score = int(100 * max(0, min(raw, top)) / top + 0.5)
     return ScreenRecord(posting_id=row.get("posting_id") or "", verdict=verdict, tier=tier,
                         rule_score=score, reasons=reasons, flags=flags, notes=notes)

@@ -129,26 +129,29 @@ def cmd_labels(con, a):
         sys.exit("labels: set JOBSEARCH_VAULT_DIR or pass --vault")
     counts = labels.sync_labels(con, a.vault, n_pseudo=a.pseudo, seed=a.seed)
     if a.report:
-        pos_ok, neg_ok = counts["pos_text"] >= 250, counts["neg_text"] >= features.LOW_DATA_MIN
+        pos_ok, neg_ok = counts["pos_text"] >= 250, counts["pseudo_text"] >= features.LOW_DATA_MIN
         print(f"{'source':<22} {'label':>5} {'docs':>6} {'text':>6} {'matched':>7}")
         for (source, label), c in sorted(counts["by_source"].items()):
             print(f"{source:<22} {label:>5} {c['docs']:>6} {c['with_text']:>6} {c['matched']:>7}")
-        print(f"positives with text {counts['pos_text']} ({'ok' if pos_ok else 'below 250'}) · non-pseudo negatives "
-              f"with text {counts['neg_text']} ({'ok' if neg_ok else 'below 150: low-data warning path'}) · "
-              f"after dedupe for training: {len(features.training_set(con))} docs")
+        print(f"positives with text {counts['pos_text']} ({'ok' if pos_ok else 'below 250'}) · pseudo-negatives "
+              f"{counts['pseudo_text']} ({'ok' if neg_ok else 'below 150: low-data warning path'}) · context-only "
+              f"(not trained) {counts['context_rows']} · after dedupe for training: "
+              f"{len(features.training_set(con))} docs")
 
 
 def cmd_train(con, a):
     result = features.train(con, C=a.C, cv=a.cv)
-    print("Hard negatives (highest held-out fit_prob among label-0 docs):")
+    for side in ("positive", "negative"):
+        print(f"Most {side} terms: " + ", ".join(f"{t} {c:+.2f}" for t, c in result["coefficients"][side]))
+    print("Highest held-out fit among pseudo-negatives (unlabeled postings that read like fits):")
     for prob, source, label_id, company, title in features.hard_negatives(result):
         ref = con.execute("SELECT source_ref FROM label_docs WHERE label_id = ?", [label_id]).fetchone()
         print(f"  {prob:.2f}  {source:<20} {(company or '')[:28]:<28} {(title or '')[:60]:<60} "
               f"{(ref[0] if ref and ref[0] else label_id)[:60]}")
     if a.report:
         print("Signal AUCs over labeled rows that have a screen (fit = held-out probability):")
-        for name, auc_all, auc_real, n_all, n_real in features.signal_report(con, result):
-            print(f"  {name:<10} all {auc_all}  (n={n_all})   non-pseudo {auc_real}  (n={n_real})")
+        for name, auc_all, _, n_all, _ in features.signal_report(con, result):
+            print(f"  {name:<10} AUC {auc_all}  (n={n_all})")
 
 
 def main():

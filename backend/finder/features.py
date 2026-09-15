@@ -1,5 +1,11 @@
 """The fit model: TF-IDF + logistic regression trained on the user's own labels (`vw_label_set`).
 
+Positives are JDs the user took far enough to save (applications, escalated blocks, build decisions);
+negatives are pseudo-negatives sampled from the corpus. Nothing the user read is a negative: a pass on a
+saved JD was a doubt about nuance, not about its language. The model sees function and content only:
+employer names, digits, level words, logistics and career-site boilerplate are removed (MODEL_STOP_WORDS),
+and terms in more than half the documents are dropped, so it cannot learn level or page layout.
+
 scikit-learn, numpy and joblib are imported inside the functions, so importing this module
 costs nothing and the sweep runs without them. `load_latest` returns None (rules only) when no
 model has been trained or the libraries are missing.
@@ -11,14 +17,20 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
 
+import re
+
+from backend import profile as P
 from backend.ats import store
 from backend.screen import company_keys, company_matches, norm_company, similar_title
 
 from .labels import strip_boilerplate
 
 MODEL_DIR = os.path.join(os.path.dirname(store.DEFAULT_DB_PATH), "models")
-LOW_DATA_MIN = 150          # positives or non-pseudo negatives with text below this = low-data warning
+LOW_DATA_MIN = 150          # positives or pseudo-negatives with text below this = low-data warning
 LOW_DATA_FIT_WEIGHT = 0.15  # pipeline.combine weight for `fit` under the warning
+FEATURE_VERSION = "4"       # bump when doc_text / vectorizer settings change (part of model_version)
+TRAIN_EXCLUDED_SOURCES = ("jobs_found_passed",)   # context only: a JD that reached the vault is never a negative
+TOKEN_PATTERN = r"(?u)\b[^\W\d_]{2,}\b"          # letters only: no years, percentages or req numbers
 # When one job appears under several sources, the first source in this order supplies its label.
 SOURCE_PRIORITY = ("application", "decision", "jobs_found_escalated", "jobs_found_passed", "pseudo_neg")
 
@@ -27,10 +39,20 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def doc_text(title: Optional[str], text: Optional[str]) -> str:
-    """Title twice (it carries the function) plus the JD without boilerplate."""
+def strip_employer(text: str, company: Optional[str]) -> str:
+    """Removes the employer's name (and any parenthetical alias) so the model cannot learn employers."""
+    names = {n for n in [company or "", *company_keys(company or "")] if len(n.strip()) >= 3}
+    for name in sorted(names, key=len, reverse=True):
+        words = r"\W+".join(re.escape(w) for w in re.split(r"\W+", name.strip()) if w)
+        if words:
+            text = re.sub(rf"(?<![A-Za-z0-9]){words}(?![A-Za-z0-9])", " ", text, flags=re.I)
+    return text
+
+
+def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] = None) -> str:
+    """Title twice (it carries the function) plus the JD without boilerplate or the employer's name."""
     title = title or ""
-    return f"{title}\n{title}\n{strip_boilerplate(text or '')}"
+    return strip_employer(f"{title}\n{title}\n{strip_boilerplate(text or '')}", company)
 
 
 def training_set(con) -> list:
@@ -38,6 +60,8 @@ def training_set(con) -> list:
     (decision rows only, where the vault copy of the same job usually exists), by SOURCE_PRIORITY."""
     cols = ("label_id", "source", "posting_id", "company", "title", "text", "label", "weight")
     rows = [dict(zip(cols, r)) for r in con.execute(f"SELECT {', '.join(cols)} FROM vw_label_set").fetchall()]
+    rows = [r for r in rows if r["source"] not in TRAIN_EXCLUDED_SOURCES
+            and not (r["source"] == "decision" and r["label"] == 0)]
     rank = {s: i for i, s in enumerate(SOURCE_PRIORITY)}
     rows.sort(key=lambda r: (rank.get(r["source"], len(rank)), r["label_id"]))
     kept, seen_pids, by_first_word = [], set(), defaultdict(list)
@@ -66,11 +90,12 @@ def model_version(label_ids: list, params: dict) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
-def _pipeline_parts(C: float, min_df: int, ngram: tuple, max_features: int):
-    from sklearn.feature_extraction.text import TfidfVectorizer
+def _pipeline_parts(C: float, min_df: int, ngram: tuple, max_features: int, max_df: float = 0.5):
+    from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
-    vec = TfidfVectorizer(ngram_range=tuple(ngram), min_df=min_df, sublinear_tf=True, stop_words="english",
-                          max_features=max_features)
+    stop = sorted(set(ENGLISH_STOP_WORDS) | {w.lower() for w in P.MODEL_STOP_WORDS})
+    vec = TfidfVectorizer(ngram_range=tuple(ngram), min_df=min_df, max_df=max_df, sublinear_tf=True, stop_words=stop,
+                          token_pattern=TOKEN_PATTERN, max_features=max_features)
     clf = LogisticRegression(class_weight="balanced", C=C, max_iter=2000)
     return vec, clf
 
@@ -81,15 +106,20 @@ def _auc(y, p) -> Optional[float]:
 
 
 def cross_validate(texts: list, y: list, w: list, *, C: float, min_df: int, ngram: tuple, max_features: int,
-                   cv: int, seed: int) -> dict:
-    """Out-of-fold probabilities plus fold-mean AUC and precision@20 on held-out rows."""
+                   cv: int, seed: int, max_df: float = 0.5, groups: Optional[list] = None) -> dict:
+    """Out-of-fold probabilities plus fold-mean AUC and precision@20 on held-out rows. `groups` keeps rows of
+    the same job (its vault copy and its career-site copy) in the same fold."""
     import numpy as np
-    from sklearn.model_selection import StratifiedKFold
+    from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
     y_arr, w_arr = np.asarray(y), np.asarray(w, dtype=float)
     oof = np.zeros(len(y), dtype=float)
     aucs, precs = [], []
-    for train_idx, test_idx in StratifiedKFold(n_splits=cv, shuffle=True, random_state=seed).split(texts, y_arr):
-        vec, clf = _pipeline_parts(C, min_df, ngram, max_features)
+    if groups is not None:
+        folds = StratifiedGroupKFold(n_splits=cv, shuffle=True, random_state=seed).split(texts, y_arr, groups)
+    else:
+        folds = StratifiedKFold(n_splits=cv, shuffle=True, random_state=seed).split(texts, y_arr)
+    for train_idx, test_idx in folds:
+        vec, clf = _pipeline_parts(C, min_df, ngram, max_features, max_df)
         X = vec.fit_transform([texts[i] for i in train_idx])
         clf.fit(X, y_arr[train_idx], sample_weight=w_arr[train_idx])
         p = clf.predict_proba(vec.transform([texts[i] for i in test_idx]))[:, 1]
@@ -104,41 +134,52 @@ def cross_validate(texts: list, y: list, w: list, *, C: float, min_df: int, ngra
 
 
 def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_features: int = 50_000, cv: int = 5,
-          seed: int = 7, model_dir: Optional[str] = None, log=print) -> dict:
+          seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, log=print) -> dict:
     """Cross-validates, fits on all labels, saves db/models/<version>.joblib and inserts a `models` row."""
     import joblib
     import numpy as np
     rows = training_set(con)
     y = [int(r["label"]) for r in rows]
     n_pos, n_neg = sum(y), len(y) - sum(y)
+    n_jobs = len(rows)
     if n_pos < cv or n_neg < cv:
         raise ValueError(f"not enough labels to train ({n_pos} positive, {n_neg} negative); run `finder.py labels`")
-    texts = [doc_text(r["title"], r["text"]) for r in rows]
+    texts = [doc_text(r["title"], r["text"], r["company"]) for r in rows]
     weights = [float(r["weight"] or 1.0) for r in rows]
-    params = {"C": C, "min_df": min_df, "ngram": list(ngram), "max_features": max_features, "cv": cv, "seed": seed}
+    # Each vault positive with a matched posting is also trained on as that posting's career-site text, so the
+    # positives come from career sites too and "looks like a career-site page" stops meaning "not a fit".
+    groups, pairs = list(range(n_jobs)), {}
+    for i, copy in _career_site_copies(con, rows).items():
+        pairs[i] = len(texts)
+        texts.append(copy)
+        y.append(y[i])
+        weights.append(weights[i])
+        groups.append(i)
+    params = {"C": C, "min_df": min_df, "max_df": max_df, "ngram": list(ngram), "max_features": max_features, "cv": cv,
+              "seed": seed, "features": FEATURE_VERSION, "copies": len(pairs), "stop_words": hashlib.sha1(
+                  " ".join(sorted(P.MODEL_STOP_WORDS)).encode()).hexdigest()[:8]}
     version = model_version([r["label_id"] for r in rows], params)
 
-    real_neg = sum(1 for r in rows if r["label"] == 0 and r["source"] != "pseudo_neg")
     warnings = []
     if n_pos < LOW_DATA_MIN:
         warnings.append(f"only {n_pos} positives with text (< {LOW_DATA_MIN})")
-    if real_neg < LOW_DATA_MIN:
-        warnings.append(f"only {real_neg} non-pseudo negatives with text (< {LOW_DATA_MIN})")
+    if n_neg < LOW_DATA_MIN:
+        warnings.append(f"only {n_neg} pseudo-negatives with text (< {LOW_DATA_MIN})")
     fit_weight = LOW_DATA_FIT_WEIGHT if warnings else None
     for w in warnings:
         log(f"WARNING: {w}; fit weight in the blend drops to {LOW_DATA_FIT_WEIGHT}")
 
-    cvr = cross_validate(texts, y, weights, C=C, min_df=min_df, ngram=ngram, max_features=max_features, cv=cv, seed=seed)
+    cvr = cross_validate(texts, y, weights, C=C, min_df=min_df, ngram=ngram, max_features=max_features, cv=cv,
+                         seed=seed, max_df=max_df, groups=groups)
     oof = np.asarray(cvr["oof"])
     y_arr = np.asarray(y)
-    real = np.asarray([r["source"] != "pseudo_neg" for r in rows])
     pred = (oof >= 0.5).astype(int)
     confusion = {"tp": int(((pred == 1) & (y_arr == 1)).sum()), "fp": int(((pred == 1) & (y_arr == 0)).sum()),
                  "fn": int(((pred == 0) & (y_arr == 1)).sum()), "tn": int(((pred == 0) & (y_arr == 0)).sum())}
 
-    vec, clf = _pipeline_parts(C, min_df, ngram, max_features)
+    vec, clf = _pipeline_parts(C, min_df, ngram, max_features, max_df)
     clf.fit(vec.fit_transform(texts), y_arr, sample_weight=np.asarray(weights))
-    notes = {"fit_weight": fit_weight, "warnings": warnings, "params": params, "n_real_neg": real_neg}
+    notes = {"fit_weight": fit_weight, "warnings": warnings, "params": params}
     model = {"vec": vec, "clf": clf, "version": version, "fit_weight": fit_weight, "params": params}
     folder = model_dir or MODEL_DIR
     os.makedirs(folder, exist_ok=True)
@@ -148,21 +189,62 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
                 "cv_precision_at_20, path, notes) VALUES (?, 'tfidf_lr', ?, ?, ?, ?, ?, ?, ?)",
                 [version, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], path, json.dumps(notes)])
 
-    in_sample = clf.predict_proba(vec.transform(texts))[:, 1]
+    in_sample = clf.predict_proba(vec.transform(texts[:n_jobs]))[:, 1]
+    source_gap = _source_gap(con, rows, oof, pairs)
     result = {
-        "model_version": version, "path": path, "n_pos": n_pos, "n_neg": n_neg, "n_real_neg": real_neg,
+        "model_version": version, "path": path, "n_pos": n_pos, "n_neg": n_neg,
         "cv_auc": cvr["auc"], "cv_precision_at_20": cvr["precision_at_20"], "oof_auc": _auc(y, oof),
-        "oof_auc_real_negatives": _auc(y_arr[real].tolist(), oof[real]) if real.any() else None,
+        "source_gap": source_gap, "coefficients": _extreme_terms(vec, clf),
         "confusion_at_0_5": confusion, "pos_mean_fit_oof": float(oof[y_arr == 1].mean()),
-        "pos_mean_fit_in_sample": float(in_sample[y_arr == 1].mean()),
+        "pos_mean_fit_in_sample": float(in_sample[y_arr[:n_jobs] == 1].mean()),
         "neg_mean_fit_oof": float(oof[y_arr == 0].mean()), "warnings": warnings, "fit_weight": fit_weight,
         "rows": rows, "oof": cvr["oof"],
     }
-    log(f"Model {version}: {n_pos} pos / {n_neg} neg ({real_neg} non-pseudo) · {cv}-fold AUC "
-        f"{_fmt(cvr['auc'])} · precision@20 {_fmt(cvr['precision_at_20'])} · AUC vs non-pseudo negatives "
-        f"{_fmt(result['oof_auc_real_negatives'])} · positives mean fit {result['pos_mean_fit_oof']:.2f} held-out "
-        f"/ {result['pos_mean_fit_in_sample']:.2f} in-sample · confusion@0.5 {confusion} → {path}")
+    log(f"Model {version}: {n_pos} pos / {n_neg} pseudo-neg · {cv}-fold AUC {_fmt(cvr['auc'])} · precision@20 "
+        f"{_fmt(cvr['precision_at_20'])} · positives mean fit {result['pos_mean_fit_oof']:.2f} held-out / "
+        f"{result['pos_mean_fit_in_sample']:.2f} in-sample · confusion@0.5 {confusion} → {path}")
+    log("Held-out fit of positives by where their text came from (a large gap = the model learned the source): "
+        + " · ".join(f"{k} {v['mean']:.2f} (n={v['n']})" for k, v in source_gap.items()))
     return result
+
+
+def _career_site_copies(con, rows: list) -> dict:
+    """Row index -> the matched posting's own JD, for vault positives whose text is not already that JD."""
+    pids = sorted({r["posting_id"] for r in rows if r["posting_id"] and r["label"] == 1})
+    if not pids:
+        return {}
+    ats = dict(con.execute("SELECT posting_id, description_text FROM postings WHERE posting_id IN "
+                           "(SELECT unnest(?::VARCHAR[])) AND length(description_text) >= 800", [pids]).fetchall())
+    return {i: doc_text(r["title"], ats[r["posting_id"]], r["company"]) for i, r in enumerate(rows)
+            if r["label"] == 1 and r["source"] != "decision" and r["posting_id"] in ats and ats[r["posting_id"]] != r["text"]}
+
+
+def _source_gap(con, rows: list, oof, pairs: Optional[dict] = None) -> dict:
+    """Mean held-out fit of positives whose text is the posting's own career-site text vs vault-only text,
+    of near-miss positives (weight below 1 from pass / not-pursuing folders), and the paired comparison:
+    the same jobs scored on their vault text and on their career-site text."""
+    pids = sorted({r["posting_id"] for r in rows if r["posting_id"]})
+    ats = dict(con.execute("SELECT posting_id, description_text FROM postings WHERE posting_id IN "
+                           "(SELECT unnest(?::VARCHAR[]))", [pids]).fetchall()) if pids else {}
+    groups = defaultdict(list)
+    for r, p in zip(rows, oof):
+        if r["label"] != 1:
+            continue
+        groups["career-site text" if r["posting_id"] and ats.get(r["posting_id"]) == r["text"] else "vault text"].append(p)
+        if r["source"] == "application" and (r["weight"] or 1) < 1:
+            groups["near-miss folders"].append(p)
+    for i, j in (pairs or {}).items():
+        groups["paired: vault copy"].append(float(oof[i]))
+        groups["paired: career-site copy"].append(float(oof[j]))
+    return {k: {"n": len(v), "mean": float(sum(v) / len(v))} for k, v in groups.items() if v}
+
+
+def _extreme_terms(vec, clf, k: int = 25) -> dict:
+    import numpy as np
+    names, coef = vec.get_feature_names_out(), clf.coef_[0]
+    order = np.argsort(coef)
+    return {"negative": [(str(names[i]), round(float(coef[i]), 2)) for i in order[:k]],
+            "positive": [(str(names[i]), round(float(coef[i]), 2)) for i in order[::-1][:k]]}
 
 
 def _fmt(x) -> str:

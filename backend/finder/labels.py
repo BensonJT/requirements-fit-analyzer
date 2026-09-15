@@ -1,18 +1,26 @@
 """Training labels for the fit model, read from the vault and the user's own decisions.
 
-Sources (docs/SPRINT_PLAN.md section 8):
-- application           Applications/*/index.md with a real `## Job Description`; label from frontmatter status.
+Sources (docs/SPRINT_PLAN.md section 8, amended 2026-09-15):
+- application           Applications/*/index.md with a real `## Job Description`; always label 1. A pass /
+                        not-pursuing folder is a near miss (weight 0.5): its language fit well enough to get a
+                        folder, and the doubt was nuance, not vocabulary.
 - jobs_found_escalated  `# Company:` blocks in hand-made Jobs_Found files; label 1, weight 0.7.
-- jobs_found_passed     `## Passed / Filtered Out` rows; label 0, text filled from a matching posting.
-- pseudo_neg            random postings the rules reject on title; label 0, weight 0.5.
-Decisions (build / pass) join these through `vw_label_set`.
+- jobs_found_passed     `## Passed / Filtered Out` rows; kept as label 0 for the record but never trained on
+                        (features.TRAIN_EXCLUDED_SOURCES): a JD that reached the vault had something that fit.
+- pseudo_neg            random postings with a JD and no function term in the title; label 0, weight 0.5.
+Decisions (build / pass) join these through `vw_label_set`; `pass` decisions are not trained on either.
+
+Positives matched to a posting by URL or req id carry the posting's own text, so both classes come from the
+same career sites and the model cannot learn where a JD was copied from.
 
 Files written by the pipeline itself (`# Jobs Found — ATS pipeline`) are skipped: their blocks and
 passed rows are the rules' output, and training on them would teach the model to echo the rules.
 """
 import hashlib
+import html
 import json
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -26,9 +34,9 @@ from . import rules
 from .tracker_sync import job_search_dir
 
 MIN_TEXT = 800
-NEGATIVE_STATUSES = {"pass", "not-pursuing", "not_pursuing", "passed"}
+NEAR_MISS_STATUSES = {"pass", "not-pursuing", "not_pursuing", "passed"}
+NEAR_MISS_WEIGHT = 0.5
 PIPELINE_MARKER = "# Jobs Found — ATS pipeline"
-TITLE_REJECT_REASONS = ("off-function title", "off-lane title")
 SOURCES = ("application", "jobs_found_escalated", "jobs_found_passed", "pseudo_neg")
 
 # A passed row says nothing about fit when the posting was simply gone, or was already tracked.
@@ -46,6 +54,17 @@ _BLOCK_END = re.compile(r"^(---\s*$|# |## (Passed|Excluded|Already Applied|Watch
 _URL = re.compile(r"https?://[^\s)\]>|]+")
 
 
+_LITERAL_ESCAPE = re.compile(r"\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|[nrt])")
+
+
+def normalize_text(text: str) -> str:
+    """HTML entities decoded ('&#xa0;', '&amp;'); literal escape text some career sites store ('\\xa0', '\\u2019', '\\n') becomes a space; NFKC turns
+    non-breaking and other unicode spaces into plain ones; runs of spaces collapse."""
+    text = _LITERAL_ESCAPE.sub(" ", html.unescape(text or ""))
+    text = unicodedata.normalize("NFKC", text)
+    return re.sub(r"[ \t]+", " ", text)
+
+
 @dataclass
 class LabelDoc:
     label_id: str
@@ -58,6 +77,7 @@ class LabelDoc:
     weight: float = 1.0
     posting_id: Optional[str] = None
     url: Optional[str] = None
+    match_kind: Optional[str] = None
 
 
 def _now():
@@ -69,10 +89,14 @@ def _id(*parts: str) -> str:
 
 
 def strip_boilerplate(text: str) -> str:
-    """Removes BOILERPLATE_PATTERNS matches line by line (EEO, benefits, about-us) and drops emptied lines."""
+    """Drops lines naming two or more BOILERPLATE_MARKERS (EEO, privacy, benefits, recruiting notices), removes
+    BOILERPLATE_PATTERNS matches line by line, and drops emptied lines."""
     pats = [re.compile(p, re.I) for p in P.BOILERPLATE_PATTERNS]
+    markers = getattr(P, "BOILERPLATE_MARKERS", [])
     out = []
-    for line in (text or "").splitlines():
+    for line in normalize_text(text).splitlines():
+        if markers and len(set(rules.find_terms(markers, line))) >= 2:
+            continue
         for rx in pats:
             line = rx.sub("", line)
         if line.strip():
@@ -126,8 +150,8 @@ def load_applications(vault_dir: str) -> list:
         status = (fm.get("status") or "").lower()
         folder = index.parent.name
         docs.append(LabelDoc(_id("application", folder), "application", folder, fm.get("company") or folder,
-                             fm.get("role") or folder, text, 0 if status in NEGATIVE_STATUSES else 1, 1.0,
-                             url=_first_url(raw)))
+                             fm.get("role") or folder, text, 1,
+                             NEAR_MISS_WEIGHT if status in NEAR_MISS_STATUSES else 1.0, url=_first_url(raw)))
     return docs
 
 
@@ -252,42 +276,52 @@ class PostingIndex:
         self.employer_keys = {e: norm_company(e) for e in self.by_employer}
 
     def match(self, company: str, title: str, url: Optional[str] = None) -> Optional[str]:
+        return self.match_kind(company, title, url)[0]
+
+    def match_kind(self, company: str, title: str, url: Optional[str] = None) -> tuple:
+        """(posting_id, 'url' | 'req' | 'title') or (None, None)."""
         if url and url in self.by_url:
-            return self.by_url[url]
+            return self.by_url[url], "url"
         keys = company_keys(company or "")
         employers = [e for e, k in self.employer_keys.items() if company_matches(k, keys)]
+        newest = lambda hits: max(hits, key=lambda h: (h[0] is not None, h[0]))[1]  # noqa: E731
         if url:
             for e in employers:
                 hits = [(fs, pid) for pid, _, req, fs in self.by_employer[e]
                         if len(req) >= 4 and re.search(rf"(?<![A-Za-z0-9]){re.escape(req)}(?![0-9])", url)]
                 if hits:
-                    return max(hits, key=lambda h: (h[0] is not None, h[0]))[1]
+                    return newest(hits), "req"
         cands = [(fs, pid) for e in employers for pid, t, _, fs in self.by_employer[e] if similar_title(title or "", t)]
-        return max(cands, key=lambda h: (h[0] is not None, h[0]))[1] if cands else None
+        return (newest(cands), "title") if cands else (None, None)
 
 
 def match_to_postings(con, docs: list, index: Optional[PostingIndex] = None) -> int:
-    """Fills posting_id on every doc it can, and text from the posting when the doc has none. Returns matches."""
+    """Fills posting_id on every doc it can; text from the posting when the doc has none, and for a positive
+    matched by URL or req id (the same requisition, so its career-site text replaces the vault copy)."""
     index = index or PostingIndex(con)
     matched = []
     for d in docs:
         if not d.posting_id:
-            d.posting_id = index.match(d.company, d.title, d.url)
+            d.posting_id, d.match_kind = index.match_kind(d.company, d.title, d.url)
         if d.posting_id:
             matched.append(d)
-    need_text = [d for d in matched if not d.text]
+    need_text = [d for d in matched if not d.text or (d.label == 1 and d.match_kind in ("url", "req"))]
     if need_text:
         ids = json.dumps(sorted({d.posting_id for d in need_text}))
         texts = dict(con.execute("SELECT posting_id, description_text FROM postings WHERE posting_id IN "
                                  "(SELECT unnest(json_transform(?, '[\"VARCHAR\"]')))", [ids]).fetchall())
         for d in need_text:
             t = texts.get(d.posting_id) or ""
-            d.text = t if len(t) >= MIN_TEXT else None
+            if len(t) >= MIN_TEXT:
+                d.text = t
+            elif not d.text:
+                d.text = None
     return len(matched)
 
 
 def pseudo_negatives(con, n: int = 1500, seed: int = 7, exclude: Optional[set] = None) -> list:
-    """Random active postings with a JD that the current rules reject on an off-function / off-lane title."""
+    """Random active postings with a JD and no function term in the title (unlabeled corpus stands in for
+    'not a fit'). Level and location play no part, so the model never learns them."""
     exclude = exclude or set()
     docs, offset, page = [], 0, max(n * 4, 200)
     cols = ("posting_id", "employer", "platform", "req_id", "title", "url", "location_primary",
@@ -305,8 +339,7 @@ def pseudo_negatives(con, n: int = 1500, seed: int = 7, exclude: Optional[set] =
             row = dict(zip(cols, values))
             if row["posting_id"] in exclude:
                 continue
-            rec = rules.screen_row(row)
-            if rec.verdict == "reject" and any(r.startswith(TITLE_REJECT_REASONS) for r in rec.reasons):
+            if rules.tier_for(row["title"] or "") is None:
                 docs.append(LabelDoc(_id("pseudo_neg", row["posting_id"]), "pseudo_neg", None, row["employer"],
                                      row["title"], row["description_text"], 0, 0.5, posting_id=row["posting_id"]))
                 if len(docs) >= n:
@@ -322,8 +355,9 @@ def collect(con, vault_dir: str, n_pseudo: int = 1500, seed: int = 7) -> tuple:
     index = PostingIndex(con)
     for group in (apps, escalated, passed):
         match_to_postings(con, group, index)
-    positives = {d.posting_id for d in apps + escalated if d.posting_id and d.label == 1}
-    positives |= {pid for (pid,) in con.execute("SELECT posting_id FROM vw_decisions WHERE decision = 'build'").fetchall()}
+    # Nothing the user has seen may become a pseudo-negative: vault docs, passed rows, and decided postings.
+    positives = {d.posting_id for d in apps + escalated + passed if d.posting_id}
+    positives |= {pid for (pid,) in con.execute("SELECT posting_id FROM decisions").fetchall()}
     pseudo = pseudo_negatives(con, n=n_pseudo, seed=seed, exclude=positives) if n_pseudo else []
     return apps + escalated + passed + pseudo, {"passed_skipped": dict(skipped)}
 
@@ -332,7 +366,7 @@ def sync_labels(con, vault_dir: str, n_pseudo: int = 1500, seed: int = 7, log=pr
     """Rebuilds label_docs from the vault (one transaction) and logs counts per source."""
     docs, stats = collect(con, vault_dir, n_pseudo=n_pseudo, seed=seed)
     now = _now()
-    payload = json.dumps([{k: v for k, v in asdict(d).items() if k != "url"} for d in docs])
+    payload = json.dumps([{k: v for k, v in asdict(d).items() if k not in ("url", "match_kind")} for d in docs])
     shape = json.dumps([{"label_id": "VARCHAR", "source": "VARCHAR", "source_ref": "VARCHAR", "company": "VARCHAR",
                          "title": "VARCHAR", "text": "VARCHAR", "label": "INTEGER", "weight": "DOUBLE",
                          "posting_id": "VARCHAR"}])
@@ -354,8 +388,9 @@ def sync_labels(con, vault_dir: str, n_pseudo: int = 1500, seed: int = 7, log=pr
     for (source, label), c in sorted(counts["by_source"].items()):
         log(f"  {source:<22} label {label}: {c['docs']:>5} docs, {c['with_text']:>5} with text, "
             f"{c['matched']:>4} matched to a posting")
-    log(f"Labels: {counts['pos_text']} positives with text, {counts['neg_text']} non-pseudo negatives with text, "
-        f"{counts['pseudo_text']} pseudo-negatives; passed rows skipped {stats['passed_skipped']}")
+    log(f"Labels: {counts['pos_text']} positives with text, {counts['pseudo_text']} pseudo-negatives, "
+        f"{counts['context_rows']} context-only rows (passed / pass decisions; not trained); "
+        f"passed rows skipped {stats['passed_skipped']}")
     return counts
 
 
@@ -369,6 +404,6 @@ def label_counts(con) -> dict:
                                            "WHERE source = 'decision' GROUP BY 1, 2").fetchall():
         by_source[(source, label)] = {"docs": docs, "with_text": docs, "matched": docs}
     pos = sum(c["with_text"] for (s, l), c in by_source.items() if l == 1)
-    neg = sum(c["with_text"] for (s, l), c in by_source.items() if l == 0 and s != "pseudo_neg")
+    context = sum(c["docs"] for (s, l), c in by_source.items() if l == 0 and s != "pseudo_neg")
     pseudo = by_source.get(("pseudo_neg", 0), {}).get("with_text", 0)
-    return {"by_source": by_source, "pos_text": pos, "neg_text": neg, "pseudo_text": pseudo}
+    return {"by_source": by_source, "pos_text": pos, "context_rows": context, "pseudo_text": pseudo}

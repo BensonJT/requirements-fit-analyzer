@@ -3,6 +3,7 @@
 Output format: docs/SPRINT_PLAN.md section 7. Batch Mode in the vault keys each application
 on its `# Company:` heading, so a JD body must never contain a markdown heading.
 """
+import html
 import json
 import os
 import re
@@ -58,7 +59,7 @@ def jd_body(text: str) -> str:
     """The JD verbatim except: leading '#'s stripped from a line, and a bare '---' / '===' line
     (a fence or setext heading underline) blanked, so no heading appears inside a body."""
     lines = []
-    for line in (text or "").splitlines():
+    for line in html.unescape(text or "").splitlines():
         if re.match(r"^\s*#", line):
             line = re.sub(r"^(\s*)#+\s*", r"\1", line)
         if re.fullmatch(r"\s*(-{3,}|={3,}|\*{3,}|_{3,})\s*", line):

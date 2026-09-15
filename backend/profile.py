@@ -160,6 +160,72 @@ REQUIRED_HEADINGS = (r"required|requirements|basic qualifications|minimum qualif
                      r"|must have|what you have|what you bring")
 PREFERRED_HEADINGS = r"preferred|nice to have|desired|bonus|sets you apart"
 
+# ---- Level (finder). The pay band and the most years any JD line asks for decide level; a title decides
+# it only when the word is unambiguous. "Associate" / "assistant" are deliberately absent: Associate
+# Director is senior at one employer and Associate is entry level at another.
+LEVEL_YEARS_SENIOR = 8     # the JD's highest "N+ years ... experience" at or above this = senior
+LEVEL_YEARS_MID = 5        # below this = junior; between the two = mid
+LEVEL_YEARS_CAP = 25       # larger numbers are company history ("100 years serving clients"), not a requirement
+SENIOR_LEVEL_TITLE_TERMS = ["director", "vice president", "vp", "svp", "evp", "principal", "head of", "chief"]
+EARLY_CAREER_TITLE_TERMS = ["intern", "internship", "summer associate", "co-op", "apprentice", "apprenticeship",
+                            "new grad", "graduate program", "entry level", "entry-level", "junior", "jr"]
+
+# ---- Outside the US (finder hard reject). A location segment naming one of these, with no US state or
+# "United States" in any segment, is outside the US. Place names that are also common US places with no
+# state attached (Dublin, Paris, Athens, Birmingham, Manchester, Cambridge, Georgia, Jersey, Jordan) are left out.
+NON_US_TERMS = [
+    "india", "canada", "united kingdom", "uk", "england", "scotland", "wales", "ireland", "germany", "france", "spain",
+    "portugal", "italy", "netherlands", "belgium", "switzerland", "austria", "poland", "czech republic", "czechia",
+    "hungary", "romania", "bulgaria", "greece", "sweden", "norway", "denmark", "finland", "israel", "turkey",
+    "türkiye", "egypt", "south africa", "nigeria", "kenya", "morocco", "united arab emirates", "uae", "qatar",
+    "saudi arabia", "kuwait", "bahrain", "oman", "pakistan", "bangladesh", "sri lanka", "china", "hong kong",
+    "taiwan", "japan", "south korea", "korea", "singapore", "malaysia", "indonesia", "thailand", "vietnam", "viet nam",
+    "philippines", "australia", "new zealand", "mexico", "brazil", "argentina", "chile", "colombia", "peru",
+    "costa rica", "guatemala", "dominican republic", "maldives", "luxembourg", "slovakia", "serbia", "croatia",
+    "ukraine", "lithuania", "latvia", "estonia", "ghana", "uruguay", "ecuador",
+    "bengaluru", "bangalore", "hyderabad", "chennai", "mumbai", "pune", "noida", "gurugram", "gurgaon", "new delhi",
+    "delhi", "kolkata", "ahmedabad", "kochi", "coimbatore", "toronto", "mississauga", "vancouver", "montreal",
+    "montréal", "calgary", "ottawa", "london", "são paulo", "sao paulo", "mexico city", "guadalajara", "monterrey",
+    "bogota", "bogotá", "buenos aires", "krakow", "kraków", "warsaw", "prague", "budapest", "bucharest", "munich",
+    "frankfurt", "amsterdam", "madrid", "barcelona", "lisbon", "zurich", "geneva", "stockholm", "copenhagen", "oslo",
+    "helsinki", "tel aviv", "dubai", "abu dhabi", "doha", "riyadh", "jeddah", "cairo", "johannesburg", "cape town",
+    "nairobi", "lagos", "kuala lumpur", "jakarta", "bangkok", "phuket", "bali", "manila", "taguig", "cebu",
+    "ho chi minh", "hanoi", "taipei", "tokyo", "osaka", "seoul", "shanghai", "beijing", "shenzhen", "hangzhou",
+    "guangzhou", "sydney", "melbourne", "brisbane", "auckland",
+]
+
+# ---- Fit model vocabulary. The model scores function and content; level, logistics and career-site page
+# text are the rules' job, and letting the model learn them teaches it where a JD was copied from.
+MODEL_STOP_WORDS = [
+    # level words (level comes from years + pay)
+    "associate", "associates", "assistant", "senior", "sr", "junior", "jr", "intern", "internship", "entry", "level",
+    "director", "directors", "manager", "managers", "vp", "vice", "president", "principal", "lead", "head", "chief",
+    "executive", "staff", "officer", "years", "year", "yrs",
+    # logistics (location, pay, schedule)
+    "remote", "hybrid", "onsite", "site", "office", "location", "locations", "relocation", "travel", "salary",
+    "pay", "compensation", "range", "base", "bonus", "hourly", "annual", "time", "week", "days",
+    # career-site page and benefits boilerplate
+    "benefits", "benefit", "career", "careers", "candidate", "candidates", "applicant", "applicants", "apply",
+    "application", "applications", "posting", "requisition", "req", "policy", "policies", "eeo", "equal",
+    "opportunity", "employer", "disability", "disabilities", "veteran", "veterans", "accommodation",
+    "accommodations", "discrimination", "race", "religion", "gender", "sexual", "orientation", "national", "origin",
+    "protected", "status", "age", "medical", "dental", "vision", "pto", "vacation", "holidays", "parental", "leave",
+    "retirement", "wellness", "perks", "click", "job", "jobs", "hiring", "hire", "offer",
+    # EEO / privacy / recruiting-notice words that survive line stripping
+    "regard", "regardless", "applicable", "color", "identity", "email", "personal", "considered", "consideration",
+    "recruiting", "recruiter", "recruiters", "recruitment", "law", "laws", "eligible", "eligibility", "employee",
+    "employees", "xa", "nbsp", "amp",
+]
+# A JD line naming two or more of these is EEO / privacy / benefits / recruiting-notice text and is dropped
+# before the model reads the JD (career-site pages carry it; JDs pasted into notes usually do not).
+BOILERPLATE_MARKERS = [
+    "equal opportunity", "equal employment", "affirmative action", "race", "color", "religion", "national origin",
+    "sexual orientation", "gender identity", "disability", "veteran", "protected", "applicable law",
+    "reasonable accommodation", "e-verify", "background check", "drug test", "privacy", "personal information",
+    "pay transparency", "salary range", "base pay", "benefits", "401(k)", "paid time off", "dental", "parental leave",
+    "recruiting fraud", "recruitment fraud", "unsolicited", "staffing agencies", "fraudulent", "eligible",
+]
+
 # ---- Personal settings: NOT in the repo. ----
 # Pay thresholds and home location are set in backend/profile_local.py (gitignored).
 # Copy backend/profile_local.example.py to backend/profile_local.py and fill it in.

@@ -170,7 +170,7 @@ def test_contract_employment_never_produces_a_reason():
     rec = rules.screen_row(_row(employment_type="contract",
                                 description_text="Lead operational excellence across workflow and stakeholder teams."))
     assert rec.verdict == "candidate" and rec.reasons == [] and rec.tier == 1
-    assert rec.rule_score == 30 + 5 + 10  # tier 1 + senior title + remote
+    assert rec.rule_score == int(100 * (30 + 5 + 10) / rules.rule_max() + 0.5)  # tier 1 + senior title + remote, rescaled
 
 
 def test_tier3_data_lane_drops_off_function_and_rejects_coding_test():
@@ -481,7 +481,8 @@ def test_vault_label_loaders(tmp_path):
         f"{FIT_JD}\n", encoding="utf-8")
 
     apps = labels.load_applications(str(vault))
-    assert sorted((d.source_ref, d.label) for d in apps) == [("Acme_DirOpEx", 1), ("Beta_Pass", 0)]
+    # a not-pursuing folder is a near-miss positive, never a negative
+    assert sorted((d.source_ref, d.label, d.weight) for d in apps) == [("Acme_DirOpEx", 1, 1.0), ("Beta_Pass", 1, 0.5)]
     acme = next(d for d in apps if d.company == "Acme")
     assert acme.text.startswith("Lead process excellence") and "not part of the JD" not in acme.text
     assert acme.url == "https://jobs.example/Acme_DirOpEx"
@@ -544,9 +545,10 @@ def _trained(tmp_path, con):
     rows = []
     for i in range(30):
         rows.append([f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}", FIT_JD, 1, 1.0, now])
-        rows.append([f"n{i}", "jobs_found_passed", None, None, "Beta", f"Software Engineer {i}", OFF_JD, 0, 1.0, now])
+        rows.append([f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}", OFF_JD, 0, 1.0, now])
+    rows.append(["ctx", "jobs_found_passed", "f.md: sales ops", None, "Gamma", "Process Lead", FIT_JD, 0, 1.0, now])
     con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
-    return features.train(con, cv=3, min_df=1, model_dir=str(tmp_path / "models"), log=_quiet)
+    return features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
 
 
 def test_train_predict_top_terms_and_load_latest(tmp_path):
@@ -554,7 +556,10 @@ def test_train_predict_top_terms_and_load_latest(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     assert features.load_latest(con, log=_quiet) is None
     result = _trained(tmp_path, con)
-    assert result["cv_auc"] == 1.0 and result["n_pos"] == 30 and result["n_neg"] == 30
+    assert result["cv_auc"] == 1.0 and result["n_pos"] == 30 and result["n_neg"] == 30   # the passed row is not trained
+    assert result["source_gap"]["vault text"]["n"] == 30 and result["coefficients"]["positive"]
+    assert not any(t in ("lead", "senior", "associate") for t, _ in result["coefficients"]["positive"]
+                   + result["coefficients"]["negative"])
     assert result["fit_weight"] == features.LOW_DATA_FIT_WEIGHT and len(result["warnings"]) == 2
     kind, n_pos, notes = con.execute("SELECT kind, n_pos, notes FROM models").fetchone()
     assert (kind, n_pos, json.loads(notes)["fit_weight"]) == ("tfidf_lr", 30, features.LOW_DATA_FIT_WEIGHT)
@@ -589,3 +594,84 @@ def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
     assert len(pipeline.candidate_ids(con, version.rules_version(), mv)) == 0
     assert len(pipeline.candidate_ids(con, version.rules_version(), "none")) == 6
     con.close()
+
+
+# ---------------------------------------------------------------- 2026-09-15 amendments: level, workplace, country
+def test_required_years_and_level_rule():
+    jd = ("Required:\n- 10+ years of experience in operations\n- 8 years' experience leading programs\n"
+          "- 2+ years of experience with dashboards\n")
+    assert rules.required_years(jd) == [10, 8, 2]
+    reasons, flags, notes = rules.level_rule("Process Excellence Lead", jd, None)
+    assert (reasons, flags, notes) == ([], [], {"max_years": 10, "level": "senior", "senior": True})   # the 2+ line is not the level
+    mid = "Minimum 5-7 years of experience in process improvement."
+    assert rules.level_rule("Process Improvement Lead", mid, None)[1] == ["mid level (at most 5 yrs required)"]
+    assert rules.level_rule("Director, Process Improvement", mid, None)[:2] == ([], [])
+    assert rules.level_rule("Process Improvement Lead", mid, 120_000)[:2] == ([], [])        # band top at the ask
+    junior = "3+ years of experience in data analysis."
+    assert rules.level_rule("Process Analyst", junior, None)[0] == ["junior level (at most 3 yrs required)"]
+    assert rules.level_rule("Process Analyst", junior, 95_000)[:2] == ([], ["few years asked (at most 3) -- pay band says senior"])
+    assert rules.level_rule("Principal Process Analyst", junior, None)[1] == ["few years asked (at most 3) -- title says senior"]
+    assert rules.level_rule("Summer Associate Internship", "", None)[0] == ["early-career title (summer associate)"]
+    assert rules.level_rule("Associate Director, Operational Excellence", "", None) == \
+        ([], [], {"max_years": None, "level": None, "senior": True})
+    assert rules.level_rule("Associate, Operations", "", None)[:2] == ([], [])               # "associate" says nothing
+    assert rules.required_years("Founded 120 years ago; 100 years of experience serving clients. Within 2 years of hire.") == []
+
+
+def test_associate_title_is_not_a_level_reason():
+    rec = rules.screen_row(_row(title="Associate Director, Operational Excellence"))
+    assert not any("level" in r for r in rec.reasons)
+    rec = rules.screen_row(_row(title="Associate, Operational Excellence"))
+    assert not any("level" in r for r in rec.reasons)
+
+
+def test_workplace_from_text_beats_the_multi_state_remote_guess():
+    assert rules.workplace_from_text("This hybrid role includes an in-office presence requirement of 2–4 days per week.") == "hybrid"
+    assert rules.workplace_from_text("Work 3 days a week in the office.") == "hybrid"
+    assert rules.workplace_from_text("This role is fully on-site in Tampa.") == "onsite"
+    assert rules.workplace_from_text("Remote; visit the office 2 days per month.") is None
+    row = _row(workplace_type=None, location_primary="Quincy, Massachusetts",
+               locations='["Quincy, Massachusetts", "Austin, Texas", "Atlanta, Georgia"]',
+               description_text="This hybrid role includes an in-office presence requirement of 2–4 days per week.")
+    rec = rules.screen_row(row)
+    assert rec.notes["workplace_inferred"] == "hybrid"
+    assert "not remote and outside the commute area (per listing)" in rec.reasons
+
+
+def test_non_us_rule():
+    assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]
+    assert rules.non_us_rule(None, ["India - Hyderabad"])[0] == ["outside the US (india)"]
+    assert rules.non_us_rule(None, ["Toronto, ON", "Mississauga"])[0] == ["outside the US (toronto)"]
+    assert rules.non_us_rule("IN", ["Hyderabad, India", "Austin, TX"]) == ([], [], {})       # one US location keeps it
+    assert rules.non_us_rule(None, ["Albuquerque, New Mexico"]) == ([], [], {})
+    assert rules.non_us_rule(None, ["Remote"]) == ([], [], {})
+    assert rules.non_us_rule(None, ["Bengaluru", "Greenville"]) == ([], [], {})                # unknown place: keep
+    assert rules.non_us_rule("US", ["Remote - United States"]) == ([], [], {})
+    rec = rules.screen_row(_row(location_primary="China - Shanghai", workplace_type=None, country="CN"))
+    assert rec.verdict == "reject" and "outside the US (country CN)" in rec.reasons
+
+
+def test_rule_score_is_rescaled_to_100():
+    assert rules.rule_max() == 30 + 10 + 5 + 10 + 10
+    rec = rules.screen_row(_row(title="Director, Operational Excellence and Business Transformation", pay_max=120_000,
+                                pay_min=100_000, pay_interval="year"))
+    assert rec.rule_score <= 100 and rec.rule_score >= 85
+
+
+def test_normalize_and_boilerplate_lines_for_the_model():
+    assert labels.normalize_text("Lead&#xa0;teams &amp; programs\\xa0now\u00a0here") == "Lead teams & programs now here"
+    jd = ("Own the operating model and value streams.\n"
+          "We are an equal opportunity employer; all qualified applicants receive consideration without regard to race, "
+          "color, religion or disability.\n"
+          "Benefits include dental coverage and paid time off.\n"
+          "Partner with finance on process improvement.")
+    assert labels.strip_boilerplate(jd) == "Own the operating model and value streams.\nPartner with finance on process improvement."
+    text = features.doc_text("Lead, Process Excellence", "Acme Corp values lean. Acme builds.", "Acme Corp")
+    assert "acme" not in text.lower() and "lean" in text
+
+
+def test_screen_row_decodes_entity_line_breaks():
+    row = _row(description_text="About&#xa;&#xa;Required Qualifications&#xa;- 3+ years of experience in reporting&#xa;"
+                                "Preferred Qualifications&#xa;- 10+ years of experience in banking")
+    rec = rules.screen_row(row)
+    assert rec.notes["max_years"] == 10 and "&#xa;" not in report.jd_body(row["description_text"])

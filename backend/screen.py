@@ -77,6 +77,8 @@ def annual_top(job: Listing) -> Optional[float]:
 def is_remote(job: Listing) -> bool:
     if job.extra.get("workplace_type") == "remote":  # the ATS's own flag (finder rows)
         return True
+    if job.extra.get("workplace_type") in ("hybrid", "onsite"):  # stated (or read from the JD) beats a guess
+        return False
     text = f"{job.title} {job.location} {job.description[:600]}".lower()
     if _has(text, P.REMOTE_TERMS):
         return True

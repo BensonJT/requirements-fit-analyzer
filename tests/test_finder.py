@@ -1234,3 +1234,15 @@ def test_overall_averages_the_lenses_rather_than_taking_the_best():
     assert judge.overall("bullseye", "wrong") == "adjacent"         # excellent on one lens still surfaces
     assert judge.overall("adjacent", "wrong") == "stretch"
     assert judge.overall("stretch", "wrong") == "stretch"
+
+
+def test_model_version_changes_when_a_grade_changes_not_just_the_id_set():
+    """Re-grading changes labels and weights but no label_id. If the version ignored that, `rescreen` would
+    skip the corpus because model_version matched, and every score would silently stay on the old model."""
+    from backend.finder import features
+    params = {"C": 4.0}
+    a = features.model_version([["llm:x", 1, 1.0], ["llm:y", 0, 1.0]], params)
+    b = features.model_version([["llm:x", 0, 1.0], ["llm:y", 0, 1.0]], params)   # grade flipped
+    c = features.model_version([["llm:x", 1, 0.6], ["llm:y", 0, 1.0]], params)   # weight changed
+    assert a != b and a != c and b != c
+    assert a == features.model_version([["llm:y", 0, 1.0], ["llm:x", 1, 1.0]], params)   # order-independent

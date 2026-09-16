@@ -322,9 +322,22 @@ def write_batches(con, out_dir: str, queue: list, *, batch_size: int = BATCH_SIZ
 
 
 def overall(grade_process: str, grade_technical: str) -> str:
-    """The better of the two lenses. A role the candidate can do through EITHER capability is work he has done,
-    so the overall label keeps the single-axis meaning every existing consumer already relies on."""
-    return min((grade_process, grade_technical), key=lambda g: rubric.GRADES.index(g))
+    """The AVERAGE of the two lenses, not the better of them.
+
+    Taking the max inflated the corpus by construction -- measured on the 99-posting pilot, 18 of 25 old
+    `stretch` rows became good simply because two judgments replaced one. Averaging removes that.
+
+    `grade` is a COMPATIBILITY COLUMN and nothing more. The decision the user actually makes -- apply, and
+    position the package as process, technical or both -- is made from `grade_process` and `grade_technical`
+    INDIVIDUALLY, because a role strong on one lens is still worth pursuing on that lens's positioning. Any
+    single number loses exactly the information that decision needs: `bullseye`/`wrong` and `adjacent`/`adjacent`
+    both average to `adjacent` while meaning completely different things. It exists so `vw_label_set` and the
+    one existing fit model keep working; the durable answer is a fit model per lens (sprint plan section 18.8).
+
+    Ties round toward the better grade, so a role that is excellent on one lens and irrelevant on the other
+    still surfaces for review rather than being buried."""
+    i = [rubric.GRADES.index(g) for g in (grade_process, grade_technical)]
+    return rubric.GRADES[int(sum(i) / 2)]          # int() truncates = rounds toward the better grade
 
 
 def _validate(obj: dict, allowed: dict) -> Optional[str]:

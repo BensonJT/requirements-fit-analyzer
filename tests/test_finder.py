@@ -1213,14 +1213,6 @@ def test_judge_agreement_reads_the_users_own_decisions(tmp_path):
     con.close()
 
 
-def test_overall_is_the_better_of_the_two_lenses():
-    from backend.finder import judge
-    assert judge.overall("bullseye", "wrong") == "bullseye"        # strong on one lens is still work he has done
-    assert judge.overall("wrong", "adjacent") == "adjacent"
-    assert judge.overall("stretch", "stretch") == "stretch"
-    assert judge.overall("bullseye", "bullseye") == "bullseye"     # the rare both-lenses role
-
-
 def test_import_accepts_two_lens_and_pre_split_result_files():
     from backend.finder import judge, rubric
     allowed = {"p1": "h1"}
@@ -1231,3 +1223,14 @@ def test_import_accepts_two_lens_and_pre_split_result_files():
                             "grade_technical": "wrong"}, allowed) is not None
     assert judge._validate({"posting_id": "nope", "grade": "adjacent"}, allowed) is not None
     assert set(rubric.GRADES) == {"bullseye", "adjacent", "stretch", "wrong"}
+
+
+def test_overall_averages_the_lenses_rather_than_taking_the_best():
+    from backend.finder import judge
+    assert judge.overall("bullseye", "bullseye") == "bullseye"
+    assert judge.overall("wrong", "wrong") == "wrong"
+    assert judge.overall("bullseye", "adjacent") == "bullseye"      # ties round toward the better grade
+    assert judge.overall("adjacent", "adjacent") == "adjacent"
+    assert judge.overall("bullseye", "wrong") == "adjacent"         # excellent on one lens still surfaces
+    assert judge.overall("adjacent", "wrong") == "stretch"
+    assert judge.overall("stretch", "wrong") == "stretch"

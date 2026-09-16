@@ -13,6 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -61,9 +62,12 @@ def exported_ids(dirs) -> set:
 
 def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_reject_random: int = 50,
           seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None,
-          platform: Optional[str] = None) -> dict:
+          platform: Optional[str] = None, relabel: Optional[int] = None) -> dict:
     """The three source pools: the confusable band, the tail, and a deliberate reject sample.
-    `exclude` drops postings already queued elsewhere; `only` keeps just the named pools."""
+    `exclude` drops postings already queued elsewhere; `only` keeps just the named pools.
+    `relabel` re-grades postings that ALREADY carry a label, for when the rubric changed rather than the JD:
+    0 = every labelled posting, N = a sample of about N drawn evenly across the four grades so the
+    grade-migration matrix is measurable at a fraction of the cost."""
     high = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('very_strong', 'strong')
@@ -98,7 +102,24 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
             taken[kind] += 1
             rejects.append(pid)
     result = {"high": high, "low": low, "reject": rejects}
-    if platform:
+    if relabel is not None:
+        labelled = _rows(con, """
+            SELECT l.posting_id, l.grade FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+            WHERE p.status = 'active' AND p.description_text IS NOT NULL
+              AND l.posting_id NOT IN (SELECT posting_id FROM training_exclusions)
+            ORDER BY hash(l.posting_id || ?), l.posting_id""", [str(seed)])
+        by_grade = defaultdict(list)
+        for pid, grade in labelled:
+            by_grade[grade].append(pid)
+        if relabel <= 0:
+            picked = [pid for _, ids in sorted(by_grade.items()) for pid in ids]
+        else:   # even draw per grade, then top up from the largest pools so the total lands near `relabel`
+            per = max(1, relabel // max(1, len(by_grade)))
+            picked = [pid for _, ids in sorted(by_grade.items()) for pid in ids[:per]]
+            for _, ids in sorted(by_grade.items(), key=lambda kv: -len(kv[1])):
+                picked += [pid for pid in ids[per:] if len(picked) < relabel]
+        result = {"relabel": picked}
+    elif platform:
         # Re-grade a whole platform: used after an ingest fix changes what the JDs actually say.
         result = {"platform": [r[0] for r in _rows(con, """
             SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)

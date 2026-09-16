@@ -45,8 +45,13 @@ TARGET FUNCTION (neutral description)
 - Primary: enterprise operations process excellence — process improvement, operational excellence, business
   process optimization, global process ownership, business transformation, Lean Six Sigma, continuous
   improvement, operating-model design, change management in the adoption-and-ownership sense.
-- Secondary (cap at `adjacent`): senior, leadership-facing data / analytics / BI work that is strategic rather
-  than hands-on software or data engineering.
+- Equally primary: workforce / capacity / demand modelling, operations forecasting, and the analytics and data
+  work that produces an operating decision. This is NOT a lesser lane and carries no grade cap. Judge analytics
+  roles by the OBJECT of the analysis — operations decisions are primary; marketing, product or risk analytics
+  are `adjacent`.
+- Engineering-titled roles (data / analytics / BI engineer) are decided by the STACK and the expectations in the
+  JD, never by the title. Building models, pipelines and analysis on a familiar stack is in lane; owning the
+  platform — streaming infrastructure, cloud build-out, CI/CD, ML model engineering — is not.
 - Wrong: plant-floor / manufacturing continuous improvement, product operations, sales or revenue operations,
   IT service-management change control, and roles whose real requirement is industry tenure.
 """

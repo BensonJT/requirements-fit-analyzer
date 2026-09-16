@@ -291,7 +291,7 @@ def coverage_stage(con, *, since=None, log=print) -> Optional[dict]:
             log("Coverage: skipped (evidence not built; run `finder.py evidence --rebuild`)")
             return None
         from . import coverage
-        stats = coverage.cover(con, manifest, embed.load_encoder(), since=since, log=log)
+        stats = coverage.cover(con, manifest, embed.load_encoder(model_name=manifest.embed_model), since=since, log=log)
         log(f"Coverage stage: {stats['covered']} postings ({time.monotonic() - t:.1f}s)")
         return stats
     except Exception as exc:  # logged, never fatal to the sweep

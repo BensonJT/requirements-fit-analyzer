@@ -1185,7 +1185,54 @@ def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatc
     assert dict(con.execute("SELECT source, count(*) FROM hard_negatives GROUP BY 1").fetchall()) == {"audit": 1, "fit_top": 5}
     calib = coverage.current_calibration(con)
     assert calib["version"] == result["version"] and calib["strong"] == result["strong"]
+    assert result["aucs_stretch"].keys() >= {"coverage_gated", "fit_heldout"} and result["reranker"] is None
+    # Experiment switches: title context gets its own requirement cache; the reranker moves scores to its own scale.
+    monkeypatch.setenv("JOBSEARCH_REQ_CONTEXT", "title")
+    monkeypatch.setenv("JOBSEARCH_RERANKER", "fake-reranker")
+    monkeypatch.setattr(embed, "Reranker", FakeReranker)
+    ctx = coverage.calibrate(con, m, FakeEncoder(), n_pseudo=5, hard_top=5, log=_quiet)
+    assert (ctx["req_context"], ctx["reranker"]) == ("title", "fake-reranker") and ctx["version"] != result["version"]
+    assert 0.05 <= ctx["partial"] < ctx["strong"] <= 0.95
+    keys = dict(con.execute("SELECT model, count(DISTINCT posting_id) FROM requirement_units GROUP BY 1").fetchall())
+    assert keys == {f"{m.embed_model}|ctx=title": 6}      # model is not in the cache's key: a switch replaces rows
     con.close()
+
+
+class FakeReranker:
+    """Word-overlap relevance in 0-1; no model download."""
+
+    def __init__(self, name):
+        self.name, self.pairs_scored = name, 0
+
+    def score(self, pairs):
+        import numpy as np
+        self.pairs_scored += len(pairs)
+        out = []
+        for q, d in pairs:
+            qw, dw = set(re.findall(r"[a-z]{3,}", q.lower())), set(re.findall(r"[a-z]{3,}", d.lower()))
+            out.append(len(qw & dw) / max(len(qw), 1))
+        return np.asarray(out, dtype=np.float32)
+
+
+def test_requirement_context_keys_and_rerank_best(monkeypatch):
+    import numpy as np
+    monkeypatch.delenv("JOBSEARCH_REQ_CONTEXT", raising=False)
+    assert coverage.req_model_key("m") == "m" and coverage.query_text("Python", "Staff Engineer") == "Python"
+    monkeypatch.setenv("JOBSEARCH_REQ_CONTEXT", "title")
+    assert coverage.req_model_key("m") == "m|ctx=title"
+    assert coverage.query_text("Python", " Staff Engineer ") == "Staff Engineer: Python"
+    assert coverage.query_text("Python", None) == "Python"
+    ev = [{"text": "mapped the value stream and cut cycle time", "kind": "achievement"},
+          {"text": "wrote python services", "kind": "method"},
+          {"text": "unrelated gardening notes", "kind": "narrative"}]
+    ev_vecs = np.eye(3, dtype=np.float32)
+    req_vecs = np.asarray([[0.9, 0.1, 0.0], [0.1, 0.9, 0.0]], dtype=np.float32)
+    best, arg = coverage.rerank_best(FakeReranker("f"), ["value stream cycle time", "python services"], req_vecs,
+                                     ev_vecs, ev, top=2)
+    ach, meth = coverage.KINDS.index("achievement"), coverage.KINDS.index("method")
+    assert arg[0, ach] == 0 and best[0, ach] == pytest.approx(1.0)
+    assert arg[1, meth] == 1 and best[1, meth] == pytest.approx(1.0)
+    assert best[0, coverage.KINDS.index("narrative")] == -1.0                            # not among the top 2: a gap
 
 
 # ---------------------------------------------------------------- the labeling run (judge)

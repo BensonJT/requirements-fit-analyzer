@@ -11,6 +11,7 @@ reported and stands in only when Required has fewer than MIN_WORK units. Step 3a
 numpy is imported inside functions.
 """
 import math
+import os
 import re
 from typing import Optional
 
@@ -24,6 +25,52 @@ SPEC_FLOOR = 0.2
 MIN_WORK = 3
 MAX_UNITS = 40
 KINDS = tuple(KIND_WEIGHTS)
+
+# Experiment switches (docs/COVERAGE_EXPERIMENTS.md), read at call time; unset = production behaviour.
+#   JOBSEARCH_REQ_CONTEXT=title   embed each requirement as "<posting title>: <requirement>" (own cache key; the
+#                                 requirement_units primary key has no model column, so switching modes or models
+#                                 REPLACES the cached rows -- run each variant on its own DB copy)
+#   JOBSEARCH_RERANKER=<model>    re-score each requirement's top evidence matches with a cross-encoder
+#   JOBSEARCH_RERANK_TOP=<n>      how many cosine-nearest evidence units the reranker reads (default 6)
+
+
+def req_context() -> str:
+    return os.getenv("JOBSEARCH_REQ_CONTEXT", "")
+
+
+def req_model_key(model: str) -> str:
+    """The requirement_units cache key: the embedding model, plus the context mode when one is on."""
+    return f"{model}|ctx={req_context()}" if req_context() else model
+
+
+def query_text(text: str, title: Optional[str]) -> str:
+    return f"{title.strip()}: {text}" if req_context() == "title" and title and title.strip() else text
+
+
+def rerank_best(reranker, queries: list, req_vecs, evid_vecs, ev_units: list, top: Optional[int] = None):
+    """best_by_kind on the reranker's scale: each requirement's `top` cosine-nearest evidence units are re-scored
+    by the cross-encoder, and the best probability per kind (with its evidence index) is kept. Kinds with no
+    candidate stay at -1, i.e. a gap."""
+    import numpy as np
+    n_req = req_vecs.shape[0]
+    best = np.full((n_req, len(KINDS)), -1.0, dtype=np.float32)
+    arg = np.full((n_req, len(KINDS)), -1, dtype=np.int64)
+    if n_req == 0 or evid_vecs.shape[0] == 0:
+        return best, arg
+    top = top or int(os.getenv("JOBSEARCH_RERANK_TOP", "6"))
+    sims = req_vecs @ evid_vecs.T
+    k = min(top, sims.shape[1])
+    cand = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+    pairs = [(q, ev_units[int(j)]["text"]) for q, row in zip(queries, cand) for j in row]
+    probs = reranker.score(pairs).reshape(n_req, k)
+    kind_idx = {kind: i for i, kind in enumerate(KINDS)}
+    for r in range(n_req):
+        for c in range(k):
+            j = int(cand[r, c])
+            kk = kind_idx[ev_units[j]["kind"]]
+            if probs[r, c] > best[r, kk]:
+                best[r, kk], arg[r, kk] = probs[r, c], j
+    return best, arg
 
 
 def term_cap(text: str, not_in_record: list, light_in_record: list) -> tuple:
@@ -217,10 +264,10 @@ def _unit_dicts(reqs: list) -> list:
              "unit_hash": u.unit_hash, "spec": None} for u in reqs]
 
 
-def units_for_text(text: str, encoder) -> tuple:
+def units_for_text(text: str, encoder, title: Optional[str] = None) -> tuple:
     """(unit dicts, work-unit vectors) for a JD that is not a stored posting (vault-only label text)."""
     units = _unit_dicts(R.split_requirements(text))
-    work = [u["text"] for u in units if u["klass"] == "work"]
+    work = [query_text(u["text"], title) for u in units if u["klass"] == "work"]
     return units, encoder.encode(work, query=True)
 
 
@@ -228,30 +275,33 @@ def ensure_requirement_units(con, posting_ids: list, encoder, model: str, log=pr
     """posting_id -> (unit dicts in order, work-unit vector matrix). Cached per (JD hash, splitter, model); only
     postings without a cache row are split and embedded, with identical unit texts encoded once."""
     import numpy as np
-    splitter = R.splitter_fingerprint()
+    splitter, key = R.splitter_fingerprint(), req_model_key(model)
     if not posting_ids:
         return {}
     ids_json = json.dumps(sorted(set(posting_ids)))
     rows = con.execute("SELECT posting_id, description_hash, description_text FROM postings WHERE posting_id IN "
                        "(SELECT unnest(json_transform(?, '[\"VARCHAR\"]')))", [ids_json]).fetchall()
+    titles = dict(con.execute("SELECT posting_id, title FROM postings WHERE posting_id IN "
+                              "(SELECT unnest(json_transform(?, '[\"VARCHAR\"]')))", [ids_json]).fetchall())
     cached = {r[0] for r in con.execute("""
         SELECT DISTINCT r.posting_id FROM requirement_units r JOIN postings p
           ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
         WHERE r.splitter = ? AND r.model = ? AND r.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""",
-                                              [splitter, model, ids_json]).fetchall()}
+                                              [splitter, key, ids_json]).fetchall()}
     todo = [(pid, h, t) for pid, h, t in rows if pid not in cached and t]
     if todo:
         split = {pid: (h, _unit_dicts(R.split_requirements(t)) or [_placeholder()]) for pid, h, t in todo}
-        texts = sorted({u["text"] for _, units in split.values() for u in units if u["klass"] == "work"})
-        vecs = encoder.encode(texts, query=True) if texts else np.zeros((0, 384), dtype=np.float32)
+        texts = sorted({query_text(u["text"], titles.get(pid)) for pid, (_, units) in split.items() for u in units
+                        if u["klass"] == "work"})
+        vecs = encoder.encode(texts, query=True) if texts else np.zeros((0, encoder.dim), dtype=np.float32)
         index = {t: i for i, t in enumerate(texts)}
         now, payload = _now(), []
         for pid, (h, units) in split.items():
             for ord_, u in enumerate(units):
-                vec = vecs[index[u["text"]]] if u["klass"] == "work" else None
+                vec = vecs[index[query_text(u["text"], titles.get(pid))]] if u["klass"] == "work" else None
                 payload.append({"posting_id": pid, "description_hash": h or "", "ord": ord_, **u,
                                 "vec": None if vec is None else json.loads(vectors_json(vec[None, :]))[0]})
-        _insert_requirement_units(con, payload, splitter, model, now)
+        _insert_requirement_units(con, payload, splitter, key, now, dim=int(vecs.shape[1]) if len(texts) else 384)
         log(f"  requirement units: {len(todo)} postings split, {len(texts)} distinct units embedded")
     return load_requirement_units(con, posting_ids, model)
 
@@ -261,18 +311,18 @@ def _placeholder() -> dict:
     return {"text": "", "section": "body", "grp": "role", "weight": 0.0, "klass": "empty", "unit_hash": "", "spec": None}
 
 
-def _insert_requirement_units(con, payload: list, splitter: str, model: str, now) -> None:
+def _insert_requirement_units(con, payload: list, splitter: str, model: str, now, dim: int = 384) -> None:
     shape = json.dumps([{"posting_id": "VARCHAR", "description_hash": "VARCHAR", "ord": "INTEGER", "text": "VARCHAR",
                          "section": "VARCHAR", "grp": "VARCHAR", "weight": "DOUBLE", "klass": "VARCHAR",
                          "unit_hash": "VARCHAR", "vec": "FLOAT[]"}])
     con.execute("BEGIN")
     try:
         for start in range(0, len(payload), 5000):
-            con.execute("""
+            con.execute(f"""
                 INSERT OR REPLACE INTO requirement_units (posting_id, description_hash, splitter, ord, unit_hash, text,
                     section, grp, weight, klass, spec, model, vector, embedded_at)
                 SELECT posting_id, description_hash, $3, ord, unit_hash, text, section, grp, weight, klass, NULL, $4,
-                       vec::FLOAT[384], $5
+                       vec::FLOAT[{dim}], $5
                 FROM (SELECT unnest(json_transform($1, $2), recursive := true))""",
                         [json.dumps(payload[start:start + 5000]), shape, splitter, model, now])
         con.execute("COMMIT")
@@ -284,7 +334,7 @@ def _insert_requirement_units(con, payload: list, splitter: str, model: str, now
 def load_requirement_units(con, posting_ids: list, model: str) -> dict:
     """posting_id -> (unit dicts, work-unit matrix) from the cache for each posting's current JD hash."""
     import numpy as np
-    splitter = R.splitter_fingerprint()
+    splitter, model = R.splitter_fingerprint(), req_model_key(model)
     ids_json = json.dumps(sorted(set(posting_ids)))
     base = """FROM requirement_units r JOIN postings p ON p.posting_id = r.posting_id
               AND coalesce(p.description_hash, '') = r.description_hash
@@ -311,7 +361,7 @@ def load_reference(con, model: str) -> tuple:
     """(work-unit matrix, owner posting ids, distinct posting count) over every survivor's cached units: the
     corpus specificity is measured against."""
     import numpy as np
-    splitter = R.splitter_fingerprint()
+    splitter, model = R.splitter_fingerprint(), req_model_key(model)
     cur = con.execute(f"""
         SELECT r.posting_id, r.vector FROM requirement_units r
         JOIN postings p ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
@@ -323,7 +373,7 @@ def load_reference(con, model: str) -> tuple:
 
 
 def score_units(units: list, work_vecs, owner: str, reference: tuple, evidence: tuple, calib: dict,
-                manifest) -> dict:
+                manifest, title: Optional[str] = None, reranker=None) -> dict:
     """Specificity against the reference, the §16.3 cap, term caps, credit per work unit, and the doc's figures."""
     import numpy as np
     ref_vecs, ref_owner, n_ref, ref_set = reference
@@ -340,7 +390,10 @@ def score_units(units: list, work_vecs, owner: str, reference: tuple, evidence: 
     keep = [i for i in work_idx if units[i] in capped]
     vecs = work_vecs[[work_idx.index(i) for i in keep]] if keep else np.zeros((0, work_vecs.shape[1]), dtype=np.float32)
     ev_units, ev_vecs = evidence
-    best, arg = best_by_kind(vecs, ev_vecs, [u["kind"] for u in ev_units])
+    if reranker is not None:
+        best, arg = rerank_best(reranker, [query_text(units[i]["text"], title) for i in keep], vecs, ev_vecs, ev_units)
+    else:
+        best, arg = best_by_kind(vecs, ev_vecs, [u["kind"] for u in ev_units])
     credits = [credit_row(best[j], arg[j], calib["strong"], calib["partial"], units[i].get("cap"))
                for j, i in enumerate(keep)]
     result = score_doc([u for u in capped], credits, ev_units)
@@ -575,8 +628,16 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
         raise RuntimeError("no evidence units stored; run `finder.py evidence --rebuild` first")
     refresh_hard_negatives(con, hard_top=hard_top, log=log)
     default = {"strong": DEFAULT_STRONG, "partial": DEFAULT_PARTIAL}
+    reranker = None
+    if os.getenv("JOBSEARCH_RERANKER"):
+        from .embed import Reranker
+        reranker = Reranker(os.environ["JOBSEARCH_RERANKER"])
+    log(f"Experiment: encoder {getattr(encoder, 'name', model)} · requirement context "
+        f"{req_context() or 'none'} · reranker {reranker.name if reranker else 'none'}"
+        + (f" (top {os.getenv('JOBSEARCH_RERANK_TOP', '6')})" if reranker else ""))
 
-    positives = [r for r in features.training_set(con) if int(r["label"]) == 1]
+    labeled = features.training_set(con)
+    positives = [r for r in labeled if int(r["label"]) == 1]
     site = dict(con.execute("SELECT posting_id, description_text FROM postings WHERE length(description_text) >= 800 "
                             "AND posting_id IN (SELECT unnest(?::VARCHAR[]))",
                             [[r["posting_id"] for r in positives if r["posting_id"]]]).fetchall())
@@ -585,39 +646,55 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
                           WHERE p.description_text IS NOT NULL GROUP BY 1""").fetchall()
     pos_pids = {r["posting_id"] for r in positives if r["posting_id"]}
     hard = [h for h in hard if h[0] not in pos_pids]
+    # The confusable band: postings the judge graded `stretch`. Never used to pick thresholds, only reported.
+    stretch_rows = [r for r in labeled if int(r["label"]) == 0 and r.get("grade") == "stretch" and r["posting_id"]
+                    and r["posting_id"] not in pos_pids]
+    stretch_site = {pid for (pid,) in con.execute(
+        "SELECT posting_id FROM postings WHERE length(description_text) >= 800 AND posting_id IN "
+        "(SELECT unnest(?::VARCHAR[]))", [[r["posting_id"] for r in stretch_rows]]).fetchall()}
+    stretch_rows = [r for r in stretch_rows if r["posting_id"] in stretch_site]
     pseudo = [r[0] for r in con.execute("""SELECT posting_id FROM label_docs WHERE source = 'pseudo_neg'
                                            AND posting_id IS NOT NULL ORDER BY hash(label_id), label_id LIMIT ?""",
                                         [int(n_pseudo)]).fetchall()]
-    posting_ids = sorted({*site, *(h[0] for h in hard), *pseudo, *survivor_ids(con)})
+    stretch_pids = [r["posting_id"] for r in stretch_rows]
+    posting_ids = sorted({*site, *(h[0] for h in hard), *pseudo, *stretch_pids, *survivor_ids(con)})
     log(f"Calibration set: {len(positives)} positives ({len(site)} with career-site text) · {len(hard)} hard negatives "
-        f"· {len(pseudo)} pseudo-negatives · embedding requirement units for {len(posting_ids)} postings")
+        f"· {len(pseudo)} pseudo-negatives · {len(stretch_rows)} stretch · embedding requirement units for "
+        f"{len(posting_ids)} postings")
     for start in range(0, len(posting_ids), 200):
         ensure_requirement_units(con, posting_ids[start:start + 200], encoder, model, log=log)
     reference = load_reference(con, model)
+
+    titles = dict(con.execute("SELECT posting_id, title FROM postings WHERE posting_id IN "
+                              "(SELECT unnest(?::VARCHAR[]))", [posting_ids]).fetchall())
 
     def score_postings(pids: list) -> dict:
         out = {}
         for start in range(0, len(pids), 200):
             loaded = load_requirement_units(con, pids[start:start + 200], model)
             for pid, (units, vecs) in loaded.items():
-                out[pid] = score_units(units, vecs, pid, reference, (ev_units, ev_vecs), default, manifest)
+                out[pid] = score_units(units, vecs, pid, reference, (ev_units, ev_vecs), default, manifest,
+                                       title=titles.get(pid), reranker=reranker)
         return out
 
     def score_texts(items: list) -> list:
-        split = [_unit_dicts(R.split_requirements(t)) for _, t in items]
-        texts = sorted({u["text"] for units in split for u in units if u["klass"] == "work"})
+        split = [_unit_dicts(R.split_requirements(t)) for _, t, _ in items]
+        texts = sorted({query_text(u["text"], title) for (_, _, title), units in zip(items, split) for u in units
+                        if u["klass"] == "work"})
         vecs = encoder.encode(texts, query=True)
         index = {t: i for i, t in enumerate(texts)}
         out = []
-        for (key, _), units in zip(items, split):
-            work = [index[u["text"]] for u in units if u["klass"] == "work"]
-            mat = vecs[work] if work else np.zeros((0, vecs.shape[1] if vecs.ndim == 2 else 384), np.float32)
-            out.append(score_units(units, mat, f"text:{key}", reference, (ev_units, ev_vecs), default, manifest))
+        for (key, _, title), units in zip(items, split):
+            work = [index[query_text(u["text"], title)] for u in units if u["klass"] == "work"]
+            mat = vecs[work] if work else np.zeros((0, encoder.dim), np.float32)
+            out.append(score_units(units, mat, f"text:{key}", reference, (ev_units, ev_vecs), default, manifest,
+                                   title=title, reranker=reranker))
         return out
 
-    by_pid = score_postings(sorted({*site, *(h[0] for h in hard), *pseudo}))
-    vault_items = [(r["label_id"], r["text"]) for r in positives if r["text"]]
-    by_text = dict(zip([k for k, _ in vault_items], score_texts(vault_items)))
+    t_score = time.monotonic()
+    by_pid = score_postings(sorted({*site, *(h[0] for h in hard), *pseudo, *stretch_pids}))
+    vault_items = [(r["label_id"], r["text"], r["title"]) for r in positives if r["text"]]
+    by_text = dict(zip([k for k, _, _ in vault_items], score_texts(vault_items)))
     pos_docs, pos_keys, pairs = [], [], []
     for r in positives:
         if r["posting_id"] in site:
@@ -629,12 +706,18 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
             pos_docs.append(_prepare(by_text[r["label_id"]]))
             pos_keys.append(r)
     hard_docs = [_prepare(by_pid[h[0]]) for h in hard]
+    stretch_docs = [_prepare(by_pid[p]) for p in stretch_pids]
+    if reranker:
+        log(f"  reranker: {reranker.pairs_scored} distinct pairs scored in {time.monotonic() - t_score:.0f}s")
     pseudo_docs = [_prepare(by_pid[p]) for p in pseudo]
     avail = np.asarray([any(u["kind"] == k for u in ev_units) for k in KINDS], dtype=np.float32)
 
     grid = []
-    for strong in np.arange(0.66, 0.901, 0.02):
-        for partial in np.arange(0.54, strong - 0.019, 0.02):
+    # Cosines live in a narrow band (0.5-0.9); reranker probabilities span 0-1, so they get a wider, coarser grid.
+    strongs, p_lo, step = ((np.arange(0.30, 0.951, 0.05), 0.05, 0.05) if reranker
+                           else (np.arange(0.66, 0.901, 0.02), 0.54, 0.02))
+    for strong in strongs:
+        for partial in np.arange(p_lo, strong - step + 0.001, step):
             pos_s = _grid_scores(pos_docs, strong, partial, avail)
             hard_s = _grid_scores(hard_docs, strong, partial, avail)
             grid.append((_auc_np([s["primary"] for s in pos_s], [s["primary"] for s in hard_s]) or 0.0,
@@ -667,6 +750,14 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
                                      [blend(s["primary"], f, w) for s, f in zip(hard_s, hard_fit)])
     best_blend = max(BLEND_GRID, key=lambda w: aucs[f"blend_{w}"] or 0)
     pseudo_auc = _auc_np(pos_primary, [s["primary"] for s in pseudo_s])
+    stretch_s = _grid_scores(stretch_docs, strong, partial, avail)
+    stretch_fit = [oof.get(r["label_id"], screen_fit.get(r["posting_id"])) for r in stretch_rows]
+    aucs_stretch = {"coverage_required": _auc_np([s["required"] for s in pos_s], [s["required"] for s in stretch_s]),
+                    "coverage_gated": _auc_np([s["primary"] for s in pos_s], [s["primary"] for s in stretch_s]),
+                    "fit_heldout": _auc_np(pos_fit, stretch_fit),
+                    f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s, pos_fit)],
+                                                   [blend(s["primary"], f, best_blend)
+                                                    for s, f in zip(stretch_s, stretch_fit)])}
     paired = [(pos_s[i]["primary"], _grid_scores([d], strong, partial, avail)[0]["primary"]) for i, d in pairs]
     paired = [(a, b) for a, b in paired if a is not None and b is not None]
     gap = float(np.mean([b - a for a, b in paired])) if paired else None
@@ -675,7 +766,9 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
              "aucs": aucs, "pseudo_auc": pseudo_auc, "hard_negative_median": float(np.median(hard_primary))
              if hard_primary else None, "positive_median": float(np.median(pos_primary)) if pos_primary else None,
              "paired_gap_vault_minus_site": gap, "paired_n": len(paired), "evidence_version": ev_version,
-             "splitter": R.splitter_fingerprint(), "n_pos": len(pos_docs), "n_hard": len(hard_docs)}
+             "splitter": R.splitter_fingerprint(), "n_pos": len(pos_docs), "n_hard": len(hard_docs),
+             "aucs_stretch": aucs_stretch, "n_stretch": len(stretch_docs), "encoder": getattr(encoder, "name", model),
+             "req_context": req_context() or None, "reranker": reranker.name if reranker else None}
     version = hashlib.sha1(json.dumps(notes, sort_keys=True, default=str).encode()).hexdigest()[:12]
     con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, notes) "
                 "VALUES (?, 'coverage', ?, ?, ?, ?, ?)", [version, _now(), len(pos_docs), len(hard_docs), best_auc,
@@ -684,6 +777,8 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     log(f"Calibration {version} ({time.monotonic() - t0:.0f}s): COVER_STRONG {strong} · COVER_PARTIAL {partial} · "
         f"COVERAGE_REJECT {fmt(reject)} · COVERAGE_REVIEW {fmt(review)}")
     log("  AUC positives vs hard negatives: " + " · ".join(f"{k} {fmt(v)}" for k, v in aucs.items()))
+    log(f"  AUC positives vs stretch (n={len(stretch_docs)}): "
+        + " · ".join(f"{k} {fmt(v)}" for k, v in aucs_stretch.items()))
     log(f"  best blend weight {best_blend} · sanity AUC positives vs pseudo-negatives {fmt(pseudo_auc)}")
     log(f"  medians: positives {fmt(notes['positive_median'])} · hard negatives {fmt(notes['hard_negative_median'])}")
     log(f"  paired gap (vault copy minus career-site copy, n={len(paired)}): {fmt(gap)} points")

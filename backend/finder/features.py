@@ -105,8 +105,15 @@ def training_set(con) -> list:
     return kept
 
 
-def model_version(label_ids: list, params: dict) -> str:
-    payload = json.dumps([sorted(label_ids), sorted(params.items())], default=str)
+def model_version(labels: list, params: dict) -> str:
+    """Hash of the training LABELS (id, label, weight) plus the params.
+
+    Hashing ids alone was a bug: re-grading the corpus changed every grade but not a single label_id, so the
+    version stayed identical, the model file was silently overwritten, and `rescreen` -- which re-screens a row
+    only when `model_version` differs -- would have skipped the entire corpus. The scores would have stayed on
+    the old model with no error anywhere. Caught 2026-09-16 when the two-lens re-grade produced a materially
+    better model under the same version string."""
+    payload = json.dumps([sorted(labels), sorted(params.items())], default=str)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -178,7 +185,7 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     params = {"C": C, "min_df": min_df, "max_df": max_df, "ngram": list(ngram), "max_features": max_features, "cv": cv,
               "seed": seed, "features": FEATURE_VERSION, "copies": len(pairs), "stop_words": hashlib.sha1(
                   " ".join(sorted(P.MODEL_STOP_WORDS)).encode()).hexdigest()[:8]}
-    version = model_version([r["label_id"] for r in rows], params)
+    version = model_version([[r["label_id"], int(r["label"]), float(r["weight"] or 1.0)] for r in rows], params)
 
     warnings = []
     if n_pos < LOW_DATA_MIN:

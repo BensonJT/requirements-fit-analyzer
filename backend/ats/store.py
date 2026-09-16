@@ -391,6 +391,48 @@ CREATE OR REPLACE VIEW vw_label_set AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     WHERE length(p.description_text) >= 800;
 
+-- Per-lens training sets (sprint plan 18.8). Identical to vw_label_set except that the graded rows carry the
+-- lens grade instead of the averaged one, and only rows judged on that lens take part. The shared sources
+-- (vault documents, decisions) stay in both: they describe the candidate, not a lens, and they anchor what
+-- "his world" looks like while the lens grades do the discriminating.
+CREATE OR REPLACE VIEW vw_label_set_process AS
+    SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
+    FROM label_docs WHERE text IS NOT NULL
+    UNION ALL
+    SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
+    FROM vw_decisions d JOIN postings p USING (posting_id)
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    UNION ALL
+    SELECT 'llm:' || l.posting_id,
+           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN l.grade_process IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE l.grade_process WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+                                WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           l.grade_process
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WHERE length(p.description_text) >= 800 AND l.grade_process IS NOT NULL;
+
+CREATE OR REPLACE VIEW vw_label_set_technical AS
+    SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
+    FROM label_docs WHERE text IS NOT NULL
+    UNION ALL
+    SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
+    FROM vw_decisions d JOIN postings p USING (posting_id)
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    UNION ALL
+    SELECT 'llm:' || l.posting_id,
+           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN l.grade_technical IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE l.grade_technical WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+                                  WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           l.grade_technical
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WHERE length(p.description_text) >= 800 AND l.grade_technical IS NOT NULL;
+
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS
     SELECT posting_id, employer, title, location_primary, status,

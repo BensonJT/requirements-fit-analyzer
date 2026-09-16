@@ -273,6 +273,15 @@ COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state
 
 TRAVEL_MAX_PCT = None      # travel percent limit; None skips the travel rule
 MAX_DIRECT_REPORTS = None  # direct-report limit; None skips the team-size rule
+# Fields the candidate HAS. A years-requirement written as a disjunctive list -- "10+ years in Supply Chain,
+# Operations, Logistics, Manufacturing, Consulting, or a related field" -- is not a domain gate when one of the
+# alternatives is his own field. Measured 2026-09-16: 193 of 1,194 flagged postings (16%) are this shape.
+CANDIDATE_TENURE_FIELDS = [
+    "operations", "consulting", "process improvement", "continuous improvement", "operational excellence",
+    "process excellence", "business excellence", "transformation", "business process", "program management",
+    "project management", "change management", "operations management", "business operations",
+]
+
 DOMAIN_TENURE_TERMS = []   # industries where "N+ years in <industry>" is a gate worth flagging
 CORRIDOR_PLACES = []       # places where a Required-block plant term means a manufacturing role; "name, st" pins the state
 FAITH_COMP_FLOOR = None    # comp floor when FAITH_SIGNALS fire

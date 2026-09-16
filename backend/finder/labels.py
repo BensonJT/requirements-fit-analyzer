@@ -8,7 +8,8 @@ Sources (docs/SPRINT_PLAN.md section 8, amended 2026-09-15):
 - jobs_found_passed     `## Passed / Filtered Out` rows; kept as label 0 for the record but never trained on
                         (features.TRAIN_EXCLUDED_SOURCES): a JD that reached the vault had something that fit.
 - pseudo_neg            random postings with a JD and no function term in the title; label 0, weight 0.5.
-Decisions (build / pass) join these through `vw_label_set`; `pass` decisions are not trained on either.
+Decisions (build / pass) join these through `vw_label_set`; `pass` decisions are not trained on either. So do
+the graded labels from the judge (`llm_judge`, `user_adjudicated`), which live in `llm_labels`, not here.
 
 Positives matched to a posting by URL or req id carry the posting's own text, so both classes come from the
 same career sites and the model cannot learn where a JD was copied from.
@@ -356,8 +357,11 @@ def collect(con, vault_dir: str, n_pseudo: int = 1500, seed: int = 7) -> tuple:
     for group in (apps, escalated, passed):
         match_to_postings(con, group, index)
     # Nothing the user has seen may become a pseudo-negative: vault docs, passed rows, and decided postings.
+    # Nor anything the judge has read -- a graded posting carries a real label, and sampling it as "unlabeled"
+    # would both waste a slot and score it at the pseudo-negative weight instead of its grade's.
     positives = {d.posting_id for d in apps + escalated + passed if d.posting_id}
     positives |= {pid for (pid,) in con.execute("SELECT posting_id FROM decisions").fetchall()}
+    positives |= {pid for (pid,) in con.execute("SELECT posting_id FROM vw_llm_labels_latest").fetchall()}
     pseudo = pseudo_negatives(con, n=n_pseudo, seed=seed, exclude=positives) if n_pseudo else []
     return apps + escalated + passed + pseudo, {"passed_skipped": dict(skipped)}
 
@@ -401,7 +405,8 @@ def label_counts(con) -> dict:
             SELECT source, label, count(*), count(text), count(posting_id) FROM label_docs GROUP BY 1, 2""").fetchall():
         by_source[(source, label)] = {"docs": docs, "with_text": with_text, "matched": matched}
     for source, label, docs in con.execute("SELECT source, label, count(*) FROM vw_label_set "
-                                           "WHERE source = 'decision' GROUP BY 1, 2").fetchall():
+                                           "WHERE source NOT IN (SELECT DISTINCT source FROM label_docs) "
+                                           "GROUP BY 1, 2").fetchall():
         by_source[(source, label)] = {"docs": docs, "with_text": docs, "matched": docs}
     pos = sum(c["with_text"] for (s, l), c in by_source.items() if l == 1)
     context = sum(c["docs"] for (s, l), c in by_source.items() if l == 0 and s != "pseudo_neg")

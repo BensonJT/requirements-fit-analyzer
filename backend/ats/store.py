@@ -309,10 +309,13 @@ CREATE OR REPLACE VIEW vw_coverage_latest AS
     SELECT c.* FROM coverage c JOIN postings p ON p.posting_id = c.posting_id AND coalesce(p.description_hash, '') = c.description_hash
     QUALIFY row_number() OVER (PARTITION BY c.posting_id ORDER BY c.scored_at DESC) = 1;
 
+-- The user's own adjudication always wins over a judge grade for the same posting, whenever it was written;
+-- otherwise the newest grade for the posting's current text.
 CREATE OR REPLACE VIEW vw_llm_labels_latest AS
     SELECT l.* FROM llm_labels l JOIN postings p ON p.posting_id = l.posting_id
       AND coalesce(p.description_hash, '') = l.description_hash
-    QUALIFY row_number() OVER (PARTITION BY l.posting_id ORDER BY l.judged_at DESC) = 1;
+    QUALIFY row_number() OVER (PARTITION BY l.posting_id
+                               ORDER BY (l.scorer = 'user-adjudicated') DESC, l.judged_at DESC) = 1;
 
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
 CREATE OR REPLACE VIEW vw_hard_negatives AS
@@ -340,13 +343,28 @@ CREATE OR REPLACE VIEW vw_shortlist AS
 CREATE OR REPLACE MACRO vw_scored_new(days) AS TABLE
     SELECT * FROM vw_shortlist WHERE days_since_first_seen <= days::INTEGER ORDER BY final_score DESC;
 
+-- Every label the model may see, one row per source. `grade` is the judge's four-way grade where the row
+-- came from the labeling run (sprint plan section 17) and NULL everywhere else; features.training_set picks
+-- one row per job by SOURCE_PRIORITY and drops training_exclusions.
 CREATE OR REPLACE VIEW vw_label_set AS
-    SELECT label_id, source, posting_id, company, title, text, label, weight FROM label_docs WHERE text IS NOT NULL
+    SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
+    FROM label_docs WHERE text IS NOT NULL
     UNION ALL
     SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
-           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0
+           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
-    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL;
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    UNION ALL
+    -- Graded labels: bullseye / adjacent are positives (1.0 / 0.6), stretch / wrong the hard negatives the
+    -- model never had (0.5 / 1.0). A user-adjudicated row is a separate, higher-priority source.
+    SELECT 'llm:' || l.posting_id,
+           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN l.grade IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE l.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           l.grade
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WHERE length(p.description_text) >= 800;
 
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS

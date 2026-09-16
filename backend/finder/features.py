@@ -1,8 +1,17 @@
 """The fit model: TF-IDF + logistic regression trained on the user's own labels (`vw_label_set`).
 
-Positives are JDs the user took far enough to save (applications, escalated blocks, build decisions);
-negatives are pseudo-negatives sampled from the corpus. Nothing the user read is a negative: a pass on a
-saved JD was a doubt about nuance, not about its language. The model sees function and content only:
+Positives are JDs the user took far enough to save (applications, escalated blocks, build decisions) plus the
+postings the judge graded `bullseye` / `adjacent`; negatives are the judge's `wrong` / `stretch` grades and
+pseudo-negatives sampled from the corpus. Nothing the user read is a negative: a pass on a saved JD was a
+doubt about nuance, not about its language.
+
+The graded labels (sprint plan section 17) are why the negatives are worth anything. Trained on random
+pseudo-negatives alone the model could not tell a bullseye from a senior generalist that shares its
+vocabulary, because it had never seen one; `wrong` and `stretch` rows from the confusable band are exactly
+that missing evidence. Grades are weighted, not thresholded -- bullseye 1.0, adjacent 0.6, stretch 0.5,
+wrong 1.0 -- so the uncertain middle informs the fit without being asserted as a hard label.
+
+The model sees function and content only:
 employer names, digits, level words, logistics and career-site boilerplate are removed (MODEL_STOP_WORDS),
 and terms in more than half the documents are dropped, so it cannot learn level or page layout.
 
@@ -13,7 +22,7 @@ model has been trained or the libraries are missing.
 import hashlib
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -31,8 +40,17 @@ LOW_DATA_FIT_WEIGHT = 0.15  # pipeline.combine weight for `fit` under the warnin
 FEATURE_VERSION = "4"       # bump when doc_text / vectorizer settings change (part of model_version)
 TRAIN_EXCLUDED_SOURCES = ("jobs_found_passed",)   # context only: a JD that reached the vault is never a negative
 TOKEN_PATTERN = r"(?u)\b[^\W\d_]{2,}\b"          # letters only: no years, percentages or req numbers
-# When one job appears under several sources, the first source in this order supplies its label.
-SOURCE_PRIORITY = ("application", "decision", "jobs_found_escalated", "jobs_found_passed", "pseudo_neg")
+# When one job appears under several sources, the first source in this order supplies its label. The user's own
+# adjudication outranks everything; the vault outranks the judge (sprint plan section 17, STATUS decisions 3-4).
+SOURCE_PRIORITY = ("user_adjudicated", "application", "decision", "jobs_found_escalated", "llm_judge",
+                   "jobs_found_passed", "pseudo_neg")
+GRADED_SOURCES = ("user_adjudicated", "llm_judge")
+# Sources deduped against higher-priority rows by company + similar title, not only by posting_id: one job can
+# reach the corpus as several requisitions. Graded rows are never matched against each other -- an employer's
+# boilerplate makes unrelated roles look alike (section 17.2), and collapsing them would throw labels away.
+FUZZY_DEDUPED_SOURCES = ("decision", "llm_judge")
+FUZZY_DEDUPE_KEYS_FROM = ("application", "decision", "jobs_found_escalated", "jobs_found_passed",
+                          "user_adjudicated")
 
 
 def _now():
@@ -56,19 +74,21 @@ def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] =
 
 
 def training_set(con) -> list:
-    """vw_label_set rows as dicts, one per job: deduped on posting_id, then on company + similar title
-    (decision rows only, where the vault copy of the same job usually exists), by SOURCE_PRIORITY."""
-    cols = ("label_id", "source", "posting_id", "company", "title", "text", "label", "weight")
+    """vw_label_set rows as dicts, one per job: postings in `training_exclusions` dropped outright, then
+    deduped on posting_id and on company + similar title (FUZZY_DEDUPED_SOURCES), by SOURCE_PRIORITY."""
+    cols = ("label_id", "source", "posting_id", "company", "title", "text", "label", "weight", "grade")
     rows = [dict(zip(cols, r)) for r in con.execute(f"SELECT {', '.join(cols)} FROM vw_label_set").fetchall()]
+    excluded = {pid for (pid,) in con.execute("SELECT posting_id FROM training_exclusions").fetchall()}
     rows = [r for r in rows if r["source"] not in TRAIN_EXCLUDED_SOURCES
-            and not (r["source"] == "decision" and r["label"] == 0)]
+            and not (r["source"] == "decision" and r["label"] == 0)
+            and r["posting_id"] not in excluded]
     rank = {s: i for i, s in enumerate(SOURCE_PRIORITY)}
     rows.sort(key=lambda r: (rank.get(r["source"], len(rank)), r["label_id"]))
     kept, seen_pids, by_first_word = [], set(), defaultdict(list)
     for r in rows:
         if r["posting_id"] and r["posting_id"] in seen_pids:
             continue
-        if r["source"] == "decision":
+        if r["source"] in FUZZY_DEDUPED_SOURCES:
             keys = company_keys(r["company"] or "")
             bucket = {k.split()[0] for k in keys if k}
             if any(company_matches(norm_company(o["company"] or ""), keys) and similar_title(r["title"] or "", o["title"] or "")
@@ -79,7 +99,7 @@ def training_set(con) -> list:
         kept.append(r)
         if r["posting_id"]:
             seen_pids.add(r["posting_id"])
-        if r["source"] != "pseudo_neg":
+        if r["source"] in FUZZY_DEDUPE_KEYS_FROM:
             for k in company_keys(r["company"] or ""):
                 by_first_word[k.split()[0]].append(r)
     return kept
@@ -198,13 +218,24 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
         "confusion_at_0_5": confusion, "pos_mean_fit_oof": float(oof[y_arr == 1].mean()),
         "pos_mean_fit_in_sample": float(in_sample[y_arr[:n_jobs] == 1].mean()),
         "neg_mean_fit_oof": float(oof[y_arr == 0].mean()), "warnings": warnings, "fit_weight": fit_weight,
-        "rows": rows, "oof": cvr["oof"],
+        "rows": rows, "oof": cvr["oof"], "n_by_source": dict(Counter(r["source"] for r in rows)),
+        "grades": grade_report(rows, oof[:n_jobs]),
+        "grades_graded_only": grade_report(rows, oof[:n_jobs], positives_from="graded"),
     }
     log(f"Model {version}: {n_pos} pos / {n_neg} pseudo-neg · {cv}-fold AUC {_fmt(cvr['auc'])} · precision@20 "
         f"{_fmt(cvr['precision_at_20'])} · positives mean fit {result['pos_mean_fit_oof']:.2f} held-out / "
         f"{result['pos_mean_fit_in_sample']:.2f} in-sample · confusion@0.5 {confusion} → {path}")
     log("Held-out fit of positives by where their text came from (a large gap = the model learned the source): "
         + " · ".join(f"{k} {v['mean']:.2f} (n={v['n']})" for k, v in source_gap.items()))
+    log("Rows by source: " + " · ".join(f"{k} {v}" for k, v in sorted(result["n_by_source"].items())))
+    g = result["grades"]
+    if g["by_grade"]:
+        log("Held-out fit by judge grade: "
+            + " · ".join(f"{k} {v['mean']:.2f} (n={v['n']})" for k, v in g["by_grade"].items()))
+        log(f"AUC positives vs graded `wrong` {_fmt(g.get('auc_vs_wrong'))} · vs `stretch` "
+            f"{_fmt(g.get('auc_vs_stretch'))}  (graded positives only: "
+            f"{_fmt(result['grades_graded_only'].get('auc_vs_wrong'))} / "
+            f"{_fmt(result['grades_graded_only'].get('auc_vs_stretch'))})")
     return result
 
 
@@ -237,6 +268,30 @@ def _source_gap(con, rows: list, oof, pairs: Optional[dict] = None) -> dict:
         groups["paired: vault copy"].append(float(oof[i]))
         groups["paired: career-site copy"].append(float(oof[j]))
     return {k: {"n": len(v), "mean": float(sum(v) / len(v))} for k, v in groups.items() if v}
+
+
+def grade_report(rows: list, oof, positives_from: str = "any") -> dict:
+    """Held-out fit by judge grade, and the AUC that matters after the labeling run: positives against the
+    postings graded `wrong` (and, separately, `stretch`). Before the run those negatives did not exist, so the
+    only measurable AUC was against random postings, which any vocabulary model wins.
+
+    `positives_from` = 'any' scores every label-1 row; 'graded' uses only the bullseye / adjacent rows, which
+    is the harder and more honest comparison (both sides then come from the same corpus and the same judge)."""
+    by_grade, positives = defaultdict(list), []
+    for r, p in zip(rows, oof):
+        p = float(p)
+        if r.get("grade"):
+            by_grade[r["grade"]].append(p)
+        if r["label"] == 1 and (positives_from == "any" or r.get("grade") in ("bullseye", "adjacent")):
+            positives.append(p)
+    out = {"by_grade": {g: {"n": len(v), "mean": sum(v) / len(v)} for g, v in sorted(by_grade.items())},
+           "positives": {"n": len(positives), "mean": sum(positives) / len(positives) if positives else None}}
+    for grade in ("wrong", "stretch"):
+        neg = by_grade.get(grade, [])
+        if positives and neg:
+            y = [1] * len(positives) + [0] * len(neg)
+            out[f"auc_vs_{grade}"] = _auc(y, positives + neg)
+    return out
 
 
 def _extreme_terms(vec, clf, k: int = 25) -> dict:

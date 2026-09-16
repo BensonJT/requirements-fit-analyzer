@@ -158,7 +158,8 @@ def cmd_train(con, a):
     result = features.train(con, C=a.C, cv=a.cv)
     for side in ("positive", "negative"):
         print(f"Most {side} terms: " + ", ".join(f"{t} {c:+.2f}" for t, c in result["coefficients"][side]))
-    print("Highest held-out fit among pseudo-negatives (unlabeled postings that read like fits):")
+    print("Highest held-out fit among the negatives (the rows the model still reads as fits — since the "
+          "labeling run these are mostly graded `wrong`/`stretch`, not random postings):")
     for prob, source, label_id, company, title in features.hard_negatives(result):
         ref = con.execute("SELECT source_ref FROM label_docs WHERE label_id = ?", [label_id]).fetchone()
         print(f"  {prob:.2f}  {source:<20} {(company or '')[:28]:<28} {(title or '')[:60]:<60} "

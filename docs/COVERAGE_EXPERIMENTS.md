@@ -14,12 +14,16 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | R2 | baseline, evidence synced from Postgres | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
 | S1 | evidence = bullets + duty statements + SOAR only | 0.550 | 0.543 | 0.706 | 0.661 (w 0.6) | 0.785 | 23.2 / 20.2 |
 | S2a | R2 re-run, adds the stretch set (806) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
+| **S2** | **requirement embedded as "<title>: <requirement>"** | **0.610** | **0.607** | 0.706 | 0.736 (w 0.6) | 0.822 | — |
 
 **Against `stretch` (the confusable band, never used to pick thresholds):**
 
 | Run | coverage_gated | fit_heldout | blend (best w) |
 |---|---|---|---|
 | S2a | 0.575 | **0.955** | 0.854 |
+| S2 | **0.610** | 0.955 | 0.875 |
+
+Caution for R1–S2: `fit_heldout` on hard negatives mixed held-out scores (positives) with the live screen's IN-SAMPLE fit_prob (hard negatives, 299 of which are training rows). Coverage AUCs are unaffected; fit and blend AUCs on hard negatives are not clean. Fixed before S3 (see S2).
 
 ## R1 — baseline (2026-09-16 15:48, calibration `daaf23f5d142`, 1,138 s)
 First run that completed (earlier attempts died on the 9p mount; see STATUS). Evidence: 2,888 units embedded 2026-09-15 23:39, before 30 units of bullet edits on 9/16.
@@ -48,6 +52,15 @@ Code change only in reporting: calibration now also scores the 806 postings the 
 - Hard-negative AUCs identical to R2 (as they must be): coverage_gated 0.559 · fit_heldout 0.706 · blend_0.75 0.706.
 - **vs stretch:** coverage_required 0.576 · coverage_gated 0.575 · **fit_heldout 0.955** · blend_0.75 0.854.
 - **Reading — the yardstick was biased.** The fit model separates positives from the confusable band almost perfectly on held-out folds, yet looked mediocre (0.706) against the hard negatives. 200 of those 439 are `fit_top`: unlabeled postings selected *because* the fit model scored them highest, which caps the fit model's AUC on that set by construction (and they are unconfirmed guesses, not judged negatives). Coverage is weak on both sets, and blending it in drags the stretch AUC from 0.955 to 0.854. From S2 on, calibration also reports AUC against the 299 judge-confirmed `wrong` rows alone.
+
+## S2 — title context around each requirement (17:01, calibration `4b54b8aa215d`, 3,315 s; scratch DB)
+`JOBSEARCH_REQ_CONTEXT=title`: each requirement unit is embedded as `"<posting title>: <requirement>"`; evidence units unchanged; bge-small. Nearly every unit becomes unique per posting (~7,000 distinct units per 200 postings), so embedding took ~48 min against ~10 for plain units.
+- Thresholds: COVER_STRONG 0.70 · COVER_PARTIAL 0.62 · REJECT 28.271 · REVIEW 37.857
+- AUC vs hard negatives: coverage_required **0.610** · coverage_role 0.584 · coverage_gated **0.607** · fit_heldout 0.706 · blend 0.730/**0.736**/0.720/0.663 · sanity 0.822
+- AUC vs judge-confirmed wrong only (n=299): coverage_gated 0.637 · fit 0.995 · blend_0.6 0.948 — **the fit and blend figures here are invalid**: the fit scores for these rows came from the live screen, which trained on them. Found from this output; `hard_fit` now uses out-of-fold scores wherever the posting is a training row (applies from S3).
+- AUC vs stretch (n=806): coverage_required 0.605 · coverage_gated **0.610** · fit_heldout 0.955 · blend_0.6 0.875
+- Top hard negatives by coverage: Machinify AI Engineer Agentic Systems (82.2), Salesforce Senior Manager Global Cloud Campaigns (80.0), Machinify Staff AI Engineer (80.0), CVS Health Senior Manager Release Engineering (80.0), Amgen Senior Manager Global ERP Operations Lead SAP (78.3), Databricks Director Agent & AI Search (77.3), Navy Federal Principal AI Engineer Agentic AI (76.9).
+- **Reading — the first real gain.** +0.048 on hard negatives and +0.035 on stretch, on coverage alone, from one line of context. It confirms the diagnosis (bare requirement sentences lose the role) but coverage is still far below the fit model on the confusable band (0.61 vs 0.955), and blending still lowers the stretch AUC. Kept as a candidate for S4; not a ranking signal on its own. Cost: ~5× the embedding time.
 
 ## Plan for the next steps (decided with the user 2026-09-16)
 - **S2** — requirement text embedded with the posting title around it (`"<title>: <requirement>"`), bge-small. Also adds a second negative set: postings the judge graded `stretch` (the confusable band), with a re-run baseline (S2a) so the stretch AUC has a reference.

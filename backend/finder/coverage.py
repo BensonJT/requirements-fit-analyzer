@@ -735,7 +735,10 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     oof = _oof_fit(con, log=log)
     screen_fit = dict(con.execute("SELECT posting_id, fit_prob FROM vw_screen_latest WHERE fit_prob IS NOT NULL").fetchall())
     pos_fit = [oof.get(r["label_id"], screen_fit.get(r["posting_id"])) for r in pos_keys]
-    hard_fit = [screen_fit.get(h[0]) for h in hard]
+    # Held-out fit wherever the posting is a training row (judged `wrong` rows are): the live screen's fit_prob is
+    # in-sample for those and scored 0.995 against them in S2. Unlabeled rows (fit_top, audit) have no fold.
+    label_of = {r["posting_id"]: r["label_id"] for r in labeled if r["posting_id"]}
+    hard_fit = [oof[label_of[h[0]]] if label_of.get(h[0]) in oof else screen_fit.get(h[0]) for h in hard]
 
     def blend(cov, fit, w):
         if fit is None:

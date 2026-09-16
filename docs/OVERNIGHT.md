@@ -16,6 +16,21 @@ cd /home/bensonjt/code/jobsearch
 ls db/batches_2lens/*.result.json | wc -l          # batches done
 ```
 
+## Starting Terminal B
+
+Open it in the **jobsearch repo, not the Keystone vault**:
+
+```bash
+cd /home/bensonjt/code/jobsearch
+claude
+```
+
+Then `/login` to the second account, then paste the prompt below.
+
+**Not Keystone:** that vault's `CLAUDE.md` mandates a git sync at session start and a commit-and-push at session end. A second terminal obeying it would push the vault concurrently with Terminal A, which is writing STATUS and the sprint plan tonight. It would also burn its startup budget loading the LifeOS spec and context index, none of which grading needs.
+
+**Terminal B should not commit anything, in either repo.** It only writes `*.result.json` files, which are gitignored.
+
 ## Prompt for Terminal B (paste verbatim after `/login` to the Pro account)
 
 > Read `/home/bensonjt/code/jobsearch/docs/OVERNIGHT.md`. You are **Terminal B**: grade batches **descending from batch_118** in `/home/bensonjt/code/jobsearch/db/batches_2lens/`. Before starting, run `ls db/batches_2lens/*.result.json` and skip any batch that already has a result file. Launch 8 Sonnet subagents at a time, each with this task:

@@ -385,6 +385,8 @@ def cover(con, manifest, encoder, *, posting_ids: Optional[list] = None, all_row
     from . import evidence as E
     t0 = time.monotonic()
     model = manifest.embed_model
+    if E.stored_version(con, model) is not None:
+        E.ensure_current(con, manifest, encoder, log=log)
     ev_units, ev_vecs = E.load_matrix(con, model)
     ev_version = E.stored_version(con, model)
     if not ev_units:
@@ -565,6 +567,8 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     from . import features
     t0 = time.monotonic()
     model = manifest.embed_model
+    if E.stored_version(con, model) is not None:
+        E.ensure_current(con, manifest, encoder, log=log)
     ev_units, ev_vecs = E.load_matrix(con, model)
     ev_version = E.stored_version(con, model)
     if not ev_units:

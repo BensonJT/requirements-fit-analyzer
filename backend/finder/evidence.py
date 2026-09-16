@@ -5,11 +5,16 @@ sources. Each source becomes 40-600 character units with a kind (achievement 1.0
 method 0.7) that later scales coverage credit. `[[guard]]` files are loaded for Phase 4 prompts only and are never
 embedded. `not_in_record` terms force a gap; `light_in_record` terms cap a requirement at partial.
 
+A `postgres` source reads rows straight from a database through `psql --csv`: `path` is a libpq connection string,
+normally `$VAR` naming a `.env` entry so the password stays out of the manifest, and `query` is the SELECT. Its rows are handled exactly like a csv
+source's. `evidence_units` is a cache of the sources, not a record: `ensure_current` re-syncs it before coverage.
+
 The unit text never leaves the machine: it lives in `evidence_units` inside the local DuckDB file.
 """
 import csv
 import glob
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -25,7 +30,7 @@ from .labels import normalize_text
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = REPO / "evidence.local.toml"
 KIND_WEIGHTS = {"achievement": 1.0, "duty": 0.9, "narrative": 0.8, "method": 0.7}
-SOURCE_TYPES = ("csv", "markdown", "pdf", "html", "text")
+SOURCE_TYPES = ("csv", "markdown", "pdf", "html", "text", "postgres")
 MIN_UNIT, MAX_UNIT = 40, 600
 
 
@@ -41,6 +46,7 @@ class Source:
     ref_columns: list = field(default_factory=list)
     skip_headings: list = field(default_factory=list)   # blocks under a heading containing one of these are dropped
     skip_patterns: list = field(default_factory=list)   # blocks whose text matches one of these regexes are dropped
+    query: str = ""                                      # postgres only: the SELECT whose rows become blocks
 
 
 @dataclass
@@ -74,7 +80,9 @@ def load_manifest(path: Optional[str] = None) -> Manifest:
     data = tomllib.loads(mp.read_text(encoding="utf-8"))
     base = mp.parent
 
-    def resolve(p: str) -> str:
+    def resolve(p: str, type_: str = "") -> str:
+        if type_ == "postgres":                            # a connection string, not a file; `$VAR` expands at read time
+            return p
         p = os.path.expanduser(p)
         return p if os.path.isabs(p) else str((base / p).resolve())
 
@@ -85,14 +93,25 @@ def load_manifest(path: Optional[str] = None) -> Manifest:
             raise ValueError(f"source {raw.get('name')!r}: kind {kind!r} is not one of {sorted(KIND_WEIGHTS)}")
         if raw.get("type") not in SOURCE_TYPES:
             raise ValueError(f"source {raw.get('name')!r}: type {raw.get('type')!r} is not one of {SOURCE_TYPES}")
-        sources.append(Source(raw["name"], raw["type"], resolve(raw["path"]), kind, list(raw.get("include", [])),
-                              list(raw.get("exclude", [])), list(raw.get("text_columns", [])),
-                              list(raw.get("ref_columns", [])), list(raw.get("skip_headings", [])),
-                              list(raw.get("skip_patterns", []))))
-    guards = [Source(g["name"], g.get("type", "csv"), resolve(g["path"]), "guard", [], [],
-                     list(g.get("text_columns", [])), list(g.get("ref_columns", []))) for g in data.get("guard", [])]
+        _require_query(raw)
+        sources.append(Source(raw["name"], raw["type"], resolve(raw["path"], raw["type"]), kind,
+                              list(raw.get("include", [])), list(raw.get("exclude", [])),
+                              list(raw.get("text_columns", [])), list(raw.get("ref_columns", [])),
+                              list(raw.get("skip_headings", [])), list(raw.get("skip_patterns", [])),
+                              raw.get("query", "")))
+    guards = []
+    for g in data.get("guard", []):
+        _require_query(g)
+        gtype = g.get("type", "csv")
+        guards.append(Source(g["name"], gtype, resolve(g["path"], gtype), "guard", [], [],
+                             list(g.get("text_columns", [])), list(g.get("ref_columns", [])), query=g.get("query", "")))
     return Manifest(str(mp), data.get("embed_model", EMBED_MODEL), sources, guards,
                     list(data.get("not_in_record", [])), list(data.get("light_in_record", [])))
+
+
+def _require_query(raw: dict) -> None:
+    if raw.get("type") == "postgres" and not raw.get("query"):
+        raise ValueError(f"source {raw.get('name')!r}: a postgres source needs a `query`")
 
 
 # ---------------------------------------------------------------- text -> units
@@ -222,7 +241,24 @@ def _files(src: Source) -> list:
     return sorted(found - excluded)
 
 
+def pg_rows(src: Source) -> list:
+    """Rows of `src.query` via `psql --csv`. Raises on any failure: an unreachable database must never read as an
+    empty source, or a rebuild would delete every unit that source produced."""
+    if not shutil.which("psql"):
+        raise RuntimeError(f"source {src.name!r}: psql is not installed")
+    conn = os.path.expandvars(src.path)
+    if "$" in conn:
+        raise RuntimeError(f"source {src.name!r}: {src.path} is not set (add it to .env)")
+    run = subprocess.run(["psql", conn, "--csv", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-c", src.query],
+                         capture_output=True, text=True, timeout=60)
+    if run.returncode != 0:
+        raise RuntimeError(f"source {src.name!r}: psql failed: {run.stderr.strip()[:300]}")
+    return list(csv.DictReader(io.StringIO(run.stdout)))
+
+
 def csv_rows(src: Source) -> list:
+    if src.type == "postgres":
+        return pg_rows(src)
     rows = []
     for path in _files(src):
         with open(path, newline="", encoding="utf-8-sig") as fh:
@@ -241,7 +277,7 @@ def source_blocks(src: Source) -> list:
 
 
 def _raw_blocks(src: Source) -> list:
-    if src.type == "csv":
+    if src.type in ("csv", "postgres"):
         blocks = []
         for i, row in enumerate(csv_rows(src)):
             text = " ".join((row.get(c) or "").strip() for c in src.text_columns if (row.get(c) or "").strip())
@@ -301,6 +337,22 @@ def check(manifest: Manifest, log=print) -> bool:
     """Every source path found, unit counts, three sample units each; False when a path is missing."""
     ok = True
     for src in [*manifest.sources, *manifest.guards]:
+        if src.type == "postgres":
+            try:
+                rows = pg_rows(src)
+            except RuntimeError as exc:
+                log(f"MISSING  {src.name:<20} postgres {exc}")
+                ok = False
+                continue
+            if src.kind == "guard":
+                log(f"guard    {src.name:<20} {len(rows):>5} rows (Phase 4 prompts only; never embedded)")
+                continue
+            units = _units_from_blocks(source_blocks(src))
+            log(f"ok       {src.name:<20} postgres kind {src.kind:<11} rows {len(rows):>4} · units {len(units):>5} "
+                f"· chars {sum(len(t) for _, t in units):>7}")
+            for ref, text in units[:3]:
+                log(f"           [{ref[:50]}] {text[:110]}")
+            continue
         exists = os.path.exists(src.path)
         files = _files(src) if exists else []
         if not exists or not files:
@@ -321,10 +373,18 @@ def check(manifest: Manifest, log=print) -> bool:
     return ok
 
 
-def rebuild(con, manifest: Manifest, encoder, log=print) -> dict:
-    """Syncs `evidence_units` to the manifest: new units embedded, units no longer produced deleted."""
+def rebuild(con, manifest: Manifest, encoder, log=print, units: Optional[list] = None) -> dict:
+    """Syncs `evidence_units` to the manifest: new units embedded, units no longer produced deleted. Refuses when a
+    listed source that has stored units now produces none (a moved file or a down database, not a real deletion)."""
     from .embed import vectors_json
-    units = iter_units(manifest)
+    units = iter_units(manifest) if units is None else units
+    produced = {u.source for u in units}
+    stored = {r[0] for r in con.execute("SELECT DISTINCT source FROM evidence_units WHERE model = ?",
+                                        [manifest.embed_model]).fetchall()}
+    emptied = sorted(s.name for s in manifest.sources if s.name in stored and s.name not in produced)
+    if emptied:
+        raise RuntimeError(f"evidence rebuild refused: {', '.join(emptied)} produced no units but has stored ones "
+                           "(missing file or unreachable database?); fix the source or remove it from the manifest")
     have = {r[0] for r in con.execute("SELECT unit_id FROM evidence_units WHERE model = ?",
                                       [manifest.embed_model]).fetchall()}
     new = [u for u in units if u.unit_id not in have]
@@ -369,6 +429,26 @@ def load_matrix(con, model: str) -> tuple:
               "ref": str(cur["ref"][i]), "text": str(cur["text"][i]), "weight": float(cur["weight"][i])}
              for i in range(len(cur["unit_id"]))]
     return units, stack(cur["vector"])
+
+
+def ensure_current(con, manifest: Manifest, encoder, log=print) -> Optional[str]:
+    """Re-syncs `evidence_units` when the sources changed since the last build (new bullets, edited text). Reading
+    the sources is cheap; only new units are embedded. When a source cannot be read, the stored evidence is used
+    as-is with a warning, so a down database never blocks coverage. Returns the evidence version in effect."""
+    model = manifest.embed_model
+    stored = stored_version(con, model)
+    try:
+        units = iter_units(manifest)
+    except Exception as exc:
+        log(f"Evidence: sources unreadable ({type(exc).__name__}: {exc}); using stored version {stored}")
+        return stored
+    if evidence_version(units, model) == stored:
+        return stored
+    try:
+        return rebuild(con, manifest, encoder, log=log, units=units)["evidence_version"]
+    except RuntimeError as exc:
+        log(f"Evidence: {exc}; using stored version {stored}")
+        return stored
 
 
 def stored_version(con, model: str) -> Optional[str]:

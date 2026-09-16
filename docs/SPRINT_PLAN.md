@@ -489,3 +489,79 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
 - §15.7 adds: hard-negative view populated (count printed); calibration report prints positives-vs-hard-negative AUC for `coverage_required`, `coverage_role`, fit, and each blend weight; specificity weights spot-checked (the five most generic and five most specific units on the survivor set listed); a years line with content yields a work unit (test); a `light_in_record` term caps at partial (test); step 3a runs with weight 0 and the stanza shows both coverage figures.
 - §15.8 adds: the `public` profile prompt contains no string from `RUBRIC_PERSONAL`, the guards file, or the evidence store (test); `personal` refuses without `GEMINI_PAID_TIER=1` (test); a stale-rubric review still blends and is flagged (test).
 - §12 (Phase 5) adds: Batch Mode skill documents the new fit-stanza fields (coverage required / role, gaps, matched, review staleness).
+
+## 17. Amendment — the labeling run: buy the labels the ML layer never had (2026-09-15, user decision; binding, and it reorders §16.6)
+
+**Why this exists.** Phase 3a shipped, was measured, and its §15.7 eyeball failed: the bullseye covered 53.8 where the bar was 80, and the audited misfires landed within 4 points of it. Option A (contrast scoring) was prototyped on the stored vectors and rejected. The diagnosis in `docs/STATUS.md` is that bge-small cosines sit near 0.65 whether or not a requirement genuinely matches, so 93% of requirements fall in one band and every posting scores ~50. Underneath that sits a harder constraint: the finder has **362 positives and 7 audited near misses**. No scoring scheme — embeddings, cross-encoders or an LLM — can be tuned or honestly measured against 7 examples. The labeling run buys that missing evidence. A strong model grades the corpus; the cheap models learn from the grades. That is distillation, and the postings that clear Level 1 are exactly the hard examples where labels carry the most information.
+
+### 17.1 What is graded, and what is deliberately not
+
+One question only: **is this the same kind of work the candidate has done?** Pay, location, level and travel already have a rule engine; letting the judge weigh them corrupts the label. Industry is never a gap by itself — entering an unfamiliar domain is the candidate's pattern, not a risk.
+
+Grades: `bullseye` · `adjacent` · `stretch` · `wrong`, plus `lane`, `confidence`, one `blocker` and a one-sentence `rationale` naming the actual work. Graded, not binary: binary labels filter, graded labels rank.
+
+### 17.2 The queue (`backend/finder/judge.py`)
+
+| Pool | Live count | Why it is in the set |
+|---|---|---|
+| `high` — very_strong + strong | 622 | the confusable band, where ordering fails today |
+| `low` — partial + weak | 1,362 | without it the model only ever sees rows that already scored well |
+| `reject` — content-gate rejects (100), logistics rejects with fit ≥ 0.5 (100), random rejects (50) | 250 | the content-gate slice measures Level 1's **false-negative rate**, which has never been measured |
+
+`interleave()` mixes them 17 / 5 / 3 per 25 exported, so **stopping at any point leaves a label set that spans the range** — the token budget can run out without biasing the data.
+
+**Dedupe: identical JD text only.** Cosine 0.97 collapsed Zillow's "Principal Analytics Engineer" with its "Principal Business Intelligence Manager"; 0.995 plus a title check still collapsed AHEAD's "Senior Manager, Enterprise Transformation" with its "Senior Software Engineer". An employer's boilerplate makes unrelated roles look alike, so text similarity alone is never evidence of a repost. On the live corpus this leaves 34 duplicates out of 2,234 — they copy their representative's grade on import.
+
+### 17.3 The batch protocol
+
+`judge export` writes `db/batches/batch_NNN.md` (gitignored): the public rubric, the neutral lane description, `RUBRIC_PERSONAL` from the gitignored `rubric_local.py`, and up to 25 postings trimmed to their 18 highest-weight requirement units at 220 characters each. **Evidence text is never included** — the judge grades the JD against a description of the record, not against the record itself. A Claude Code subagent per batch writes `batch_NNN.result.json`; `judge import` validates every row against the manifest (unknown posting id or invalid grade is refused and logged) and writes `llm_labels` (schema v5).
+
+**Resume is the design, not a feature bolted on.** Each batch result is written the moment that batch finishes, so a crash, a token limit or a change of plan costs at most one batch. `judge status` prints exactly what is left.
+
+```bash
+# Where did we stop?
+.venv/bin/python finder.py judge status --dir db/batches
+
+# Re-export (only if the rubric, the splitter or the queue design changed — it renumbers the batches):
+.venv/bin/python finder.py judge export --dir db/batches --batch-size 25
+
+# Grade the pending batches: one Claude Code subagent per batch, ~6-8 in parallel, Sonnet.
+#   Prompt: read db/batches/batch_NNN.md, grade every posting, write batch_NNN.result.json as a JSON array of
+#   {posting_id, grade, lane, confidence, blocker, rationale}; reply with only the count and the grade tally.
+
+# Load whatever has come back (safe to run repeatedly, mid-run included):
+.venv/bin/python finder.py judge import --dir db/batches --scorer claude-sonnet-batch
+
+# Check the judge against the user's own behaviour, and write a CSV to eyeball:
+.venv/bin/python finder.py judge report --csv db/snapshots/llm_labels.csv
+```
+
+Cost observed on the pilot: ~70k subagent tokens and ~100 s per 25-posting batch, so the full 78 batches are roughly 5M tokens. That is why the queue is interleaved and the run is resumable across sessions and plans.
+
+### 17.4 Validation before the labels are trusted
+
+1. **Against the user's own behaviour** (`judge agreement`, automatic): postings in the tracker, or marked `build`, should not be graded `wrong`; postings passed with reason code `function` should not be graded `bullseye`. The overlap on the live corpus is thin (28 tracker-matched, 22 build decisions), so it is a smoke test, not proof.
+2. **By hand**: the user eyeballs ~100 rows from the CSV, which carries the grade, the blocker, the rationale, the score it already had and the URL.
+3. **The user's decisions always win.** LLM labels apply to unlabelled postings; where the judge contradicts something the user actually pursued, the conflict is surfaced, never silently written over the user's call.
+
+Pilot evidence (batches 001-002, 50 postings): Henry Schein R134977 → `bullseye`; CVS "VP & COO, Medical Affairs", Centene "Senior Director, Medical Economics" and Novartis "Director, AI Foundations Engineer" → `stretch`; Dandy's NetSuite/order-to-cash role and CVS "Medicaid Risk Adjustment Analytics" → `wrong`. That is the separation Phase 3a could not produce, from the same JD text.
+
+### 17.5 What the labels are for (in priority order)
+
+1. **Retrain the fit model with real negatives.** Today its negatives are 1,500 random postings, which is why it cannot tell a bullseye from a senior generalist that shares its vocabulary. `wrong` and `stretch` rows from the confusable band are the hard negatives it has never had. Highest value, smallest change.
+2. **Re-calibrate coverage honestly** (§16.1): `vw_hard_negatives` stops depending on 7 audited rows.
+3. **Settle the Level 2 question.** The supervised-embedding test ran on 28 rows and proved nothing; with hundreds it either beats TF-IDF or it does not. If it does not, Level 2 becomes a cross-encoder re-ranker over the top few hundred, or nothing.
+4. **Measure Level 1's miss rate** from the graded reject slice, which decides whether the screen's gates are too tight.
+
+### 17.6 Ordering (replaces §16.6's "Phase 4 does not start until 3b is on")
+
+3b stays off: coverage keeps weight 0 until something makes it rank. The labeling run and the retraining it feeds come first; Phase 4's daily Gemma path is unblocked to start after that, since the batch machinery, the rubric split and the `llm_labels` ledger built here are its foundation. Nothing about the §16.8 privacy rules changes: the batch path is `personal` and stays on disk, and evidence text is sent nowhere.
+
+### 17.7 Acceptance
+
+- [ ] ≥ 600 postings graded with the grade distribution reported (the distribution itself is a finding: it says what fraction of Level 1 survivors are genuinely relevant).
+- [ ] `judge agreement` printed; every disagreement with a pursued posting listed for the user.
+- [ ] ~100 rows eyeballed by the user against the CSV.
+- [ ] Fit model retrained with the graded negatives; report AUC and, specifically, whether the named misfires drop below the bullseye.
+- [ ] Coverage re-calibrated against the real hard-negative set; the §15.7 eyeball re-run and its verdict recorded.
+- [ ] Level 1 miss rate reported from the graded rejects.

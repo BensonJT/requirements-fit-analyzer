@@ -5,7 +5,9 @@ and record decisions so nothing is shown twice.
 Usage:
     .venv/bin/python finder.py screen                     # new / changed / version-changed rows
     .venv/bin/python finder.py rescreen-all               # every active row, prints the verdict diff
+    .venv/bin/python finder.py facets [--discover]        # each board's filter scope (country / partition)
     .venv/bin/python finder.py report --out /tmp/x.md     # Jobs_Found file (+ snapshots)
+    .venv/bin/python finder.py lenses --out /tmp/l.md     # strong on process / technical / both
     .venv/bin/python finder.py sync --verbose             # mirror Application_Tracker.md
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
     .venv/bin/python finder.py shortlist --days 7 --n 30
@@ -49,16 +51,38 @@ def _latest_counts(con) -> dict:
 def cmd_screen(con, a):
     since = _utcnow() - timedelta(hours=a.since_hours) if a.since_hours else None
     model = None if a.no_model else features.load_latest(con)
-    pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model)
+    lens_models = {} if a.no_model else features.load_lens_models(con)
+    pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model, lens_models=lens_models)
 
 
 def cmd_rescreen_all(con, a):
     before = _latest_counts(con)
-    pipeline.screen(con, full=True, model=None if a.no_model else features.load_latest(con))
+    pipeline.screen(con, full=True, model=None if a.no_model else features.load_latest(con),
+                    lens_models={} if a.no_model else features.load_lens_models(con))
     after = _latest_counts(con)
     print(f"{'verdict':<10} {'before':>8} {'after':>8} {'diff':>8}")
     for v in sorted(set(before) | set(after)):
         print(f"{v:<10} {before.get(v, 0):>8} {after.get(v, 0):>8} {after.get(v, 0) - before.get(v, 0):>+8}")
+
+
+def cmd_facets(con, a):
+    """Ask each Workday board what it can filter by, resolve a scope, verify it live, store it."""
+    from backend.ats import facets as facets_mod
+    from backend.ats.registry import load_registry
+    rows = [r for r in load_registry() if r["platform"] == "workday"]
+    if a.employer:
+        want = a.employer.lower()
+        rows = [r for r in rows if want in r["employer"].lower()]
+    if not rows:
+        sys.exit("facets: no matching Workday board in the registry")
+    if not a.discover:
+        for r in con.execute("SELECT employer, strategy, facet_parameter, reported_total, clamped, note "
+                             "FROM board_scope ORDER BY employer").fetchall():
+            print(f"{r[0]:<28} {r[1]:<10} {str(r[2] or ''):<22} total {str(r[3] or '?'):>6} "
+                  f"clamped {str(r[4]):<5} {r[5] or ''}")
+        return
+    print(f"Discovering facets for {len(rows)} Workday board(s)...")
+    facets_mod.discover_and_record(con, rows)
 
 
 def cmd_report(con, a):
@@ -102,6 +126,20 @@ def resolve_posting(con, target: str) -> list:
         active = [r for r in hits if r[3] == "active"]
         return active or hits
     return []
+
+
+def cmd_lenses(con, a):
+    """The three lens lists: strong on process, strong on technical, strong on both."""
+    if not a.out and not a.vault:
+        sys.exit("lenses: set JOBSEARCH_VAULT_DIR or pass --out")
+    path = report.write_lens_lists(con, a.vault, cap=a.cap, out_path=a.out)
+    for bucket, heading, _sub in report.LENS_LISTS:
+        n = con.execute("SELECT count(*) FROM vw_lens_fit WHERE lens_bucket = ? AND verdict != 'reject' "
+                        "AND NOT decided AND NOT in_tracker", [bucket]).fetchone()[0]
+        print(f"{heading:<26} {n:>6} actionable")
+    for src, n in con.execute("SELECT lens_source, count(*) FROM vw_lens_fit GROUP BY 1 ORDER BY 2 DESC").fetchall():
+        print(f"  placed by {src:<12} {n:>6}")
+    print(f"Wrote {path}")
 
 
 def cmd_mark(con, a):
@@ -253,6 +291,11 @@ def main():
     s.add_argument("--no-model", action="store_true", help="rules only: skip the trained fit model")
     s.set_defaults(func=cmd_rescreen_all)
 
+    s = sub.add_parser("facets", parents=[common], help="show or discover each board's filter scope")
+    s.add_argument("--discover", action="store_true", help="probe the boards live and rewrite board_scope")
+    s.add_argument("--employer", help="limit discovery to boards whose name contains this")
+    s.set_defaults(func=cmd_facets)
+
     s = sub.add_parser("report", parents=[common], help="write a Jobs_Found file")
     s.add_argument("--max-blocks", type=int, default=15)
     s.add_argument("--block-min-band", default="strong", help="lowest band that gets a JD block (default strong)")
@@ -261,6 +304,11 @@ def main():
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
     s.add_argument("--no-snapshots", action="store_true")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("lenses", parents=[common], help="the three lens lists (process / technical / both)")
+    s.add_argument("--cap", type=int, default=report.LENS_LIST_CAP, help="rows per list (default 60)")
+    s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
+    s.set_defaults(func=cmd_lenses)
 
     s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")
     s.add_argument("target", help='posting_id, posting URL, or "employer|title"')

@@ -505,6 +505,12 @@ def record_board(con, employer, platform, jobs, now, truncated=False):
                 posted_at        = coalesce(postings.posted_at, excluded.posted_at),
                 posting_end_at   = coalesce(excluded.posting_end_at, postings.posting_end_at),
                 description_text = coalesce(excluded.description_text, postings.description_text),
+                -- a changed JD is a fresh fetch: without this the finder never re-screens text an ingest fix
+                -- rewrote (the Lever `lists` bug rewrote 500 descriptions and nothing downstream noticed)
+                description_fetched_at = CASE
+                    WHEN excluded.description_text IS NOT NULL
+                     AND excluded.description_text IS DISTINCT FROM postings.description_text
+                    THEN timezone('UTC', now()) ELSE postings.description_fetched_at END,
                 description_hash = coalesce(excluded.description_hash, postings.description_hash),
                 raw_json         = coalesce(excluded.raw_json, postings.raw_json),
                 last_seen_at     = excluded.last_seen_at,

@@ -208,7 +208,7 @@ def cmd_judge(con, a):
     if a.action == "export":
         pool = judge.pools(con, n_reject_content=a.reject_content, n_reject_logistics=a.reject_logistics,
                            n_reject_random=a.reject_random, exclude=judge.exported_ids(a.exclude_dir),
-                           only=a.pools.split(",") if a.pools else None)
+                           only=a.pools.split(",") if a.pools else None, platform=a.platform)
         queue = judge.interleave(pool, limit=a.limit)
         print({k: len(v) for k, v in pool.items()}, "-> queued", len(queue))
         judge.write_batches(con, a.dir, queue, batch_size=a.batch_size)
@@ -318,6 +318,7 @@ def main():
     s.add_argument("--posting", action="append", help="exclude: posting id to retire from training (repeatable)")
     s.add_argument("--exclude-dir", action="append", help="skip postings already queued in this batch dir (repeatable)")
     s.add_argument("--pools", help="comma-separated subset of high,low,reject")
+    s.add_argument("--platform", help="export every active posting from one ATS platform (after an ingest fix)")
     s.set_defaults(func=cmd_judge)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")

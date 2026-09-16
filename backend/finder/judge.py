@@ -60,7 +60,8 @@ def exported_ids(dirs) -> set:
 
 
 def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_reject_random: int = 50,
-          seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None) -> dict:
+          seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None,
+          platform: Optional[str] = None) -> dict:
     """The three source pools: the confusable band, the tail, and a deliberate reject sample.
     `exclude` drops postings already queued elsewhere; `only` keeps just the named pools."""
     high = [r[0] for r in _rows(con, """
@@ -97,6 +98,13 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
             taken[kind] += 1
             rejects.append(pid)
     result = {"high": high, "low": low, "reject": rejects}
+    if platform:
+        # Re-grade a whole platform: used after an ingest fix changes what the JDs actually say.
+        result = {"platform": [r[0] for r in _rows(con, """
+            SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
+            WHERE p.status = 'active' AND p.platform = ? AND p.description_text IS NOT NULL
+            ORDER BY coalesce(s.final_score, 0) DESC, p.posting_id""", [platform])]}
+
     if exclude:
         result = {k: [p for p in v if p not in exclude] for k, v in result.items()}
     if only:
@@ -106,13 +114,14 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
 
 def interleave(pool: dict, limit: Optional[int] = None) -> list:
     """One flat queue mixing the pools per WAVE, so any stopping point spans the range."""
-    queues = {k: list(v) for k, v in pool.items()}
+    queues = {k: list(v) for k, v in pool.items() if v}
+    order = [k for k in WAVE if k in queues] + [k for k in queues if k not in WAVE]
     out = []
     while any(queues.values()) and (limit is None or len(out) < limit):
         took = False
-        for key, n in WAVE.items():
-            for _ in range(n):
-                if queues[key]:
+        for key in order:
+            for _ in range(WAVE.get(key, 25)):
+                if queues.get(key):
                     out.append((queues[key].pop(0), key))
                     took = True
                     if limit is not None and len(out) >= limit:

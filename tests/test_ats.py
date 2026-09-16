@@ -243,3 +243,26 @@ def test_paylocity_pagedata_regex_finds_block():
     html = "<script>\nwindow.pageData = {\"Jobs\":[{\"JobId\":5}],\"x\":1};\n</script>"
     m = A._PAYLOCITY_PAGEDATA.search(html)
     assert m and A.json.loads(m.group(1))["Jobs"][0]["JobId"] == 5
+
+
+def test_lever_text_keeps_the_duties_and_requirements_sections():
+    """Lever puts the actual job in `lists`; reading only description + additional captured the wrapper
+    (AHEAD's Senior Manager, Enterprise Transformation stored 2,756 chars of blurb and no duties)."""
+    from backend.ats.adapters import lever_text
+    posting = {
+        "descriptionPlain": "AHEAD builds platforms for digital business.",
+        "lists": [
+            {"text": "Duties/Responsibilities", "content": "<ul><li>Partner with Transformation Leads</li>"
+                                                            "<li>Track milestones and dependencies</li></ul>"},
+            {"text": "Knowledge, Skills, Abilities", "content": "<ul><li>Strong program management skills</li></ul>"},
+            {"text": "", "content": "<ul><li>Unheaded section still counts</li></ul>"},
+        ],
+        "additionalPlain": "We are an equal opportunity employer.",
+    }
+    text = lever_text(posting)
+    assert "Duties/Responsibilities" in text and "Partner with Transformation Leads" in text
+    assert "Track milestones" in text and "Strong program management skills" in text
+    assert "Unheaded section still counts" in text
+    assert text.startswith("AHEAD builds") and text.rstrip().endswith("equal opportunity employer.")
+    assert lever_text({"descriptionPlain": "only a blurb"}) == "only a blurb"
+    assert lever_text({}) == ""

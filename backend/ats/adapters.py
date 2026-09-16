@@ -248,6 +248,18 @@ def greenhouse_jobs(row, max_pages=None):
 
 
 # ================================================================ Lever
+def lever_text(j: dict) -> str:
+    """Opening + every `lists` section (with its heading) + closing, as plain text."""
+    parts = [j.get("descriptionPlain") or N.html_to_text(j.get("description"))]
+    for section in j.get("lists") or []:
+        body = N.html_to_text(section.get("content"))
+        heading = (section.get("text") or "").strip()
+        if body:
+            parts.append(f"{heading}\n{body}" if heading else body)
+    parts.append(j.get("additionalPlain") or N.html_to_text(j.get("additional")))
+    return "\n\n".join(p.strip() for p in parts if p and p.strip())
+
+
 def lever_jobs(row, max_pages=None):
     company = quote(row["identifier_1"], safe="")
     url = f"https://api.lever.co/v0/postings/{company}?mode=json"
@@ -259,9 +271,10 @@ def lever_jobs(row, max_pages=None):
         sal = j.get("salaryRange") or {}
         loc = cats.get("location")
         all_locs = [loc] + list(cats.get("allLocations") or [])
-        text = j.get("descriptionPlain") or N.html_to_text(j.get("description"))
-        if j.get("additionalPlain"):
-            text = f"{text}\n\n{j['additionalPlain']}" if text else j["additionalPlain"]
+        # Lever splits a posting into three parts: `description` is the opening blurb, `lists` holds every
+        # duties / requirements / skills section, and `additional` is the closing (EEO, benefits). Reading only
+        # the first and last captured the wrapper and dropped the job itself.
+        text = lever_text(j)
         pay = None if sal.get("min") else N.pay_from_text(text)
         out.append(N.base(
             req_id=j.get("id"),

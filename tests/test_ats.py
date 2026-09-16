@@ -283,3 +283,75 @@ def test_oracle_detail_labels_its_sections():
     assert "Responsibilities" in text and "Qualifications" in text
     assert "Own the intake process" in text and "8 years of experience" in text
     assert text.index("Responsibilities") < text.index("Qualifications")
+
+
+# --- Workday CXS `total` clamp (found 2026-09-16) -------------------------------------------------
+# Accenture reported total=2000 against facet sums of 44,187 and the close-pass then marked 1,157
+# live reqs as taken down. A board we cannot fully enumerate must come back Truncated.
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._p, self.status_code = payload, status
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _StubClient:
+    """Answers the two probe calls _workday_scope makes: unfiltered, then US-filtered."""
+
+    def __init__(self, unfiltered, scoped):
+        self._unfiltered, self._scoped = unfiltered, scoped
+
+    def request(self, method, url, **kw):
+        applied = (kw.get("json") or {}).get("appliedFacets") or {}
+        return self._scoped if applied else self._unfiltered
+
+
+def _page(total, facet_sum):
+    return _Resp({"total": total, "jobPostings": [],
+                  "facets": [{"facetParameter": "jobFamilyGroup",
+                              "values": [{"count": facet_sum}]}]})
+
+
+def test_workday_clamp_detected_from_facet_sums():
+    from backend.ats import adapters
+    assert adapters._workday_total_is_clamped({"total": 2000, "facets": [
+        {"values": [{"count": 44187}]}]}) is True
+    assert adapters._workday_total_is_clamped({"total": 255, "facets": [
+        {"values": [{"count": 255}]}]}) is False
+
+
+def test_workday_scope_uses_us_filter_when_it_actually_applies():
+    from backend.ats import adapters
+    c = _StubClient(_page(2000, 44187), _page(710, 710))
+    applied, clamped = adapters._workday_scope(c, "u")
+    assert applied == {"locationCountry": [adapters.WORKDAY_USA]}
+    assert clamped is True, "a clamped board must never be close-passed, even once scoped"
+
+
+def test_workday_scope_ignores_a_filter_the_tenant_silently_drops():
+    """GE Vernova accepts the facet, returns an unchanged total and French locations."""
+    from backend.ats import adapters
+    c = _StubClient(_page(2000, 44187), _page(2000, 44187))
+    applied, clamped = adapters._workday_scope(c, "u")
+    assert applied == {} and clamped is True
+
+
+def test_workday_scope_survives_a_tenant_that_rejects_the_facet():
+    """Booz Allen and Sentara answer the US facet with HTTP 400."""
+    from backend.ats import adapters
+    c = _StubClient(_page(2000, 44187), _Resp({}, status=400))
+    applied, clamped = adapters._workday_scope(c, "u")
+    assert applied == {} and clamped is True
+
+
+def test_uncapped_board_is_untouched():
+    from backend.ats import adapters
+    c = _StubClient(_page(255, 255), _page(90, 90))
+    applied, clamped = adapters._workday_scope(c, "u")
+    assert applied == {} and clamped is False

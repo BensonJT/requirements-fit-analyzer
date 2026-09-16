@@ -209,7 +209,8 @@ def cmd_judge(con, a):
     if a.action == "export":
         pool = judge.pools(con, n_reject_content=a.reject_content, n_reject_logistics=a.reject_logistics,
                            n_reject_random=a.reject_random, exclude=judge.exported_ids(a.exclude_dir),
-                           only=a.pools.split(",") if a.pools else None, platform=a.platform)
+                           only=a.pools.split(",") if a.pools else None, platform=a.platform,
+                           relabel=a.relabel)
         queue = judge.interleave(pool, limit=a.limit)
         print({k: len(v) for k, v in pool.items()}, "-> queued", len(queue))
         judge.write_batches(con, a.dir, queue, batch_size=a.batch_size)
@@ -314,6 +315,9 @@ def main():
     s.add_argument("--scorer", default="claude-sonnet-batch")
     s.add_argument("--reject-content", type=int, default=100, help="rejected on content: measures false negatives")
     s.add_argument("--reject-logistics", type=int, default=100, help="rejected on location/pay but fit >= 0.5")
+    s.add_argument("--relabel", type=int, nargs="?", const=0, metavar="N",
+                   help="re-grade postings that already carry a label (the rubric changed, not the JD): "
+                        "bare = all of them, N = about N drawn evenly across the four grades")
     s.add_argument("--reject-random", type=int, default=50)
     s.add_argument("--reason", help="exclude: why this posting must never be trained on")
     s.add_argument("--posting", action="append", help="exclude: posting id to retire from training (repeatable)")

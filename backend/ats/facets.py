@@ -41,15 +41,43 @@ def discover_workday(row):
     return list(_flatten(d.get("facets"))), (d.get("total") or 0), A._workday_total_is_clamped(d)
 
 
+# Workday publishes countries NESTED under `locationMainGroup` -> "Country", but the key you filter on is
+# `locationCountry`. Filtering on the tree's own parameter name answers HTTP 400 (Compassion International,
+# 2026-09-16). Tenants that expose country as a top-level parameter (Location_Country, LocationCountry, a
+# custom CF_-_REC_... field) use that name as the filter key directly.
+NESTED_LOCATION_PARAM = "locationMainGroup"
+NESTED_COUNTRY_KEY = "locationCountry"
+
+
 def resolve_us(rows):
-    """(facet_parameter, [value_id], descriptor) for the US, or None when the board exposes no country."""
+    """(applied_facet_key, [value_id], descriptor) for the US, or None when the board exposes no country."""
     for param, group, vid, desc, _count in rows:
-        if not desc or not vid:
+        if not desc or not vid or desc.strip().lower() not in US_NAMES:
             continue
-        if (group or "").lower() in ("country", "") or "country" in (param or "").lower():
-            if desc.strip().lower() in US_NAMES:
-                return param, [vid], desc
+        if (group or "").strip().lower() == "country":
+            key = NESTED_COUNTRY_KEY if param == NESTED_LOCATION_PARAM else param
+            return key, [vid], desc
+        if "country" in (param or "").lower():
+            return param, [vid], desc
     return None
+
+
+def verify_scope(url, key, ids, unfiltered_total):
+    """A resolved facet is only trusted when applying it actually works AND actually filters.
+
+    Three tenant behaviours were observed: applied correctly (Accenture), rejected with HTTP 400 (Booz
+    Allen, Sentara), and accepted-then-silently-ignored (GE Vernova returned an unchanged total and
+    French locations). Only the first is usable, and nothing but a live probe tells them apart.
+    """
+    try:
+        with A.client() as c:
+            d = A._request(c, "POST", url, json={"appliedFacets": {key: ids}, "limit": 20, "offset": 0}).json()
+    except Exception:
+        return False, None
+    total = d.get("total")
+    if not total or (unfiltered_total and total >= unfiltered_total):
+        return False, total
+    return True, total
 
 
 def strategy_for(clamped, us):

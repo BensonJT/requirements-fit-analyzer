@@ -373,3 +373,38 @@ def test_uncapped_board_is_untouched():
     c = _StubClient(_page(255, 255), _page(90, 90))
     applied, clamped = adapters._workday_scope(c, "u")
     assert applied == {} and clamped is False
+
+
+# --- The plan executor: every strategy is one execution path with a different plan ------------------
+
+def test_plan_plain_is_one_unfiltered_pull():
+    from backend.ats import adapters
+    plan, clamped = adapters._workday_plan({"strategy": "plain", "facet_parameter": None, "value_ids": None})
+    assert plan == [("all", {})] and clamped is False
+
+
+def test_plan_country_is_one_filtered_pull():
+    from backend.ats import adapters
+    plan, clamped = adapters._workday_plan(
+        {"strategy": "country", "facet_parameter": "locationCountry", "value_ids": '["US_ID"]'})
+    assert plan == [("us", {"locationCountry": ["US_ID"]})] and clamped is False
+
+
+def test_plan_partition_is_one_pull_per_value():
+    """Booz Allen is clamped at 2000 with no country facet, but its job families are 1172/766/445."""
+    from backend.ats import adapters
+    plan, clamped = adapters._workday_plan(
+        {"strategy": "partition", "facet_parameter": "jobFamilyGroup", "value_ids": '["tech","consult","eng"]'})
+    assert len(plan) == 3 and clamped is False
+    assert plan[0] == ("tech", {"jobFamilyGroup": ["tech"]})
+
+
+def test_plan_truncate_pulls_what_it_can_and_blocks_the_close_pass():
+    from backend.ats import adapters
+    plan, clamped = adapters._workday_plan({"strategy": "truncate", "facet_parameter": None, "value_ids": None})
+    assert plan == [("all", {})] and clamped is True
+
+
+def test_no_scope_falls_back_to_a_live_probe():
+    from backend.ats import adapters
+    assert adapters._workday_plan(None) == (None, False)

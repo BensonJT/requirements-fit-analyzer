@@ -227,7 +227,7 @@ def cmd_evidence(con, a):
     manifest = _manifest(a)
     ok = evidence.check(manifest)
     if a.rebuild and ok:
-        evidence.rebuild(con, manifest, embed.load_encoder())
+        evidence.rebuild(con, manifest, embed.load_encoder(model_name=manifest.embed_model))
     if not ok:
         sys.exit(1)
 
@@ -235,7 +235,7 @@ def cmd_evidence(con, a):
 def cmd_coverage(con, a):
     from backend.finder import coverage, embed
     manifest = _manifest(a)
-    encoder = embed.load_encoder()
+    encoder = embed.load_encoder(model_name=manifest.embed_model)
     if a.calibrate:
         coverage.calibrate(con, manifest, encoder, n_pseudo=a.pseudo, hard_top=a.hard_top)
         return

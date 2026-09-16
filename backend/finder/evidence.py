@@ -413,10 +413,10 @@ def _insert_units(con, units: list, vecs, model: str, vectors_json) -> None:
                            "weight": u.weight, "vec": v} for u, v in zip(units, rows)])
     shape = json.dumps([{"unit_id": "VARCHAR", "source": "VARCHAR", "kind": "VARCHAR", "ref": "VARCHAR",
                          "text": "VARCHAR", "weight": "DOUBLE", "vec": "FLOAT[]"}])
-    con.execute("""
+    con.execute(f"""
         INSERT OR REPLACE INTO evidence_units (unit_id, source, kind, ref, text, weight, model, vector, content_hash,
                                                embedded_at)
-        SELECT unit_id, source, kind, ref, text, weight, $3, vec::FLOAT[384], md5(text), $4
+        SELECT unit_id, source, kind, ref, text, weight, $3, vec::FLOAT[{len(rows[0]) if rows else 384}], md5(text), $4
         FROM (SELECT unnest(json_transform($1, $2), recursive := true))""", [payload, shape, model, _now()])
 
 

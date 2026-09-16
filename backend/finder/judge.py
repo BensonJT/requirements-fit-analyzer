@@ -103,21 +103,28 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
             rejects.append(pid)
     result = {"high": high, "low": low, "reject": rejects}
     if relabel is not None:
+        # Postings whose newest label PREDATES the current rubric. Rows already re-graded under it drop out, so
+        # `--relabel` is idempotent: re-running it after a part-finished run queues exactly what is left.
         labelled = _rows(con, """
             SELECT l.posting_id, l.grade FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
             WHERE p.status = 'active' AND p.description_text IS NOT NULL
+              AND l.rubric_version != ?
               AND l.posting_id NOT IN (SELECT posting_id FROM training_exclusions)
-            ORDER BY hash(l.posting_id || ?), l.posting_id""", [str(seed)])
+            ORDER BY hash(l.posting_id || ?), l.posting_id""", [rubric.rubric_version(), str(seed)])
         by_grade = defaultdict(list)
         for pid, grade in labelled:
             by_grade[grade].append(pid)
         if relabel <= 0:
-            picked = [pid for _, ids in sorted(by_grade.items()) for pid in ids]
+            picked = _spread(by_grade)
         else:   # even draw per grade, then top up from the largest pools so the total lands near `relabel`
             per = max(1, relabel // max(1, len(by_grade)))
-            picked = [pid for _, ids in sorted(by_grade.items()) for pid in ids[:per]]
-            for _, ids in sorted(by_grade.items(), key=lambda kv: -len(kv[1])):
-                picked += [pid for pid in ids[per:] if len(picked) < relabel]
+            chosen = {g: ids[:per] for g, ids in by_grade.items()}
+            room = relabel - sum(len(v) for v in chosen.values())
+            for g, ids in sorted(by_grade.items(), key=lambda kv: -len(kv[1])):
+                take = ids[per:per + max(0, room)]
+                chosen[g] += take
+                room -= len(take)
+            picked = _spread(chosen)
         result = {"relabel": picked}
     elif platform:
         # Re-grade a whole platform: used after an ingest fix changes what the JDs actually say.
@@ -131,6 +138,20 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
     if only:
         result = {k: (v if k in only else []) for k, v in result.items()}
     return result
+
+
+def _spread(by_grade: dict) -> list:
+    """One queue with every grade spread evenly through it, in proportion to its size.
+
+    Concatenating the grades would sort the queue by grade, and a run that stops early -- which is the norm, the
+    batches are graded across sessions -- would then have re-graded only the first grade or two. That breaks the
+    section 17.2 rule that any stopping point leaves a set spanning the range, and it silently biases every
+    mid-run measurement: the first batches of the 2026-09-15 run were 100% old-`adjacent` rows and read as a
+    threefold jump in the good-fit rate. Sorting on each posting's fractional position within its own grade
+    interleaves them proportionally instead.
+    """
+    keyed = [(i / len(ids), g, pid) for g, ids in by_grade.items() for i, pid in enumerate(ids)]
+    return [pid for _, _, pid in sorted(keyed)]
 
 
 def interleave(pool: dict, limit: Optional[int] = None) -> list:

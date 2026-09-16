@@ -47,9 +47,22 @@ def _rows(con, sql: str, params=None) -> list:
     return con.execute(sql, params or []).fetchall()
 
 
+def exported_ids(dirs) -> set:
+    """Every posting already queued in another batch directory (judged rows and their duplicates), so a second
+    export never pays to grade the same posting twice."""
+    out = set()
+    for d in dirs or []:
+        path = Path(d) / "manifest.json"
+        if path.exists():
+            m = json.loads(path.read_text(encoding="utf-8"))
+            out |= {p for b in m["batches"].values() for p in b["postings"]} | set(m.get("duplicates", {}))
+    return out
+
+
 def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_reject_random: int = 50,
-          seed: int = 7) -> dict:
-    """The three source pools: the confusable band, the tail, and a deliberate reject sample."""
+          seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None) -> dict:
+    """The three source pools: the confusable band, the tail, and a deliberate reject sample.
+    `exclude` drops postings already queued elsewhere; `only` keeps just the named pools."""
     high = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('very_strong', 'strong')
@@ -62,22 +75,33 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict = 'reject' AND p.description_text IS NOT NULL
           AND s.reasons::VARCHAR LIKE '%content does not fit%'
-        ORDER BY s.fit_prob DESC NULLS LAST, s.posting_id LIMIT ?""", [n_reject_content])]
+        ORDER BY s.fit_prob DESC NULLS LAST, s.posting_id LIMIT ?""", [n_reject_content * 6])][:n_reject_content * 6]
     logistics = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict = 'reject' AND p.description_text IS NOT NULL
           AND s.fit_prob >= 0.5 AND s.reasons::VARCHAR NOT LIKE '%content does not fit%'
-        ORDER BY hash(s.posting_id || ?), s.posting_id LIMIT ?""", [str(seed), n_reject_logistics])]
+        ORDER BY hash(s.posting_id || ?), s.posting_id LIMIT ?""", [str(seed), n_reject_logistics * 6])]
     random_rej = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict = 'reject' AND p.description_text IS NOT NULL
-        ORDER BY hash(s.posting_id || ?), s.posting_id LIMIT ?""", [str(seed + 1), n_reject_random])]
+        ORDER BY hash(s.posting_id || ?), s.posting_id LIMIT ?""", [str(seed + 1), n_reject_random * 6])]
+    over = n_reject_content + n_reject_logistics + n_reject_random
     seen, rejects = set(), []
-    for pid in content + logistics + random_rej:          # keep the deliberate order, drop repeats
-        if pid not in seen:
+    caps = {"content": n_reject_content, "logistics": n_reject_logistics, "random": n_reject_random}
+    taken = {"content": 0, "logistics": 0, "random": 0}
+    for kind, ids in (("content", content), ("logistics", logistics), ("random", random_rej)):
+        for pid in ids:                                   # keep the deliberate order, drop repeats and exclusions
+            if pid in seen or (exclude and pid in exclude) or taken[kind] >= caps[kind]:
+                continue
             seen.add(pid)
+            taken[kind] += 1
             rejects.append(pid)
-    return {"high": high, "low": low, "reject": rejects}
+    result = {"high": high, "low": low, "reject": rejects}
+    if exclude:
+        result = {k: [p for p in v if p not in exclude] for k, v in result.items()}
+    if only:
+        result = {k: (v if k in only else []) for k, v in result.items()}
+    return result
 
 
 def interleave(pool: dict, limit: Optional[int] = None) -> list:
@@ -167,6 +191,17 @@ def fetch_postings(con, ids: list, tiers: dict) -> list:
         rows = units.setdefault(pid, [])
         if len(rows) < UNITS_PER_POSTING:
             rows.append(f"[{grp}] {text[:UNIT_CHARS]}")
+    # Rejected postings never went through coverage, so they have no cached units; split their JD on demand.
+    # (Without this they vanish from the export silently, taking the false-negative measurement with them.)
+    missing = [pid for pid in ids if pid in base and not units.get(pid)]
+    if missing:
+        from . import requirements as R
+        for pid, text in _rows(con, """SELECT posting_id, description_text FROM postings
+                WHERE description_text IS NOT NULL
+                  AND posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [json.dumps(missing)]):
+            reqs = [u for u in R.split_requirements(text, max_units=UNITS_PER_POSTING * 2) if u.klass == "work"]
+            reqs.sort(key=lambda u: -u.weight)
+            units[pid] = [f"[{u.group}] {u.text[:UNIT_CHARS]}" for u in reqs[:UNITS_PER_POSTING]]
     out = []
     for pid in ids:
         if pid not in base:
@@ -174,6 +209,9 @@ def fetch_postings(con, ids: list, tiers: dict) -> list:
         employer, title, dhash, score = base[pid]
         out.append(Posting(pid, employer or "", title or "", tiers.get(pid, "?"), int(score or 0), dhash,
                            units.get(pid, [])))
+    dropped = [p.posting_id for p in out if not p.units]
+    if dropped:
+        print(f"  note: {len(dropped)} postings have no usable requirement text and were left out")
     return [p for p in out if p.units]
 
 

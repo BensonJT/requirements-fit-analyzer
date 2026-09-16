@@ -95,12 +95,25 @@ def _workday_total_is_clamped(data) -> bool:
     total = data.get("total") or 0
     if not total:
         return False
+    real = workday_true_total(data)
+    if real:
+        return real > total * 1.05
+    return total == WORKDAY_CEILING     # no single-valued facet to check: trust the known ceiling
+
+
+def workday_true_total(data):
+    """The board's real posting count from `timeType`, or None when the board does not publish it.
+
+    `timeType` (Full time / Part time) is one value per posting, so its facet counts sum to the true count
+    even while `total` is pinned at the ceiling. Every multi-valued facet over-counts -- a posting in three
+    cities appears three times in the location facet -- so no other facet may be used for this.
+    """
     for f in (data.get("facets") or []):
         if f.get("facetParameter") == "timeType":
             real = sum(v.get("count") or 0 for v in (f.get("values") or []))
             if real:
-                return real > total * 1.05
-    return total == WORKDAY_CEILING     # no single-valued facet to check: trust the known ceiling
+                return real
+    return None
 
 
 def _workday_scope(c, url):
@@ -181,6 +194,11 @@ def _workday_pull(c, url, public, applied, max_pages):
         time.sleep(PAGE_DELAY)
 
 
+def _workday_probe_total(c, url):
+    """The board's true posting count right now, from one cheap unfiltered page-0 call."""
+    return workday_true_total(_request(c, "POST", url, json={"appliedFacets": {}, "limit": 1, "offset": 0}).json())
+
+
 def workday_jobs(row, max_pages=None, scope=None):
     """One board, pulled according to its stored `board_scope` plan (or a live probe when it has none)."""
     tenant, wd, site = row["identifier_1"], row["identifier_2"], row["identifier_3"]
@@ -194,6 +212,11 @@ def workday_jobs(row, max_pages=None, scope=None):
         if plan is None:                                     # never discovered: fall back to probing
             applied, clamped = _workday_scope(c, url)
             plan = [("all", applied)]
+        # A partition claims to enumerate a board whose `total` lies, so it has to prove it: probe the true
+        # count before and after, and check the union against it. A facet that leaves postings out (a req
+        # with no job family, say) would otherwise close-pass every one of them as taken down.
+        partitioned = len(plan) > 1
+        before = _workday_probe_total(c, url) if partitioned else None
         for _label, applied in plan:
             got, truncated = _workday_pull(c, url, public, applied, max_pages)
             clamped = clamped or truncated
@@ -202,6 +225,14 @@ def workday_jobs(row, max_pages=None, scope=None):
                 if key not in seen:
                     seen.add(key)
                     out.append(p)
+        if before:
+            # A partition takes minutes, and reqs open and close inside that window: Booz Allen moved
+            # 2,394 -> 2,396 during a 100-second pull, leaving the union two short of a facet that covers
+            # the board exactly. So a shortfall is forgiven only up to the churn we actually measured --
+            # drift explains a gap of two, never a gap of forty.
+            after = _workday_probe_total(c, url) or before
+            if len(out) + abs(after - before) < before:
+                clamped = True                               # incomplete enumeration: pull it, never close-pass
     return Truncated(out) if clamped else out
 
 

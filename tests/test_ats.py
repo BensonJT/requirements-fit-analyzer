@@ -408,3 +408,155 @@ def test_plan_truncate_pulls_what_it_can_and_blocks_the_close_pass():
 def test_no_scope_falls_back_to_a_live_probe():
     from backend.ats import adapters
     assert adapters._workday_plan(None) == (None, False)
+
+
+# ---- partition plan builder (facets.resolve_partition) ----
+
+def _facet_rows(param, counts, group=""):
+    """board_facets-shaped rows: (facet_parameter, group_descriptor, value_id, descriptor, count)."""
+    return [(param, group, f"{param}-{i}", f"{param} {i}", c) for i, c in enumerate(counts)]
+
+
+def test_partition_picks_the_flat_facet_that_covers_every_posting():
+    """Booz Allen: 2,386 real postings, job families 1,172 / 766 / 445 + a 3-req remainder."""
+    from backend.ats import facets
+    rows = _facet_rows("jobFamilyGroup", [1172, 766, 445, 3])
+    got = facets.resolve_partition(rows, 2386)
+    assert got is not None
+    key, ids, note = got
+    assert key == "jobFamilyGroup" and len(ids) == 4
+    assert "2386" in note
+
+
+def test_partition_rejects_a_facet_that_leaves_postings_out():
+    """The counts must sum to the true total. 1,172 + 766 + 445 = 2,383 against 2,386 means three reqs carry
+    no job family, and partitioning on it would close-pass all three as taken down."""
+    from backend.ats import facets
+    assert facets.resolve_partition(_facet_rows("jobFamilyGroup", [1172, 766, 445]), 2386) is None
+
+
+def test_partition_rejects_a_multi_valued_facet():
+    """A facet summing past the true total counts some postings twice; its values are not a partition."""
+    from backend.ats import facets
+    assert facets.resolve_partition(_facet_rows("workerSubType", [2000, 1500]), 2386) is None
+
+
+def test_partition_rejects_a_value_that_is_itself_clamped():
+    """A 2,100-req job family would come back clamped at 2,000, so the partition buys nothing."""
+    from backend.ats import facets
+    assert facets.resolve_partition(_facet_rows("jobFamilyGroup", [2100, 286]), 2386) is None
+
+
+def test_partition_never_uses_a_location_facet():
+    """Locations are multi-valued AND the nested filter key is not the parameter name (the 400 trap)."""
+    from backend.ats import facets
+    assert facets.resolve_partition(_facet_rows("locationMainGroup", [1200, 1186]), 2386) is None
+    assert facets.resolve_partition(_facet_rows("jobFamilyGroup", [1200, 1186], group="City"), 2386) is None
+
+
+def test_partition_prefers_the_facet_with_the_most_headroom():
+    """Two pulls of 1,200 sit closer to the ceiling than four of 600. The extra pulls are cheap; a partition
+    value that grows into the clamp costs the whole enumeration."""
+    from backend.ats import facets
+    rows = _facet_rows("jobFamilyGroup", [1200, 1186]) + _facet_rows("timeType", [600, 600, 600, 586])
+    key, ids, _note = facets.resolve_partition(rows, 2386)
+    assert key == "timeType" and len(ids) == 4
+
+
+def test_partition_needs_a_true_total_to_check_against():
+    from backend.ats import facets
+    assert facets.resolve_partition(_facet_rows("jobFamilyGroup", [1200, 1186]), None) is None
+
+
+def test_strategy_prefers_country_over_partition():
+    """One pull beats many: a partition is only for boards that expose no country facet at all."""
+    from backend.ats import facets
+    us = ("locationCountry", ["abc"], "United States of America")
+    part = ("jobFamilyGroup", ["a", "b"], "note")
+    assert facets.strategy_for(True, us, part) == "country"
+    assert facets.strategy_for(True, None, part) == "partition"
+    assert facets.strategy_for(True, None, None) == "truncate"
+    assert facets.strategy_for(False, None, None) == "plain"
+
+
+def test_workday_true_total_reads_only_timetype():
+    from backend.ats import adapters
+    assert adapters.workday_true_total(_page(2000, 2386, multi_valued=9999).json()) == 2386
+    assert adapters.workday_true_total({"facets": []}) is None
+
+
+def test_partition_prefers_headroom_over_fewer_pulls():
+    """Leidos: Is_Evergreen is 2 pulls with its largest value 137 reqs short of the ceiling; jobFamilyGroup is
+    27 pulls with 1,083 of headroom. Staying under the ceiling as the board grows is worth the 25 extra pulls."""
+    from backend.ats import facets
+    rows = _facet_rows("Is_Evergreen", [1863, 347]) + _facet_rows("jobFamilyGroup", [917] + [1293 // 26] * 25 + [1293 - (1293 // 26) * 25])
+    key, ids, _note = facets.resolve_partition(rows, 2210)
+    assert key == "jobFamilyGroup"
+
+
+def test_partition_breaks_a_headroom_tie_on_fewest_pulls():
+    from backend.ats import facets
+    rows = _facet_rows("jobFamilyGroup", [500, 500, 500, 886]) + _facet_rows("workerSubType", [886, 500, 500, 250, 250])
+    key, _ids, _note = facets.resolve_partition(rows, 2386)
+    assert key == "jobFamilyGroup"
+
+
+class _PartitionClient:
+    """CXS for a partitioned board: unfiltered probes report `totals` in order; each filtered pull returns
+    `per_value` postings for that value."""
+
+    def __init__(self, totals, per_value):
+        self._totals, self._per_value, self._probes = list(totals), per_value, 0
+
+    def request(self, method, url, **kw):
+        body = kw.get("json") or {}
+        applied = body.get("appliedFacets") or {}
+        if not applied:
+            total = self._totals[min(self._probes, len(self._totals) - 1)]
+            self._probes += 1
+            return _Resp({"total": 2000, "jobPostings": [],
+                          "facets": [{"facetParameter": "timeType", "values": [{"count": total}]}]})
+        value = next(iter(applied.values()))[0]
+        n = self._per_value[value] if body.get("offset", 0) == 0 else 0
+        return _Resp({"total": n, "jobPostings": [
+            {"title": f"r{value}-{i}", "bulletFields": [f"{value}-{i}"], "externalPath": f"/{value}/{i}"}
+            for i in range(n)]})
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _partition_board(monkeypatch, totals, per_value):
+    from backend.ats import adapters
+    monkeypatch.setattr(adapters, "client", lambda: _PartitionClient(totals, per_value))
+    monkeypatch.setattr(adapters, "PAGE_DELAY", 0)
+    row = {"employer": "E", "platform": "workday", "identifier_1": "t", "identifier_2": "wd1",
+           "identifier_3": "S"}
+    scope = {"strategy": "partition", "facet_parameter": "jobFamilyGroup", "value_ids": '["a","b"]'}
+    return adapters.workday_jobs(row, scope=scope)
+
+
+def test_partitioned_pull_that_covers_the_board_allows_a_close_pass(monkeypatch):
+    jobs = _partition_board(monkeypatch, [30, 30], {"a": 18, "b": 12})
+    assert len(jobs) == 30 and getattr(jobs, "truncated", False) is False
+
+
+def test_partitioned_pull_short_of_the_true_total_is_never_close_passed(monkeypatch):
+    """A facet leaving 10 reqs uncovered on a still board: the union must be marked truncated, or every one
+    of those reqs is closed as taken down."""
+    jobs = _partition_board(monkeypatch, [30, 30], {"a": 12, "b": 8})
+    assert len(jobs) == 20 and jobs.truncated is True
+
+
+def test_partition_forgives_a_shortfall_no_larger_than_the_measured_churn(monkeypatch):
+    """Booz Allen moved 2,394 -> 2,396 mid-pull and came back two short. Drift, not a coverage gap."""
+    jobs = _partition_board(monkeypatch, [2394, 2396], {"a": 1500, "b": 892})
+    assert len(jobs) == 2392 and getattr(jobs, "truncated", False) is False
+
+
+def test_drift_does_not_excuse_a_gap_bigger_than_itself(monkeypatch):
+    jobs = _partition_board(monkeypatch, [2394, 2396], {"a": 1500, "b": 850})
+    assert len(jobs) == 2350 and jobs.truncated is True

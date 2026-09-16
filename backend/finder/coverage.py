@@ -752,6 +752,11 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     pseudo_auc = _auc_np(pos_primary, [s["primary"] for s in pseudo_s])
     stretch_s = _grid_scores(stretch_docs, strong, partial, avail)
     stretch_fit = [oof.get(r["label_id"], screen_fit.get(r["posting_id"])) for r in stretch_rows]
+    judged = [i for i, h in enumerate(hard) if h[1] == "judged_wrong"]
+    aucs_judged = {"coverage_gated": _auc_np([s["primary"] for s in pos_s], [hard_s[i]["primary"] for i in judged]),
+                   "fit_heldout": _auc_np(pos_fit, [hard_fit[i] for i in judged]),
+                   f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s, pos_fit)],
+                                                  [blend(hard_s[i]["primary"], hard_fit[i], best_blend) for i in judged])}
     aucs_stretch = {"coverage_required": _auc_np([s["required"] for s in pos_s], [s["required"] for s in stretch_s]),
                     "coverage_gated": _auc_np([s["primary"] for s in pos_s], [s["primary"] for s in stretch_s]),
                     "fit_heldout": _auc_np(pos_fit, stretch_fit),
@@ -767,7 +772,7 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
              if hard_primary else None, "positive_median": float(np.median(pos_primary)) if pos_primary else None,
              "paired_gap_vault_minus_site": gap, "paired_n": len(paired), "evidence_version": ev_version,
              "splitter": R.splitter_fingerprint(), "n_pos": len(pos_docs), "n_hard": len(hard_docs),
-             "aucs_stretch": aucs_stretch, "n_stretch": len(stretch_docs), "encoder": getattr(encoder, "name", model),
+             "aucs_stretch": aucs_stretch, "aucs_judged_wrong": aucs_judged, "n_judged_wrong": len(judged), "n_stretch": len(stretch_docs), "encoder": getattr(encoder, "name", model),
              "req_context": req_context() or None, "reranker": reranker.name if reranker else None}
     version = hashlib.sha1(json.dumps(notes, sort_keys=True, default=str).encode()).hexdigest()[:12]
     con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, notes) "
@@ -777,6 +782,8 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     log(f"Calibration {version} ({time.monotonic() - t0:.0f}s): COVER_STRONG {strong} · COVER_PARTIAL {partial} · "
         f"COVERAGE_REJECT {fmt(reject)} · COVERAGE_REVIEW {fmt(review)}")
     log("  AUC positives vs hard negatives: " + " · ".join(f"{k} {fmt(v)}" for k, v in aucs.items()))
+    log(f"  AUC positives vs judge-confirmed wrong only (n={len(judged)}; fit_top rows are chosen FOR high fit): "
+        + " · ".join(f"{k} {fmt(v)}" for k, v in aucs_judged.items()))
     log(f"  AUC positives vs stretch (n={len(stretch_docs)}): "
         + " · ".join(f"{k} {fmt(v)}" for k, v in aucs_stretch.items()))
     log(f"  best blend weight {best_blend} · sanity AUC positives vs pseudo-negatives {fmt(pseudo_auc)}")

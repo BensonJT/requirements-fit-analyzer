@@ -888,6 +888,80 @@ skip_patterns = ["(?i)^ai usage"]
         evidence.load_manifest(str(tmp_path / "bad.toml"))
 
 
+def test_evidence_postgres_source_reads_rows_and_fails_loudly(tmp_path, monkeypatch):
+    toml = ('[[source]]\nname = "bullets"\ntype = "postgres"\npath = "postgresql://u@localhost/resume"\n'
+            'query = "SELECT * FROM v"\ntext_columns = ["bullet"]\nref_columns = ["position"]\nkind = "achievement"\n')
+    (tmp_path / "pg.toml").write_text(toml)
+    m = evidence.load_manifest(str(tmp_path / "pg.toml"))
+    assert m.sources[0].path == "postgresql://u@localhost/resume"                        # not resolved as a file
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='position,bullet\nAnalyst,"Cut cycle time 40% by '
+                                           'redesigning the intake process, end to end"\n', stderr="")
+    monkeypatch.setattr(evidence.shutil, "which", lambda name: "/usr/bin/psql")
+    monkeypatch.setattr(evidence.subprocess, "run", fake_run)
+    units = evidence.iter_units(m)
+    assert [(u.ref, u.kind) for u in units] == [("Analyst", "achievement")] and "cycle time" in units[0].text
+    assert calls[0][:3] == ["psql", "postgresql://u@localhost/resume", "--csv"] and calls[0][-1] == "SELECT * FROM v"
+    assert evidence.check(m, log=_quiet)
+    monkeypatch.setattr(evidence.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="connection refused"))
+    with pytest.raises(RuntimeError, match="connection refused"):                        # never an empty source
+        evidence.iter_units(m)
+    assert not evidence.check(m, log=_quiet)
+    monkeypatch.setenv("JS_TEST_DB_URL", "postgresql://u:secret@localhost/resume")          # `$VAR` from .env
+    monkeypatch.setattr(evidence.subprocess, "run", fake_run)
+    (tmp_path / "env.toml").write_text(toml.replace("postgresql://u@localhost/resume", "$JS_TEST_DB_URL"))
+    m_env = evidence.load_manifest(str(tmp_path / "env.toml"))
+    assert m_env.sources[0].path == "$JS_TEST_DB_URL" and evidence.iter_units(m_env)       # secret never stored
+    assert calls[-1][1] == "postgresql://u:secret@localhost/resume"
+    monkeypatch.delenv("JS_TEST_DB_URL")
+    with pytest.raises(RuntimeError, match="not set"):
+        evidence.iter_units(m_env)
+    (tmp_path / "noq.toml").write_text(toml.replace('query = "SELECT * FROM v"\n', ""))
+    with pytest.raises(ValueError, match="query"):
+        evidence.load_manifest(str(tmp_path / "noq.toml"))
+
+
+def test_evidence_ensure_current_syncs_new_rows_and_never_empties_a_source(tmp_path):
+    pytest.importorskip("numpy")
+    import shutil as sh
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    sh.copy(os.path.join(FIXTURES, "bullets.csv"), tmp_path / "bullets.csv")
+    (tmp_path / "m.toml").write_text(f'''[[source]]
+name = "bullets"
+type = "csv"
+path = "{tmp_path}/bullets.csv"
+text_columns = ["context", "bullet"]
+ref_columns = ["role"]
+kind = "achievement"
+
+[[source]]
+name = "portfolio"
+type = "html"
+path = "{FIXTURES}/about.html"
+kind = "narrative"
+''')
+    m = evidence.load_manifest(str(tmp_path / "m.toml"))
+    enc = FakeEncoder()
+    first = evidence.rebuild(con, m, enc, log=_quiet)["evidence_version"]
+    assert evidence.ensure_current(con, m, enc, log=_quiet) == first and enc.calls == 1      # unchanged: no embedding
+    with open(tmp_path / "bullets.csv", "a", encoding="utf-8") as fh:
+        fh.write('Analyst,Intake,"Rebuilt the vendor onboarding workflow and cut approval time from ten days to three"\n')
+    second = evidence.ensure_current(con, m, enc, log=_quiet)
+    assert second != first and second == evidence.stored_version(con, m.embed_model) and enc.calls == 2
+    assert con.execute("SELECT count(*) FROM evidence_units WHERE text LIKE '%vendor onboarding%'").fetchone()[0] == 1
+    before = con.execute("SELECT count(*) FROM evidence_units").fetchone()[0]
+    os.remove(tmp_path / "bullets.csv")                                                   # a moved file is not a deletion
+    assert evidence.ensure_current(con, m, enc, log=_quiet) == second
+    assert con.execute("SELECT count(*) FROM evidence_units").fetchone()[0] == before
+    with pytest.raises(RuntimeError, match="refused"):
+        evidence.rebuild(con, m, enc, log=_quiet)
+    con.close()
+
+
 def test_evidence_rebuild_float384_and_cosine(tmp_path):
     pytest.importorskip("numpy")
     con = store.connect(str(tmp_path / "t.duckdb"))

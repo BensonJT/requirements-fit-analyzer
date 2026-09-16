@@ -1287,3 +1287,30 @@ def test_compensation_boilerplate_raises_no_clearance_flag():
     assert _clearance_flags(
         "Compensation decisions depend on skill sets, experience and training, security clearances, "
         "licensure and certifications, and other business needs.") == []
+
+
+# --- Domain tenure: a disjunctive list is not a gate (user catch 2026-09-16) ------------------------
+# "10+ years in Supply Chain, Operations, Logistics, Manufacturing, Consulting, or a related field"
+# gates on none of them -- any one will do, and Operations and Consulting are his.
+
+def test_disjunctive_tenure_list_is_not_a_gate():
+    req = ("Required Qualifications\n10+ years of progressive experience in Banking, Operations, "
+           "Logistics, Manufacturing, Consulting, or a related field.")
+    assert rules.domain_tenure_rule("", req)[1] == []
+
+
+def test_compound_domain_still_gates():
+    """'10+ years in banking operations' is one compound domain, not a disjunctive list."""
+    req = "Required Qualifications\n10+ years of experience in banking operations."
+    assert rules.domain_tenure_rule("", req)[1] == ["domain-tenure gate (banking, 10 yrs)"]
+
+
+def test_single_domain_with_no_alternatives_still_gates():
+    req = "Required Qualifications\n8+ years of experience in banking."
+    assert rules.domain_tenure_rule("", req)[1] == ["domain-tenure gate (banking, 8 yrs)"]
+
+
+def test_list_without_a_candidate_field_still_gates():
+    """A list is only harmless when one of the alternatives is actually his."""
+    req = "Required Qualifications\n10+ years in pharma, biotech, or managed care."
+    assert rules.domain_tenure_rule("", req)[1] != []

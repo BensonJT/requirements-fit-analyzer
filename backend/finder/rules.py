@@ -160,11 +160,32 @@ def domain_tenure_rule(title: str, text: str) -> RuleResult:
     if not terms or not text:
         return [], [], {}
     alt = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+    block = required_block(text)
     m = re.search(rf"(?<!\d)(\d{{1,2}})\+?\s*years?[^.\n]{{0,60}}?(?<![a-z0-9])({alt})(?![a-z0-9])",
-                  required_block(text), re.I)
+                  block, re.I)
     if not m:
         return [], [], {}
+    if _tenure_clause_admits_candidate(block, m):
+        return [], [], {}
     return [], [f"domain-tenure gate ({m.group(2).lower()}, {m.group(1)} yrs)"], {"domain_tenure": m.group(2).lower()}
+
+
+def _tenure_clause_admits_candidate(block: str, m) -> bool:
+    """True when the years-requirement is a DISJUNCTIVE list naming a field the candidate has.
+
+    "10+ years in Supply Chain, Operations, Logistics, Manufacturing, Consulting, or a related field" gates on
+    none of them -- any one will do, and two are his. "10+ years in medical device operations" is a compound
+    domain, not a list, so it still gates: the disjunction has to be there (a comma series or an explicit "or")
+    before a candidate field counts.
+    """
+    after = block[m.end(2): m.end(2) + 240]
+    stop = re.search(r"[.;\n]", after)
+    tail = after[: stop.start()] if stop else after
+    if not (" or " in tail.lower() or "," in tail):
+        return False
+    clause = block[m.start(): m.end(2)] + tail
+    fields = [f for f in (getattr(P, "CANDIDATE_TENURE_FIELDS", None) or []) if f.strip()]
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(f)}(?![a-z0-9])", clause, re.I) for f in fields)
 
 
 def discipline_rule(title: str, text: str) -> RuleResult:

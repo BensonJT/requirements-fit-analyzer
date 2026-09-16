@@ -8,5 +8,7 @@ COMMUTABLE_PLACES = ["springfield, il", "chatham, il?", "rochester, il"]   # "na
 TRAVEL_MAX_PCT = 25
 MAX_DIRECT_REPORTS = 5
 DOMAIN_TENURE_TERMS = ["banking", "pharma"]
+# Fields you HAVE: a years-requirement listing one of these as an alternative is not a gate.
+CANDIDATE_TENURE_FIELDS = ["operations", "consulting", "process improvement", "transformation"]
 CORRIDOR_PLACES = ["springfield, il"]
 FAITH_COMP_FLOOR = 85_000

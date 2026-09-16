@@ -48,10 +48,15 @@ fast-forward-merge it instead). This is one-directional (Vostro → OptiPlex) be
 can reach Vostro's `optiplex` SSH host, but not the reverse — Vostro runs inside WSL2 behind
 NAT and isn't reachable from the LAN.
 
-- **Vostro** (primary): `/mnt/e/code/jobsearch` (via the `~/code` symlink to the E: drive —
-  deliberately off C:, which is nearly full). Local venv at `.venv/` — `python-dotenv`,
-  `httpx`, `duckdb`, `beautifulsoup4`, `lxml`, `pytest` (see `requirements.txt`). DuckDB job
-  store lives in `db/jobsearch.duckdb` (gitignored; see `db/README.md`).
+- **Vostro** (primary): **`~/jobsearch` on the WSL ext4 disk, since 2026-09-16.** The E: copy
+  (`~/code/jobsearch` → `/mnt/e/code/jobsearch`) is RETIRED: `/mnt/e` is a 9p mount served from
+  Windows, and torch/transformers imports over it failed under Windows memory pressure (bus
+  error, ENOMEM on `open()`, one WSL crash). Local venv at `.venv/` (Python 3.14, CPU torch,
+  sentence-transformers; `pip freeze` pins in `~/jobsearch_native/freeze_clean.txt`). DuckDB job
+  store lives in `db/jobsearch.duckdb` (gitignored; see `db/README.md`). Gitignored files that a
+  clone does NOT bring: `.env` (incl. `RESUME_DB_URL`), `evidence.local.toml`,
+  `.personal_patterns`, `backend/profile_local.py`, `backend/finder/rubric_local.py`, `db/`.
+  Caveat: the ext4 disk is a VHDX on C:, which is nearly full — keep large backups on E:.
 - **OptiPlex** (backup): Xubuntu Linux, conda env `jobsearch`, Python 3.12+. Still runnable
   standalone (`source ~/miniconda3/etc/profile.d/conda.sh && conda run -n jobsearch python
   main.py --keywords ... --location Remote`), but treat it as a mirror, not the place new

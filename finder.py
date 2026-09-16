@@ -216,6 +216,11 @@ def cmd_judge(con, a):
         judge.load_results(con, a.dir, scorer=a.scorer)
     elif a.action == "status":
         judge.status(a.dir)
+    elif a.action == "exclude":
+        if a.posting:
+            for pid in a.posting:
+                judge.exclude(con, pid, a.reason or "retired by the user")
+        judge.exclude_thin(con)
     else:
         judge.agreement(con)
         if a.csv:
@@ -300,7 +305,7 @@ def main():
     s.set_defaults(func=cmd_coverage)
 
     s = sub.add_parser("judge", parents=[common], help="LLM labeling run: export batches, import graded labels")
-    s.add_argument("action", choices=["export", "import", "status", "report"])
+    s.add_argument("action", choices=["export", "import", "status", "report", "exclude"])
     s.add_argument("--csv", help="report: write every judged posting to this CSV for eyeballing")
     s.add_argument("--dir", default="db/batches", help="batch directory (gitignored)")
     s.add_argument("--limit", type=int, help="stop the queue after N postings")
@@ -309,6 +314,8 @@ def main():
     s.add_argument("--reject-content", type=int, default=100, help="rejected on content: measures false negatives")
     s.add_argument("--reject-logistics", type=int, default=100, help="rejected on location/pay but fit >= 0.5")
     s.add_argument("--reject-random", type=int, default=50)
+    s.add_argument("--reason", help="exclude: why this posting must never be trained on")
+    s.add_argument("--posting", action="append", help="exclude: posting id to retire from training (repeatable)")
     s.add_argument("--exclude-dir", action="append", help="skip postings already queued in this batch dir (repeatable)")
     s.add_argument("--pools", help="comma-separated subset of high,low,reject")
     s.set_defaults(func=cmd_judge)

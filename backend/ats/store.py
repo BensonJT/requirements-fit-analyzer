@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 5  # v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
+SCHEMA_VERSION = 6  # v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -193,6 +193,12 @@ CREATE TABLE IF NOT EXISTS coverage (
     gaps JSON, matches JSON, notes JSON, scored_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, evidence_version, model, calibration)
 );
+-- Postings that must never be trained on: unjudgeable text (marketing copy, general-application
+-- placeholders) or a label the user has retired. Kept as rows so the reason survives a rebuild.
+CREATE TABLE IF NOT EXISTS training_exclusions (
+    posting_id VARCHAR PRIMARY KEY, reason VARCHAR NOT NULL, source VARCHAR NOT NULL, excluded_at TIMESTAMP NOT NULL
+);
+
 -- Graded function labels from an LLM judge (Phase 4 / the labeling run): one row per posting per rubric+scorer.
 CREATE TABLE IF NOT EXISTS llm_labels (
     posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, rubric_version VARCHAR NOT NULL,

@@ -345,6 +345,32 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
     return {"written": len(rows), "copied": copied, "errors": errors, "grades": counts}
 
 
+THIN_TEXT = re.compile(r"too thin|no (actual |specific )?(requirements|role|duties|responsibilities)"
+                       r"|marketing copy|company boilerplate|general[- ]application|placeholder", re.I)
+
+
+def exclude(con, posting_id: str, reason: str, source: str = "cli", log=print) -> None:
+    """Never train on this posting (the user retired the label, or its text cannot be judged)."""
+    con.execute("INSERT OR REPLACE INTO training_exclusions VALUES (?, ?, ?, ?)",
+                [posting_id, reason[:300], source, _now()])
+    row = con.execute("SELECT employer, title FROM postings WHERE posting_id = ?", [posting_id]).fetchone()
+    log(f"excluded from training: {posting_id} {row[0] + ' | ' + (row[1] or '') if row else ''} — {reason}")
+
+
+def exclude_thin(con, log=print) -> int:
+    """Auto-exclude postings the judge could not read: it said the text was boilerplate, a placeholder, or too
+    thin. Those rows teach a model nothing except what a careers page looks like."""
+    rows = con.execute("""SELECT posting_id, coalesce(blocker, '') || ' ' || coalesce(rationale, '')
+                          FROM vw_llm_labels_latest WHERE confidence = 'low' OR blocker IS NOT NULL""").fetchall()
+    n = 0
+    for pid, text in rows:
+        if THIN_TEXT.search(text or ""):
+            exclude(con, pid, "unjudgeable: the stored JD is boilerplate or a placeholder", "auto-thin", log=lambda _: None)
+            n += 1
+    log(f"auto-excluded {n} postings whose stored text the judge could not judge")
+    return n
+
+
 def agreement(con, log=print) -> dict:
     """Checks the judge against the user's own behaviour: postings they applied to or marked build should not be
     graded `wrong`; postings they passed on for function reasons should not be graded `bullseye`."""

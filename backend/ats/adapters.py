@@ -71,6 +71,50 @@ def _workday_host(tenant, wd):
     return f"https://{tenant}.{wd}.myworkdayjobs.com"
 
 
+WORKDAY_USA = "bc33aa3152ec42d4995f4791a106ed09"   # Workday's global location id for the United States
+
+
+def _workday_total_is_clamped(data) -> bool:
+    """True when CXS's `total` is a ceiling rather than the real count.
+
+    Some tenants clamp `total` at 2000 but do NOT clamp facet counts, so a facet group summing
+    past `total` proves the clamp. Accenture reported total=2000 against facet sums of 44,187
+    (2026-09-16). There is no paginating around it: offsets past the ceiling return page 1 again.
+    """
+    total = data.get("total") or 0
+    if not total:
+        return False
+    widest = 0
+    for f in (data.get("facets") or []):
+        widest = max(widest, sum(v.get("count") or 0 for v in (f.get("values") or [])))
+    return widest > total * 1.05
+
+
+def _workday_scope(c, url):
+    """(appliedFacets, clamped) for one board.
+
+    A clamped board is re-scoped to the US, which is what the rules keep anyway and is usually
+    far under the ceiling (Accenture 44,187 -> 710). The US facet is NOT universally supported:
+    some tenants reject it with HTTP 400 (Booz Allen, Sentara) and some accept it and silently
+    ignore it (GE Vernova returned an unchanged total and French locations), so the filter is
+    used only when the total actually moves. `clamped` stays True either way -- a board we could
+    not fully enumerate must never be close-passed, or every row outside the window looks taken
+    down. Dead reqs on such a board are still closed individually by the detail stage's 404.
+    """
+    probe = _request(c, "POST", url, json={"appliedFacets": {}, "limit": 20, "offset": 0}).json()
+    if not _workday_total_is_clamped(probe):
+        return {}, False
+    facets = {"locationCountry": [WORKDAY_USA]}
+    try:
+        scoped = _request(c, "POST", url, json={"appliedFacets": facets, "limit": 20, "offset": 0}).json()
+    except Exception:
+        return {}, True                                  # rejected outright: pull what we can, no close-pass
+    total = scoped.get("total")
+    if not total or total >= (probe.get("total") or 0):  # accepted but ignored, not applied
+        return {}, True
+    return facets, True
+
+
 def workday_jobs(row, max_pages=None):
     tenant, wd, site = row["identifier_1"], row["identifier_2"], row["identifier_3"]
     if not site:
@@ -80,8 +124,9 @@ def workday_jobs(row, max_pages=None):
     public = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
     out, offset, limit, total, pages = [], 0, 20, None, 0  # CXS rejects limit > 20
     with client() as c:
+        applied, clamped = _workday_scope(c, url)
         while True:
-            body = {"appliedFacets": {}, "limit": limit, "offset": offset, "searchText": ""}
+            body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": ""}
             data = _request(c, "POST", url, json=body).json()
             postings = data.get("jobPostings") or []
             if total is None:
@@ -110,7 +155,7 @@ def workday_jobs(row, max_pages=None):
             if max_pages and pages >= max_pages:
                 return Truncated(out)
             time.sleep(PAGE_DELAY)
-    return out
+    return Truncated(out) if clamped else out
 
 
 def workday_detail(row, posting):

@@ -73,11 +73,18 @@ def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] =
     return strip_employer(f"{title}\n{title}\n{strip_boilerplate(text or '')}", company)
 
 
-def training_set(con) -> list:
+LENS_VIEWS = {None: "vw_label_set", "process": "vw_label_set_process", "technical": "vw_label_set_technical"}
+
+
+def training_set(con, lens=None) -> list:
     """vw_label_set rows as dicts, one per job: postings in `training_exclusions` dropped outright, then
-    deduped on posting_id and on company + similar title (FUZZY_DEDUPED_SOURCES), by SOURCE_PRIORITY."""
+    deduped on posting_id and on company + similar title (FUZZY_DEDUPED_SOURCES), by SOURCE_PRIORITY.
+
+    `lens` selects the per-lens view (sprint plan 18.8); None keeps the averaged-grade set."""
+    if lens not in LENS_VIEWS:
+        raise ValueError(f"unknown lens {lens!r}; expected one of {sorted(k for k in LENS_VIEWS if k)}")
     cols = ("label_id", "source", "posting_id", "company", "title", "text", "label", "weight", "grade")
-    rows = [dict(zip(cols, r)) for r in con.execute(f"SELECT {', '.join(cols)} FROM vw_label_set").fetchall()]
+    rows = [dict(zip(cols, r)) for r in con.execute(f"SELECT {', '.join(cols)} FROM {LENS_VIEWS[lens]}").fetchall()]
     excluded = {pid for (pid,) in con.execute("SELECT posting_id FROM training_exclusions").fetchall()}
     rows = [r for r in rows if r["source"] not in TRAIN_EXCLUDED_SOURCES
             and not (r["source"] == "decision" and r["label"] == 0)
@@ -161,11 +168,14 @@ def cross_validate(texts: list, y: list, w: list, *, C: float, min_df: int, ngra
 
 
 def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_features: int = 50_000, cv: int = 5,
-          seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, log=print) -> dict:
-    """Cross-validates, fits on all labels, saves db/models/<version>.joblib and inserts a `models` row."""
+          seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, lens=None, log=print) -> dict:
+    """Cross-validates, fits on all labels, saves db/models/<version>.joblib and inserts a `models` row.
+
+    `lens` ('process' | 'technical') trains that lens's model and stores it under its own `kind`, so the
+    three coexist and `latest_model` can ask for one by name."""
     import joblib
     import numpy as np
-    rows = training_set(con)
+    rows = training_set(con, lens=lens)
     y = [int(r["label"]) for r in rows]
     n_pos, n_neg = sum(y), len(y) - sum(y)
     n_jobs = len(rows)
@@ -183,6 +193,7 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
         weights.append(weights[i])
         groups.append(i)
     params = {"C": C, "min_df": min_df, "max_df": max_df, "ngram": list(ngram), "max_features": max_features, "cv": cv,
+              "lens": lens or "overall",
               "seed": seed, "features": FEATURE_VERSION, "copies": len(pairs), "stop_words": hashlib.sha1(
                   " ".join(sorted(P.MODEL_STOP_WORDS)).encode()).hexdigest()[:8]}
     version = model_version([[r["label_id"], int(r["label"]), float(r["weight"] or 1.0)] for r in rows], params)
@@ -212,9 +223,10 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{version}.joblib")
     joblib.dump(model, path)
+    kind = f"tfidf_lr_{lens}" if lens else "tfidf_lr"
     con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, "
-                "cv_precision_at_20, path, notes) VALUES (?, 'tfidf_lr', ?, ?, ?, ?, ?, ?, ?)",
-                [version, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], path, json.dumps(notes)])
+                "cv_precision_at_20, path, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [version, kind, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], path, json.dumps(notes)])
 
     in_sample = clf.predict_proba(vec.transform(texts[:n_jobs]))[:, 1]
     source_gap = _source_gap(con, rows, oof, pairs)
@@ -320,10 +332,11 @@ def hard_negatives(result: dict, k: int = 20) -> list:
     return [(p, r["source"], r["label_id"], r["company"], r["title"]) for p, r in pairs[:k]]
 
 
-def latest_row(con) -> Optional[tuple]:
-    """(model_version, path, notes) of the newest tfidf_lr model, SQL only."""
-    return con.execute("SELECT model_version, path, notes FROM models WHERE kind = 'tfidf_lr' "
-                       "ORDER BY trained_at DESC LIMIT 1").fetchone()
+def latest_row(con, lens=None) -> Optional[tuple]:
+    """(model_version, path, notes) of the newest model for this lens, SQL only."""
+    kind = f"tfidf_lr_{lens}" if lens else "tfidf_lr"
+    return con.execute("SELECT model_version, path, notes FROM models WHERE kind = ? "
+                       "ORDER BY trained_at DESC LIMIT 1", [kind]).fetchone()
 
 
 def load_latest(con, log=print) -> Optional[dict]:

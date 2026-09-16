@@ -74,20 +74,32 @@ def _workday_host(tenant, wd):
 WORKDAY_USA = "bc33aa3152ec42d4995f4791a106ed09"   # Workday's global location id for the United States
 
 
+WORKDAY_CEILING = 2000          # the clamp value observed on every affected tenant so far
+
+
 def _workday_total_is_clamped(data) -> bool:
     """True when CXS's `total` is a ceiling rather than the real count.
 
-    Some tenants clamp `total` at 2000 but do NOT clamp facet counts, so a facet group summing
-    past `total` proves the clamp. Accenture reported total=2000 against facet sums of 44,187
-    (2026-09-16). There is no paginating around it: offsets past the ceiling return page 1 again.
+    Facet counts are not clamped, so a facet summing past `total` exposes the clamp -- but only a
+    SINGLE-VALUED facet may be used. A posting in three cities is counted three times in the location
+    facet, and `workerSubType` is multi-valued too (Accenture: 86,767 against 44,187 postings), so the
+    widest-facet test called Autodesk (405) and Guidehouse (757) clamped when they are not.
+    `timeType` (Full time / Part time) is one value per posting, so its sum is the true count:
+    Accenture 44,216 vs total 2000, Booz Allen 2,386, Leidos 2,192 -- against Henry Schein, Autodesk,
+    Guidehouse and GE Vernova all at ratio 1.00.
+
+    Probing past the ceiling does not work as a test: Workday answers any out-of-range offset with
+    page 1 rather than an empty page, so even a genuine board looks like it has more.
     """
     total = data.get("total") or 0
     if not total:
         return False
-    widest = 0
     for f in (data.get("facets") or []):
-        widest = max(widest, sum(v.get("count") or 0 for v in (f.get("values") or [])))
-    return widest > total * 1.05
+        if f.get("facetParameter") == "timeType":
+            real = sum(v.get("count") or 0 for v in (f.get("values") or []))
+            if real:
+                return real > total * 1.05
+    return total == WORKDAY_CEILING     # no single-valued facet to check: trust the known ceiling
 
 
 def _workday_scope(c, url):

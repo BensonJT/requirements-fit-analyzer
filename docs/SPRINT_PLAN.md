@@ -632,11 +632,17 @@ The first `--relabel` queue concatenated grades alphabetically, so it was sorted
 
 The single TF-IDF fit model is the last place the one-axis design survives. With two label columns the right architecture is two models producing `fit_process` and `fit_technical`, which is also what the three report lists need in order to rank within each list. Until that exists, the single model trains on the averaged `grade` and is a compromise. Blend weights will need revisiting: content is at 0.90 after the 2026-09-15 sweep, but a two-lens content score may want its own.
 
+**Built 2026-09-16.** Both models trained (`c80d6fb39bc7` process, `3fee819b2a64` technical); schema v8 adds `screens.fit_process` / `fit_technical`, `pipeline.screen` fills them, and a full rescreen put a lens prediction on all 60,391 active rows that have JD text. The scores are stored and reported ONLY -- `combine` does not read them, so `final_score` and `model_version` are unchanged and the blend question below is still open.
+
 ### 18.9 Acceptance
 
 - [ ] The corpus is re-graded under two lenses (currently MIXED: 890 at a single-lens corrected rubric, 2,083 at the original — do not retrain or read a corpus-wide distribution until this is resolved).
 - [ ] Grade distribution reported per lens, plus the `lens_bucket` crosstab; the `both` count is the headline.
 - [ ] Fit model retrained on the new overall grades; report AUC, AUC-vs-`wrong`, and OOF fit by grade among SURVIVORS (the flat 0.77 / 0.64 / 0.65 / 0.63 is the number to beat).
-- [ ] The three report lists built and reviewed by the user: strong process, strong technical, and `both`
-      (at least one bullseye). Rank within each list; do not merge them into one ordering.
+- [x] The three report lists **built** 2026-09-16 (`finder.py lenses` -> `Lens_Lists_*.md`), awaiting user
+      review: strong process, strong technical, and `both`. Ranked within each list, not merged. A `lens_source`
+      column marks user / judge / model on every row. `both` still needs more than adjacent/adjacent, but an
+      ungraded row earns it by clearing `lens_standout_p()` 0.80 rather than a predicted bullseye -- the models
+      cannot reproduce that split (F1 0.64 / 0.61, precision ~0.5) and must not be asked to.
+      Actionable at build time: both 200, process 540, technical 222.
 - [ ] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.

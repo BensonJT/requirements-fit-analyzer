@@ -107,6 +107,20 @@ HARD_AVOID_INDUSTRY_TERMS = ["tobacco", "casino", "gambling", "sportsbook", "bet
 # Clearance-gated titles -- flagged, since an active clearance is required.
 CLEARANCE_TERMS = ["ts/sci", "top secret", "secret clearance", "active secret", "security clearance", "polygraph", "clearance required"]
 
+# A clearance is only a blocker when it must ALREADY be held. "Ability to obtain" means the employer
+# sponsors and funds it, which is reachable. Measured
+# 2026-09-16 over 11,325 flagged postings: only 2,235 (20%) actually require a held clearance, while
+# 3,787 say "obtain" and 5,303 matched nothing but boilerplate ("...skill sets, experience, security
+# clearances, licensure..." in a compensation paragraph). The flag was costing real roles: CACI
+# "Business Process Consultant" (93) and Guidehouse "Senior Business Process Analyst" (91) among them.
+CLEARANCE_OBTAIN_RE = (r"(ability|able|eligible|willing|capable)\s+to\s+(obtain|acquire|secure)"
+                       r"|must\s+be\s+able\s+to\s+obtain|obtain\s+and\s+maintain")
+CLEARANCE_HELD_RE = (r"active\s+(secret|top\s*secret|ts/sci|dod|security)?\s*clearance"
+                     r"|current(ly)?\s+(hold|possess)|must\s+(possess|hold)\s+(an?\s+)?(active|current)"
+                     r"|existing\s+clearance|currently\s+active")
+# Levels that are a blocker even without the word "active", unless the JD offers to sponsor one.
+CLEARANCE_HARD_LEVELS = ["ts/sci", "top secret", "secret clearance", "active secret", "polygraph"]
+
 # Hard skips -- fraud / assessment-gated / AI-data gig posters. Match on company name.
 BLOCKED_POSTERS = {
     "crossover": "assessment-gated employer (CCAT on all applicants)",

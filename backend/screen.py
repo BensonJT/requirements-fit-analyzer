@@ -207,9 +207,16 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
     if _has(blob, P.HARD_AVOID_INDUSTRY_TERMS):
         reasons.append("hard-avoid industry")
 
-    # 5. Clearance
+    # 5. Clearance -- a blocker only when it must already be HELD. An employer asking for the "ability
+    #    to obtain" sponsors and funds it, so that is reachable and must not be flagged away.
     if _has(blob, P.CLEARANCE_TERMS):
-        flags.append("clearance language on listing -- likely unreachable")
+        held = re.search(P.CLEARANCE_HELD_RE, blob)
+        hard = _has(blob, P.CLEARANCE_HARD_LEVELS)
+        sponsored = re.search(P.CLEARANCE_OBTAIN_RE, blob)
+        if held or (hard and not sponsored):
+            flags.append("clearance must already be held -- likely unreachable")
+        elif sponsored:
+            flags.append("clearance is sponsored (ability to obtain) -- reachable")
 
     # 6. Comp -- overlap test on the band top; unposted is never a rejection
     top = annual_top(job)

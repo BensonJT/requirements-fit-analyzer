@@ -339,9 +339,10 @@ def latest_row(con, lens=None) -> Optional[tuple]:
                        "ORDER BY trained_at DESC LIMIT 1", [kind]).fetchone()
 
 
-def load_latest(con, log=print) -> Optional[dict]:
-    """The newest trained model, or None when none exists, its file is gone, or scikit-learn is missing."""
-    row = latest_row(con)
+def load_latest(con, lens=None, log=print) -> Optional[dict]:
+    """The newest trained model for `lens` (None = the averaged-grade model), or None when none exists,
+    its file is gone, or scikit-learn is missing."""
+    row = latest_row(con, lens=lens)
     if not row:
         return None
     version, path, _ = row
@@ -355,6 +356,22 @@ def load_latest(con, log=print) -> Optional[dict]:
         log(f"Model {version} exists but scikit-learn/joblib is not installed; rules only.")
         return None
     return model
+
+
+LENSES = ("process", "technical")
+# The probability thresholds that turn these scores into buckets live in SQL, as the `lens_strong_p()` /
+# `lens_standout_p()` macros next to the view that reads them (backend/ats/store.py).
+
+
+def load_lens_models(con, log=print) -> dict:
+    """{lens: model} for every lens that has a trained model on disk. Missing lenses are simply absent, so
+    the screen runs unchanged on a database that never trained them."""
+    out = {}
+    for lens in LENSES:
+        model = load_latest(con, lens=lens, log=log)
+        if model is not None:
+            out[lens] = model
+    return out
 
 
 def predict(model: dict, texts: list) -> list:

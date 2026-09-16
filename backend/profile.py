@@ -158,8 +158,12 @@ FLAG_PENALTY = 5           # points off the final score per flag
 FLAG_PENALTY_CAP = 25
 # Flags that stay visible (and still send a posting to review) but cost no points, because a component
 # already prices them (pay, location, level, content) or they are not a negative (faith signal).
+# "clearance is sponsored": the 2026-09-16 ruling says an employer offering to fund a clearance is not a
+# blocker, so the flag exists to be READ, not to cost points. Leaving it penalized made the clearance fix
+# almost a no-op -- 3,858 postings traded one 5-point flag for another and none of them moved.
 UNPENALIZED_FLAG_PATTERNS = [r"^\$[\d,.]+K ask sits above", r"^local/hybrid", r"^nationwide listing", r"^mid level",
-                             r"^few years asked", r"^content fit borderline", r"^faith-based signal"]
+                             r"^few years asked", r"^content fit borderline", r"^faith-based signal",
+                             r"^clearance is sponsored"]
 FIT_REJECT = 0.35          # content gate: a scored JD below this is rejected, whatever the title says
 FIT_REVIEW = 0.50          # a scored JD below this is flagged for review
 NO_CONTENT_CAP = 60        # no JD or no model: the profile alone cannot make a posting strong

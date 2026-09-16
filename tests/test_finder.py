@@ -262,8 +262,12 @@ def test_rescreen_predicate_selects_only_new_changed_or_version_changed(tmp_path
     assert pipeline.candidate_ids(con, rv, "none") == [ids["A"]]
     pipeline.screen(con, log=_quiet)
 
+    # Re-recording the board adds C and re-sends A's ORIGINAL JD, which overwrites the edit above. That is a
+    # real text change, so A is due a re-screen as well -- exactly what the Lever `lists` fix depends on, and
+    # why the upsert stamps description_fetched_at whenever the text actually differs. B is unchanged and is
+    # correctly left alone.
     ids = _seed(con, when=later, extra=[N.base(req_id="C", title="Lean Six Sigma Lead")])
-    assert pipeline.candidate_ids(con, rv, "none") == [ids["C"]]
+    assert set(pipeline.candidate_ids(con, rv, "none")) == {ids["C"], ids["A"]}
     pipeline.screen(con, log=_quiet)
 
     monkeypatch.setattr(version, "RULES_CODE_VERSION", "bumped")

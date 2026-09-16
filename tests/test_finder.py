@@ -1314,3 +1314,88 @@ def test_list_without_a_candidate_field_still_gates():
     """A list is only harmless when one of the alternatives is actually his."""
     req = "Required Qualifications\n10+ years in pharma, biotech, or managed care."
     assert rules.domain_tenure_rule("", req)[1] != []
+
+
+# ---- per-lens fit columns and vw_lens_fit (sprint plan 18.8) ----
+
+def _lens_row(con, pid, *, verdict="review", fp=None, ft=None, score=80):
+    now = datetime(2026, 9, 16)
+    con.execute("INSERT OR REPLACE INTO postings (posting_id, employer, platform, req_id, title, url, status, "
+                "first_seen_at, last_seen_at) VALUES (?, 'Acme', 'greenhouse', ?, ?, ?, 'active', ?, ?)",
+                [pid, pid, f"Role {pid}", f"https://x/{pid}", now, now])
+    con.execute("INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, "
+                "rule_score, fit_prob, fit_process, fit_technical, final_score, band) "
+                "VALUES (?, 'rv', 'mv', ?, ?, 70, 0.8, ?, ?, ?, 'strong')",
+                [pid, now, verdict, fp, ft, score])
+
+
+def _grade(con, pid, process, technical, scorer="claude-sonnet-batch"):
+    con.execute("UPDATE postings SET description_hash = 'h' WHERE posting_id = ?", [pid])
+    con.execute("INSERT OR REPLACE INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+                "grade_process, grade_technical, judged_at) VALUES (?, 'h', 'r1', ?, 'adjacent', ?, ?, ?)",
+                [pid, scorer, process, technical, datetime(2026, 9, 16)])
+
+
+def test_lens_fit_prefers_a_grade_over_a_prediction(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _lens_row(con, "a" * 20, fp=0.95, ft=0.95)          # the model would call both lenses strong
+    _grade(con, "a" * 20, "wrong", "wrong")             # the judge says otherwise
+    row = con.execute("SELECT lens_bucket, lens_source, process_strong FROM vw_lens_fit").fetchone()
+    assert row == ("neither", "judge", False)
+    con.close()
+
+
+def test_lens_fit_falls_back_to_the_model_per_lens(tmp_path):
+    """A row graded before the second lens existed keeps its process grade and gets a technical prediction."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _lens_row(con, "b" * 20, fp=0.10, ft=0.95)
+    _grade(con, "b" * 20, "bullseye", None)
+    bucket, source, ps, ts = con.execute(
+        "SELECT lens_bucket, lens_source, process_strong, technical_strong FROM vw_lens_fit").fetchone()
+    assert (bucket, source, ps, ts) == ("both", "judge+model", True, True)
+    con.close()
+
+
+def test_lens_fit_marks_the_users_own_ruling(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _lens_row(con, "c" * 20, fp=0.1, ft=0.1)
+    _grade(con, "c" * 20, "adjacent", "stretch", scorer="user-adjudicated")
+    assert con.execute("SELECT lens_source, lens_bucket FROM vw_lens_fit").fetchone() == ("user", "process")
+    con.close()
+
+
+def test_model_rows_need_the_standout_bar_for_both(tmp_path):
+    """Strong on each lens but standout on neither is a generalist, not a both-lens role."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _lens_row(con, "d" * 20, fp=0.75, ft=0.75)
+    _lens_row(con, "e" * 20, fp=0.85, ft=0.75)
+    got = dict(con.execute("SELECT posting_id, lens_bucket FROM vw_lens_fit").fetchall())
+    assert got == {"d" * 20: "process", "e" * 20: "both"}
+    assert con.execute("SELECT DISTINCT lens_source FROM vw_lens_fit").fetchone() == ("model",)
+    con.close()
+
+
+def test_screen_writes_both_lens_probabilities(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 16)
+    jobs = [N.base(req_id=f"L{i}", title=f"Process Excellence Lead {i}", url=f"https://x/L{i}",
+                   location="Remote - USA", workplace_type="remote") for i in range(4)]
+    store.record_board(con, "Acme", "greenhouse", jobs, now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h', description_fetched_at = ?",
+                [REQ_JD, now])
+    fake = {"version": "lens-v1"}
+    monkeypatch.setattr(features, "predict", lambda m, texts: [0.91] * len(texts))
+    pipeline.screen(con, model=None, lens_models={"process": fake, "technical": fake}, log=_quiet)
+    rows = con.execute("SELECT fit_process, fit_technical FROM vw_screen_latest").fetchall()
+    assert len(rows) == 4 and all(r == (0.91, 0.91) for r in rows)
+    con.close()
+
+
+def test_screen_without_lens_models_leaves_the_columns_null(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 16)
+    store.record_board(con, "Acme", "greenhouse", [N.base(req_id="L1", title="Process Excellence Lead",
+                                                          url="https://x/L1", location="Remote - USA")], now)
+    pipeline.screen(con, model=None, log=_quiet)
+    assert con.execute("SELECT fit_process, fit_technical FROM vw_screen_latest").fetchone() == (None, None)
+    con.close()

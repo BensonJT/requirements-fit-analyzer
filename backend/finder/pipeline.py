@@ -157,10 +157,11 @@ def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
 # Shape of one batch passed to DuckDB as a single JSON string. Binding Python lists as parameters
 # costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
 _BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
-                            "fit_prob": "DOUBLE", "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
+                            "fit_prob": "DOUBLE", "fit_process": "DOUBLE", "fit_technical": "DOUBLE",
+                            "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
                             "flags": "JSON", "top_terms": "JSON", "joined": "VARCHAR"}])
-_BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "final_score", "band", "reasons", "flags",
-               "top_terms")
+_BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "fit_process", "fit_technical",
+               "final_score", "band", "reasons", "flags", "top_terms")
 
 
 def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
@@ -173,9 +174,10 @@ def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
                     "SELECT unnest(json_transform($1, $2), recursive := true)", [payload, _BATCH_SHAPE])
         con.execute("""
             INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
-                                            rule_score, fit_prob, final_score, band, reasons, flags, top_terms)
-            SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, final_score, band, reasons, flags,
-                   top_terms
+                                            rule_score, fit_prob, fit_process, fit_technical, final_score, band,
+                                            reasons, flags, top_terms)
+            SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, fit_process, fit_technical,
+                   final_score, band, reasons, flags, top_terms
             FROM screen_batch""", [rv, mv, now])
         con.execute("""
             UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
@@ -203,8 +205,37 @@ def model_scores(model: Optional[dict], rows: list) -> tuple:
     return probs, terms
 
 
-def screen(con, *, since=None, full: bool = False, limit=None, model=None, encoder=None, log=print) -> dict:
-    """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band."""
+def lens_scores(lens_models: Optional[dict], rows: list) -> dict:
+    """{lens: [prob per row]} for the per-lens fit models (sprint plan 18.8).
+
+    These are a prediction, not a score input: nothing in `combine` reads them. They exist so every row in
+    the corpus carries "which of his two lanes would call this strong", which is what the three report lists
+    need for the rows the judge has never seen.
+
+    Probabilities only -- no top terms. Explaining a score is the main model's job, and running the per-row
+    term attribution for two more models triples the expensive half of the screen for output nobody reads.
+    """
+    out = {}
+    if not lens_models:
+        return out
+    from . import features
+    idx = [i for i, r in enumerate(rows) if (r.get("description_text") or "").strip()]
+    texts = [features.doc_text(rows[i]["title"], rows[i]["description_text"], rows[i]["employer"]) for i in idx]
+    for lens, model in lens_models.items():
+        probs = [None] * len(rows)
+        if idx:
+            for j, prob in zip(idx, features.predict(model, texts)):
+                probs[j] = prob
+        out[lens] = probs
+    return out
+
+
+def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_models=None, encoder=None,
+           log=print) -> dict:
+    """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band.
+
+    `lens_models` ({lens: model}) adds fit_process / fit_technical alongside fit_prob; they are stored and
+    reported only, and never move final_score."""
     t0, started = time.monotonic(), _now()
     rv, mv = version.rules_version(), (model or {}).get("version", "none")
     calib = {"fit_weight": (model or {}).get("fit_weight")}
@@ -213,13 +244,18 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
     for n_batch, rows in enumerate(iter_candidate_batches(con, rv, mv, since=since, limit=limit, full=full)):
         recs = []
         probs, terms = model_scores(model, rows)
-        for row, fit_prob, top in zip(rows, probs, terms):
+        lens_probs = lens_scores(lens_models, rows)
+        none_col = [None] * len(rows)
+        for i, (row, fit_prob, top) in enumerate(zip(rows, probs, terms)):
             rec = rules.screen_row(row, rv)
             apply_content_gate(rec, fit_prob)
             final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
                                   rejected=rec.verdict == "reject", flags=penalized_flags(rec.flags))
             recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
-                         "rule_score": rec.rule_score, "fit_prob": fit_prob, "final_score": final, "band": band,
+                         "rule_score": rec.rule_score, "fit_prob": fit_prob,
+                         "fit_process": lens_probs.get("process", none_col)[i],
+                         "fit_technical": lens_probs.get("technical", none_col)[i],
+                         "final_score": final, "band": band,
                          "reasons": rec.reasons, "flags": rec.flags, "top_terms": top})
             verdicts[rec.verdict] += 1
             bands[band] += 1
@@ -229,7 +265,8 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, encod
         if n_batch % 20 == 19:
             log(f"  screened {done}/{total} ({time.monotonic() - t0:.0f}s)")
     stats = {"screened": done, "started": started, "seconds": round(time.monotonic() - t0, 1),
-             "verdict": dict(verdicts), "band": dict(bands), "rules_version": rv, "model_version": mv}
+             "verdict": dict(verdicts), "band": dict(bands), "rules_version": rv, "model_version": mv,
+             "lens_models": {k: v.get("version") for k, v in (lens_models or {}).items()}}
     log(f"Screen: {done} rows in {stats['seconds']}s — " +
         ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items())) + " | bands " +
         ", ".join(f"{k} {v}" for k, v in sorted(bands.items())) + f" | rules {rv} · model {mv}")
@@ -275,11 +312,12 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         t = time.monotonic()
         out["read_back"] = report_mod.read_back(con, vault_dir)
         log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")
-    model = None
+    model, lens_models = None, {}
     if use_model:
         from . import features
         model = features.load_latest(con, log=log)
-    out["screen"] = screen(con, since=since, full=full, model=model, log=log)
+        lens_models = features.load_lens_models(con, log=log)
+    out["screen"] = screen(con, since=since, full=full, model=model, lens_models=lens_models, log=log)
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
     if llm_top:

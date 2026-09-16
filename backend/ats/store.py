@@ -24,7 +24,8 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 7  # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
+SCHEMA_VERSION = 8  # v8 (2026-09-16): screens.fit_process / fit_technical;
+                    # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -120,6 +121,8 @@ CREATE TABLE IF NOT EXISTS screens (
     tier            INTEGER,                   -- 1 precise | 2 broad | 3 data lane | NULL no function hit
     rule_score      INTEGER NOT NULL,          -- 0-100
     fit_prob        DOUBLE,                    -- Phase 2
+    fit_process     DOUBLE,                    -- per-lens fit (18.8): process excellence / operating model
+    fit_technical   DOUBLE,                    -- per-lens fit (18.8): data, analytics, quantitative
     embed_sim       DOUBLE,                    -- Phase 3 (raw cosine)
     llm_score       INTEGER,                   -- Phase 4
     final_score     INTEGER NOT NULL,          -- 0-100
@@ -363,6 +366,72 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     LEFT JOIN vw_screen_latest s USING (posting_id);
 
+-- Where the line falls between a lens model's probability and the judge's words. Macros rather than Python
+-- constants so the views and the CLI read one source. Both were calibrated against the 2,953 graded rows
+-- (2026-09-16), not chosen by eye.
+--
+-- `strong` at 0.70 is deliberately above the best-F1 point (0.58): these rows go in a list a human reads, so
+-- precision is worth more than recall. Process P 0.97 / R 0.83, technical P 0.92 / R 0.83.
+CREATE OR REPLACE MACRO lens_strong_p() AS 0.70;
+-- There is NO model bullseye. Asked to reproduce the judge's bullseye/adjacent split the models manage F1
+-- 0.64 / 0.61 at precision ~0.5 -- a coin flip -- because the two grades' probabilities overlap almost
+-- completely (process means 0.886 vs 0.783). So an ungraded row earns the `both` bucket by clearing a HIGHER
+-- probability bar on each lens, which the models are good at, instead of being handed a grade they cannot
+-- predict. 0.80 is where strong-vs-not precision reaches 1.00 / 0.94.
+CREATE OR REPLACE MACRO lens_standout_p() AS 0.80;
+
+-- One row per active screened posting saying how each lens places it, and WHO placed it. The judge has
+-- graded ~3k rows; the lens models cover the other 60k. Reading them from one view is what lets the three
+-- report lists be the whole corpus instead of only the judged slice -- with `lens_source` on every row, so a
+-- model guess is never mistaken for the user's own ruling.
+CREATE OR REPLACE VIEW vw_lens_fit AS
+    WITH base AS (
+        SELECT p.posting_id, p.employer, p.title, p.url, p.location_primary, p.workplace_type,
+               p.pay_min, p.pay_max, p.pay_interval, p.first_seen_at,
+               date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
+               s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.fit_process, s.fit_technical,
+               s.reasons, s.flags,
+               g.grade, g.grade_process, g.grade_technical, g.blocker, g.scorer,
+               d.posting_id IS NOT NULL AS decided,
+               t.matched_posting_id IS NOT NULL AS in_tracker
+        FROM postings p
+        JOIN vw_screen_latest s USING (posting_id)
+        LEFT JOIN vw_llm_labels_latest g USING (posting_id)
+        LEFT JOIN vw_decisions d USING (posting_id)
+        LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
+        WHERE p.status = 'active'
+    ), placed AS (
+        SELECT *,
+               -- Per lens: a grade wins over a prediction, and a row graded before the lenses existed falls
+               -- back to the model for that lens rather than dropping out of the lists entirely.
+               CASE WHEN grade_process IS NOT NULL THEN grade_process IN ('bullseye', 'adjacent')
+                    ELSE fit_process >= lens_strong_p() END AS process_strong,
+               CASE WHEN grade_technical IS NOT NULL THEN grade_technical IN ('bullseye', 'adjacent')
+                    ELSE fit_technical >= lens_strong_p() END AS technical_strong,
+               -- "Not merely adjacent": the judge says it with a bullseye, the model with a high probability.
+               CASE WHEN grade_process IS NOT NULL THEN grade_process = 'bullseye'
+                    ELSE fit_process >= lens_standout_p() END AS process_standout,
+               CASE WHEN grade_technical IS NOT NULL THEN grade_technical = 'bullseye'
+                    ELSE fit_technical >= lens_standout_p() END AS technical_standout,
+               CASE WHEN scorer = 'user-adjudicated' THEN 'user'
+                    WHEN grade_process IS NOT NULL AND grade_technical IS NOT NULL THEN 'judge'
+                    WHEN grade_process IS NOT NULL OR grade_technical IS NOT NULL THEN 'judge+model'
+                    ELSE 'model' END AS lens_source
+        FROM base
+    )
+    SELECT *,
+           -- `both` still demands more than adjacent on one lens: strong-but-lukewarm on each is a
+           -- generalist, not the rare role that genuinely needs both (the rule vw_lens_grades established on
+           -- the pilot, where 9 of 25 `both` rows were adjacent/adjacent).
+           CASE WHEN process_strong AND technical_strong AND (process_standout OR technical_standout) THEN 'both'
+                WHEN process_strong THEN 'process'
+                WHEN technical_strong THEN 'technical'
+                ELSE 'neither' END AS lens_bucket,
+           -- A single per-row lens strength, used to break ties inside a list. A row with no JD scores
+           -- NULL on both lenses and lands in `neither`, which is correct: nothing placed it.
+           greatest(coalesce(fit_process, 0), coalesce(fit_technical, 0)) AS lens_max_p
+    FROM placed;
+
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
 CREATE OR REPLACE VIEW vw_hard_negatives AS
     SELECT posting_id, 'decision:function' AS source, reason AS note FROM vw_decisions
@@ -375,7 +444,8 @@ CREATE OR REPLACE VIEW vw_shortlist AS
     SELECT p.posting_id, p.employer, p.title, p.location_primary, p.workplace_type, p.employment_type,
            p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
            date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
-           s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.embed_sim, s.llm_score,
+           s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob,
+           s.fit_process, s.fit_technical, s.embed_sim, s.llm_score,
            s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at,
            c.coverage_required, c.coverage_role
     FROM postings p
@@ -481,9 +551,12 @@ def connect(db_path=None):
 
 def _add_missing_columns(con):
     """Additive column migrations. v7: the two lens grades on llm_labels (old rows keep NULL, which reads as
-    'graded before the lenses existed')."""
+    'graded before the lenses existed'). v8: the two lens fit probabilities on screens (NULL = screened before
+    the lens models existed; a rescreen fills them)."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
-                                ("llm_labels", "grade_technical", "VARCHAR")):
+                                ("llm_labels", "grade_technical", "VARCHAR"),
+                                ("screens", "fit_process", "DOUBLE"),
+                                ("screens", "fit_technical", "DOUBLE")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 

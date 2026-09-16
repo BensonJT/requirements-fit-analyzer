@@ -126,10 +126,16 @@ AI_GIG_TITLE_TERMS = ["ai trainer", "train ai", "ai training", "expert opportuni
 # ---- Finder (backend/finder/): JD-text rules and scoring. Neutral structure, no personal values. ----
 # Rule points feed rule_score (0-100). See docs/SPRINT_PLAN.md section 4.2.
 # Weighted mean of the signals present (weights renormalized over what exists).
-# ---- Final score (sprint plan §14). Content fit is the strongest single signal; level, location and pay together
-# weigh almost as much; the title only nudges. screens.rule_score holds the profile score (level, location, pay,
-# title weighted on 0-100); final = content and profile blended by these weights.
-SCORE_COMPONENT_WEIGHTS = {"content": 0.50, "level": 0.20, "location": 0.15, "pay": 0.10, "title": 0.05}
+# ---- Final score (sprint plan §14). screens.rule_score holds the profile score -- level, location, pay and
+# title weighted on 0-100 by the four non-content weights below, renormalized (profile_score drops "content").
+# final = content and profile blended by "content" vs 1 - "content".
+# Content (the fit model) dominates the rank. Location, pay, level and country are GATES at Level 1 -- a
+# posting that survives has already passed them, so spending half the rank on them prices them twice. Measured
+# 2026-09-15 over 720 graded survivors with out-of-fold fit: rule_score AUC 0.444 (mildly ANTI-correlated with
+# fit, because pristine ATS metadata skews to big-corporate senior-generalist reqs), and sweeping this weight
+# gave AUC 0.537 at 0.50 -> 0.589 at 0.90, precision@50 0.84 -> 0.90. Held at 0.90 rather than 1.00: level and
+# title gradations that the gates let through are still worth a tiebreaker, and 0.90 -> 1.00 was worth 0.003.
+SCORE_COMPONENT_WEIGHTS = {"content": 0.90, "level": 0.20, "location": 0.15, "pay": 0.10, "title": 0.05}
 LEVEL_POINTS = {"senior": 100, "mid": 50, "unknown": 60}
 LOCATION_POINTS = {"remote": 100, "commutable_hybrid": 80, "commutable_onsite": 70, "nationwide_unverified": 60}
 PAY_POINTS = {"at_ask": 100, "at_floor": 75, "not_posted": 60}   # unposted pay is unknown until a screen, not bad

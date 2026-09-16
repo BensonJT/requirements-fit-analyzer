@@ -193,20 +193,28 @@ def test_rules_version_is_stable_and_changes(monkeypatch):
 
 # ---------------------------------------------------------------- scoring
 def test_combine_content_first_caps_penalties_bands_and_rejects():
-    assert pipeline.combine(80, 0.9, None, None) == (85, "very_strong")          # 0.5 * 90 + 0.5 * 80
+    # The blend arithmetic is derived from the weight rather than hardcoded, so retuning `content` (0.50 -> 0.90
+    # on 2026-09-15) does not break this test. What is asserted explicitly is the behaviour that must not move:
+    # the no-content cap, the tier cap, the flag penalty and its ceiling, the band edges, reject, and the LLM blend.
+    cw = P.SCORE_COMPONENT_WEIGHTS["content"]
+    blend = lambda content, rule: int(cw * content + (1 - cw) * rule + 0.5)  # noqa: E731
+
+    assert pipeline.combine(80, 0.9, None, None) == (blend(90, 80), "very_strong")
     assert pipeline.combine(80, None, None, None) == (60, "partial")             # no content: capped
-    assert pipeline.combine(80, 0.9, None, None, {"fit_weight": 0.15}) == (82, "strong")   # (0.15*90 + 0.5*80) / 0.65
-    assert pipeline.combine(60, 0.9, 0.5, None, {"embed_lo": 0.3, "embed_hi": 0.7}) == (65, "partial")   # content (90+50)/2
+    fw = (0.15 * 90 + (1 - cw) * 80) / (0.15 + (1 - cw))                         # low-data fit weight overrides cw
+    assert pipeline.combine(80, 0.9, None, None, {"fit_weight": 0.15}) == (int(fw + 0.5), pipeline.band_for(int(fw + 0.5)))
+    # content is the mean of fit and the calibrated embedding: (90 + 50) / 2
+    assert pipeline.combine(60, 0.9, 0.5, None, {"embed_lo": 0.3, "embed_hi": 0.7}) == (blend(70, 60), "partial")
     assert pipeline.combine(60, None, 0.5, None) == (60, "partial")              # no calibration: embed ignored
     for score, band in ((100, "very_strong"), (85, "very_strong"), (84, "strong"), (70, "strong"),
                         (69, "partial"), (50, "partial"), (49, "weak"), (30, "weak"), (29, "none"), (0, "none")):
         assert pipeline.combine(score, score / 100, None, None) == (score, band)
     assert pipeline.combine(95, 0.95, None, None, tier=3) == (80, "strong")
     assert pipeline.combine(95, 0.95, None, None, tier=1) == (95, "very_strong")
-    assert pipeline.combine(80, 0.9, None, None, flags=2) == (75, "strong")
-    assert pipeline.combine(80, 0.9, None, None, flags=9) == (60, "partial")     # penalty capped at 25
+    assert pipeline.combine(80, 0.9, None, None, flags=2) == (blend(90, 80) - 10, "strong")
+    assert pipeline.combine(80, 0.9, None, None, flags=9) == (blend(90, 80) - 25, "partial")   # penalty capped at 25
     assert pipeline.combine(95, 0.95, None, None, rejected=True) == (0, "none")
-    assert pipeline.combine(60, 0.6, None, 100) == (80, "strong")
+    assert pipeline.combine(60, 0.6, None, 100) == (80, "strong")                # LLM blend: 0.5 * 60 + 0.5 * 100
 
 
 def test_content_gate_replaces_the_title_gate():
@@ -735,7 +743,9 @@ def test_component_priced_flags_cost_no_points():
     flags = ["$110K ask sits above the $100,000 top", "local/hybrid -- judge on route, not radius",
              "mid level (at most 6 yrs required)", "content fit borderline (fit 0.45)", "travel ceiling 30% (limit 25%)"]
     assert pipeline.penalized_flags(flags) == 1
-    assert pipeline.combine(80, 0.9, None, None, flags=pipeline.penalized_flags(flags)) == (80, "strong")
+    cw = P.SCORE_COMPONENT_WEIGHTS["content"]
+    expected = int(cw * 90 + (1 - cw) * 80 + 0.5) - 5      # one penalized flag
+    assert pipeline.combine(80, 0.9, None, None, flags=pipeline.penalized_flags(flags)) == (expected, "strong")
 
 
 # ---------------------------------------------------------------- Phase 3a: evidence, requirements, coverage

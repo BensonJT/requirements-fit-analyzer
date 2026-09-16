@@ -367,17 +367,24 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
     LEFT JOIN vw_screen_latest s USING (posting_id);
 
 -- Where the line falls between a lens model's probability and the judge's words. Macros rather than Python
--- constants so the views and the CLI read one source. Both were calibrated against the 2,953 graded rows
--- (2026-09-16), not chosen by eye.
+-- constants so the views and the CLI read one source.
 --
--- `strong` at 0.70 is deliberately above the best-F1 point (0.58): these rows go in a list a human reads, so
--- precision is worth more than recall. Process P 0.97 / R 0.83, technical P 0.92 / R 0.83.
+-- Calibrated OUT OF FOLD against the 2,953 graded rows (2026-09-16). The first calibration scored those rows
+-- with a model trained on them and reported P 0.97 / R 0.83 at 0.70; out of fold the same threshold is
+-- P 0.87 / R 0.61 (process) and P 0.79 / R 0.55 (technical). In-sample numbers on a model's own training set
+-- are not evidence -- measure OOF or do not quote a number.
+--
+-- 0.70 is kept: it is above the best-F1 point because these rows go in a list a human reads, so precision is
+-- worth more than recall, and the bucket counts barely move between 0.60 and 0.70 (both 208 -> 200) because
+-- almost nothing in the surviving set sits near the boundary. What the correction changes is the confidence
+-- attached to a `model` row, not which rows appear.
 CREATE OR REPLACE MACRO lens_strong_p() AS 0.70;
--- There is NO model bullseye. Asked to reproduce the judge's bullseye/adjacent split the models manage F1
--- 0.64 / 0.61 at precision ~0.5 -- a coin flip -- because the two grades' probabilities overlap almost
--- completely (process means 0.886 vs 0.783). So an ungraded row earns the `both` bucket by clearing a HIGHER
--- probability bar on each lens, which the models are good at, instead of being handed a grade they cannot
--- predict. 0.80 is where strong-vs-not precision reaches 1.00 / 0.94.
+-- The models rank the four grades cleanly -- OOF means 0.797 / 0.678 / 0.509 / 0.217 on process -- and
+-- separate strong from not-strong at AUC 0.92. What they do NOT do well is tell bullseye from adjacent:
+-- AUC 0.68 / 0.70, better than chance but weak, because those two distributions overlap heavily
+-- (bullseye 0.797 +/- 0.18 vs adjacent 0.678 +/- 0.21). So an ungraded row is never handed a predicted
+-- bullseye. It earns the `both` bucket by clearing this higher bar, which is a probability statement the
+-- models can support, and the bar is understood to be soft.
 CREATE OR REPLACE MACRO lens_standout_p() AS 0.80;
 
 -- One row per active screened posting saying how each lens places it, and WHO placed it. The judge has

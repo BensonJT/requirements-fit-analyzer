@@ -248,6 +248,112 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
     return path
 
 
+LENS_LIST_CAP = 60
+
+# The three lists the user asked for. `both` is first because it is the least substitutable shape: a role
+# that needs the process lane AND the data lane is one only a handful of people can fill, and it is the one
+# he most wants to see. The `neither` bucket is not a list -- it is the corpus.
+LENS_LISTS = (
+    ("both", "Strong on BOTH lenses", "process excellence AND data/analytics — the least substitutable shape"),
+    ("process", "Strong on PROCESS", "process excellence / operating model / change management"),
+    ("technical", "Strong on TECHNICAL", "data, analytics, quantitative modelling and engineering"),
+)
+
+
+def _lens_cell(grade: Optional[str], prob: Optional[float]) -> str:
+    """The judge's word where there is one, the model's probability where there is not."""
+    if grade:
+        return grade
+    return f"~{prob:.2f}" if prob is not None else "—"
+
+
+def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bool = False) -> list:
+    """Actionable rows in one lens bucket, best first.
+
+    Ranked on `final_score`, not on `lens_source`: sorting by evidence weight would bury a model row at 92
+    under a judged row at 55, and the point of scoring the whole corpus was to stop the judged 3k being the
+    only thing visible. Source breaks a tie, and is a column the reader can see on every row.
+    """
+    where = ["lens_bucket = ?", "verdict != 'reject'"]
+    if not include_decided:
+        where += ["NOT decided", "NOT in_tracker"]
+    return con.execute(f"""
+        SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
+               final_score, band, grade_process, fit_process, grade_technical, fit_technical, lens_source,
+               days_since_first_seen, blocker
+        FROM vw_lens_fit
+        WHERE {' AND '.join(where)}
+        ORDER BY final_score DESC,
+                 CASE lens_source WHEN 'user' THEN 0 WHEN 'judge' THEN 1 WHEN 'judge+model' THEN 2 ELSE 3 END,
+                 lens_max_p DESC, first_seen_at DESC
+        LIMIT ?""", [bucket, cap]).fetchall()
+
+
+def _pay(lo, hi, interval) -> str:
+    if lo is None and hi is None:
+        return ""
+    unit = {"year": "", "hour": "/hr", "month": "/mo"}.get(interval or "year", f"/{interval}")
+    fmt = (lambda v: f"{v/1000:.0f}K" if (interval or "year") == "year" and v and v >= 1000 else
+           (f"{v:.0f}" if v is not None else "?"))
+    return f"${fmt(lo)}–{fmt(hi)}{unit}" if lo is not None and hi is not None else f"${fmt(lo or hi)}{unit}"
+
+
+def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP, out_path=None) -> Path:
+    """Writes Lens_Lists_YYYYMMDD_HHMM.md: strong on process, strong on technical, strong on both.
+
+    Every row carries `lens_source`, because the three lists mix evidence of very different weight -- the
+    user's own adjudication, the judge's grade, and a model prediction on a JD nobody has read. Without the
+    column the lists would read as one uniform verdict, and a 0.7 from a TF-IDF model is not that.
+    """
+    now_local = datetime.now()
+    stamp = now_local.strftime("%Y%m%d_%H%M")
+    name = f"Lens_Lists_{stamp}.md"
+    if out_path:
+        out = Path(out_path)
+        path = out / name if (out.is_dir() or not out.suffix) else out
+    else:
+        path = job_search_dir(vault_dir) / "Search_Results" / name
+    path = _unique_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    strong_p, standout_p = con.execute("SELECT lens_strong_p(), lens_standout_p()").fetchone()
+    sources = dict(con.execute("SELECT lens_source, count(*) FROM vw_lens_fit GROUP BY 1").fetchall())
+    buckets = dict(con.execute("SELECT lens_bucket, count(*) FROM vw_lens_fit GROUP BY 1").fetchall())
+    n_active = sum(buckets.values())
+
+    w = [f"---\nnode_id: JOBS:lens-lists-{stamp.replace('_', '-')}\nnode_type: search_results\n"
+         f"tags: [#job-search #pipeline #lens]\n---\n",
+         f"# Lens Lists — process vs technical, {now_local:%Y-%m-%d %H:%M}\n",
+         f"**What this is:** every active posting placed on both lenses, not only the judged ones. "
+         f"**Placed by:** " + ", ".join(f"{k} {v}" for k, v in sorted(sources.items())) +
+         f" across {n_active} active rows. "
+         f"**Model thresholds:** strong ≥ {strong_p:.2f}, standout ≥ {standout_p:.2f} "
+         f"(there is no model bullseye — the models cannot reproduce that split). "
+         f"**Buckets:** " + ", ".join(f"{k} {v}" for k, v in sorted(buckets.items())) + ".\n",
+         "> `lens_source` is the weight of the evidence: **user** is the candidate's "
+         "own adjudication, **judge** is the LLM rubric on both lenses, **judge+model** is a row graded "
+         "before the second lens existed, and **model** is a TF-IDF prediction on a JD nobody has read. "
+         "Only the first two are grades; a model row is a candidate for grading, not a verdict.\n"]
+
+    for bucket, heading, subtitle in LENS_LISTS:
+        rows = lens_rows(con, bucket, cap=cap)
+        total = buckets.get(bucket, 0)
+        w.append(f"## {heading} ({len(rows)} shown of {total})\n\n_{subtitle}_\n")
+        if not rows:
+            w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
+            continue
+        w.append("| Posting ID | Company | Title | Score | Band | Process | Technical | Placed by | Pay | Location "
+                 "| Age |\n|---|---|---|---|---|---|---|---|---|---|---|")
+        for (pid, employer, title, url, loc, lo, hi, interval, score, band, gp, fp, gt, ft, src, age,
+             blocker) in rows:
+            w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)} | {score} | {band} | "
+                     f"{_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {src} | {_pay(lo, hi, interval)} | "
+                     f"{_cell(loc)[:34]} | {age}d |")
+        w.append("")
+    path.write_text("\n".join(w) + "\n", encoding="utf-8")
+    return path
+
+
 def snapshots(con, out_dir: Optional[str] = None) -> list:
     """Parquet exports of the shortlist, latest screens, decisions and tracker, plus shortlist CSVs."""
     out = Path(out_dir or SNAPSHOT_DIR)

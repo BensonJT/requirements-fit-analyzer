@@ -437,9 +437,24 @@ def _auc_np(pos, neg) -> Optional[float]:
     return float((below + 0.5 * equal).sum() / (len(pos) * len(neg)))
 
 
-def refresh_hard_negatives(con, hard_top: int = 200, log=print) -> dict:
-    """Rewrites `hard_negatives`: AUDIT_NEGATIVES (posting ids) and the `hard_top` highest-fit unlabeled active
-    postings with no function term in the title (the fit model's confident mistakes)."""
+JUDGED_TOP = 300
+
+
+def refresh_hard_negatives(con, hard_top: int = 200, judged_top: int = JUDGED_TOP, log=print) -> dict:
+    """Rewrites `hard_negatives` from three sources, hardest first.
+
+    - `judged_wrong`: the `judged_top` highest-fit postings the LLM judge graded `wrong`. These are the
+      calibration set's backbone now. The audit list held 7 examples, which is too few to tune anything
+      against, and `fit_top` below only GUESSES that a high-fit posting with no function term in its title is
+      off-function. A judged `wrong` row is the same claim, confirmed, and the labeling run produced 1,320 of
+      them. The highest-fit slice is taken on purpose, but measured on the live corpus (2026-09-16) even that
+      slice is mostly EASY: fit 0.17-0.72, median 0.23. It is a large, verified negative set, not a confusable
+      one -- the confusable band is `stretch` (out-of-fold mean 0.51), so a high AUC against these rows proves
+      little and a low one is decisive.
+    - `audit`: AUDIT_NEGATIVES, posting ids the user read and called wrong-function himself.
+    - `fit_top`: the highest-fit unlabeled active postings with no function term in the title -- the fit
+      model's own confident mistakes, still useful for the rows nobody has graded.
+    """
     now = _now()
     audit = [a for a in (P.AUDIT_NEGATIVES or []) if re.fullmatch(r"[0-9a-f]{20}", str(a))]
     unknown = [a for a in (P.AUDIT_NEGATIVES or []) if a not in audit]
@@ -450,12 +465,29 @@ def refresh_hard_negatives(con, hard_top: int = 200, log=print) -> dict:
           AND s.posting_id NOT IN (SELECT posting_id FROM decisions)
         ORDER BY s.fit_prob DESC, s.posting_id LIMIT ?""", [int(hard_top) + len(audit)]).fetchall()
     top = [(pid, fit) for pid, fit in top if pid not in audit][:int(hard_top)]
+    judged = con.execute("""
+        SELECT l.posting_id, s.fit_prob, l.grade_process, l.grade_technical
+        FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+        LEFT JOIN vw_screen_latest s USING (posting_id)
+        WHERE l.grade = 'wrong' AND p.status = 'active' AND length(p.description_text) >= 800
+          AND l.posting_id NOT IN (SELECT posting_id FROM label_docs WHERE posting_id IS NOT NULL AND label = 1)
+          AND l.posting_id NOT IN (SELECT posting_id FROM decisions)
+        ORDER BY s.fit_prob DESC NULLS LAST, l.posting_id LIMIT ?""", [int(judged_top)]).fetchall()
     con.execute("BEGIN")
     try:
         con.execute("DELETE FROM hard_negatives")
-        con.executemany("INSERT OR REPLACE INTO hard_negatives VALUES (?, 'audit', NULL, ?)", [[a, now] for a in audit])
-        con.executemany("INSERT OR REPLACE INTO hard_negatives VALUES (?, 'fit_top', ?, ?)",
-                        [[pid, f"fit {fit:.2f}", now] for pid, fit in top if pid not in audit])
+        # DuckDB's executemany rejects an empty parameter list, and any of the three sources can be empty.
+        audit_rows = [[a, now] for a in audit]
+        judged_rows = [[pid, f"fit {fit:.2f}" if fit is not None else "fit n/a", now]
+                       for pid, fit, _gp, _gt in judged if pid not in audit]
+        seen = set(audit) | {j[0] for j in judged}
+        top_rows = [[pid, f"fit {fit:.2f}", now] for pid, fit in top if pid not in seen]
+        if audit_rows:
+            con.executemany("INSERT OR REPLACE INTO hard_negatives VALUES (?, 'audit', NULL, ?)", audit_rows)
+        if judged_rows:
+            con.executemany("INSERT OR REPLACE INTO hard_negatives VALUES (?, 'judged_wrong', ?, ?)", judged_rows)
+        if top_rows:
+            con.executemany("INSERT OR REPLACE INTO hard_negatives VALUES (?, 'fit_top', ?, ?)", top_rows)
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
@@ -464,6 +496,12 @@ def refresh_hard_negatives(con, hard_top: int = 200, log=print) -> dict:
         log(f"  AUDIT_NEGATIVES entries that are not posting ids were skipped: {unknown}")
     counts = dict(con.execute("SELECT source, count(*) FROM vw_hard_negatives GROUP BY 1").fetchall())
     log(f"  hard negatives: {counts}")
+    if judged:
+        fits = [f for _p, f, _gp, _gt in judged if f is not None]
+        if fits:
+            med = sorted(fits)[len(fits) // 2]
+            log(f"  judged_wrong fit range: {min(fits):.2f}-{max(fits):.2f} (median {med:.2f})"
+                + (" -- mostly EASY negatives; a high AUC against them proves little" if med < 0.5 else ""))
     return counts
 
 

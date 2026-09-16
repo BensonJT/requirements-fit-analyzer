@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 6  # v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
+SCHEMA_VERSION = 7  # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -200,10 +200,16 @@ CREATE TABLE IF NOT EXISTS training_exclusions (
 );
 
 -- Graded function labels from an LLM judge (Phase 4 / the labeling run): one row per posting per rubric+scorer.
+-- Two lenses (v7): the same JD is graded once for process / change-management work and once for technical /
+-- analytical work, in ONE judging pass. `grade` stays the overall label -- the better of the two lenses -- so
+-- every existing consumer (vw_label_set, the fit model, the reports) keeps working unchanged, while the pair
+-- exposes what one axis could not: a role that is strong on BOTH is the candidate's least substitutable shape.
 CREATE TABLE IF NOT EXISTS llm_labels (
     posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, rubric_version VARCHAR NOT NULL,
     scorer VARCHAR NOT NULL,                 -- e.g. claude-sonnet-batch
-    grade VARCHAR NOT NULL,                  -- bullseye | adjacent | stretch | wrong
+    grade VARCHAR NOT NULL,                  -- bullseye | adjacent | stretch | wrong (overall = best lens)
+    grade_process VARCHAR,                   -- process excellence / operating model / change management lens
+    grade_technical VARCHAR,                 -- data, analytics, quantitative modelling and engineering lens
     lane VARCHAR, confidence VARCHAR, blocker VARCHAR, rationale VARCHAR, batch VARCHAR,
     judged_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
@@ -317,6 +323,22 @@ CREATE OR REPLACE VIEW vw_llm_labels_latest AS
     QUALIFY row_number() OVER (PARTITION BY l.posting_id
                                ORDER BY (l.scorer = 'user-adjudicated') DESC, l.judged_at DESC) = 1;
 
+-- Every judged posting with both lens grades and which lens favoured it. Feeds the three report lists the
+-- user asked for: strong on process, strong on technical, and strong on BOTH (the least substitutable shape).
+CREATE OR REPLACE VIEW vw_lens_grades AS
+    SELECT l.posting_id, p.employer, p.title, p.url, l.grade, l.grade_process, l.grade_technical,
+           l.blocker, l.rationale, s.final_score, s.band, s.verdict,
+           l.grade_process IN ('bullseye', 'adjacent') AS process_strong,
+           l.grade_technical IN ('bullseye', 'adjacent') AS technical_strong,
+           CASE WHEN l.grade_process IS NULL THEN 'single-lens'
+                WHEN l.grade_process IN ('bullseye','adjacent') AND l.grade_technical IN ('bullseye','adjacent')
+                THEN 'both'
+                WHEN l.grade_process IN ('bullseye','adjacent') THEN 'process'
+                WHEN l.grade_technical IN ('bullseye','adjacent') THEN 'technical'
+                ELSE 'neither' END AS lens_bucket
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    LEFT JOIN vw_screen_latest s USING (posting_id);
+
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
 CREATE OR REPLACE VIEW vw_hard_negatives AS
     SELECT posting_id, 'decision:function' AS source, reason AS note FROM vw_decisions
@@ -386,8 +408,18 @@ def connect(db_path=None):
         con.execute("INSERT INTO schema_info VALUES (?)", [SCHEMA_VERSION])
     else:  # v2 -> v3 added tables only (CREATE IF NOT EXISTS above), so just record the version
         con.execute("UPDATE schema_info SET version = ? WHERE version < ?", [SCHEMA_VERSION, SCHEMA_VERSION])
+    _add_missing_columns(con)
     con.execute(VIEWS)
     return con
+
+
+def _add_missing_columns(con):
+    """Additive column migrations. v7: the two lens grades on llm_labels (old rows keep NULL, which reads as
+    'graded before the lenses existed')."""
+    for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
+                                ("llm_labels", "grade_technical", "VARCHAR")):
+        if column not in _columns(con, table):
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def _columns(con, table):

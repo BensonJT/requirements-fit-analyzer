@@ -1203,9 +1203,31 @@ def test_judge_agreement_reads_the_users_own_decisions(tmp_path):
     con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", [by_req["A1"], now])
     con.execute("INSERT INTO decisions VALUES (?, 'pass', 'function: wrong lane', 'cli', NULL, ?)",
                 [by_req["A2"], now])
-    rows = [[by_req["A1"], "h1", "rv", "test", "wrong", "wrong", "high", "", "", "b", now],
-            [by_req["A2"], "h2", "rv", "test", "bullseye", "primary", "high", "", "", "b", now]]
-    con.executemany("INSERT INTO llm_labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    rows = [[by_req["A1"], "h1", "rv", "test", "wrong", "wrong", "wrong", "wrong", "high", "", "", "b", now],
+            [by_req["A2"], "h2", "rv", "test", "bullseye", "bullseye", "stretch", "primary", "high", "", "", "b", now]]
+    con.executemany("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+                    "grade_process, grade_technical, lane, confidence, blocker, rationale, batch, judged_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     out = judge.agreement(con, log=_quiet)
     assert out["pursued"] == {"wrong": 1} and out["passed_function"] == {"bullseye": 1}   # both are disagreements
     con.close()
+
+
+def test_overall_is_the_better_of_the_two_lenses():
+    from backend.finder import judge
+    assert judge.overall("bullseye", "wrong") == "bullseye"        # strong on one lens is still work he has done
+    assert judge.overall("wrong", "adjacent") == "adjacent"
+    assert judge.overall("stretch", "stretch") == "stretch"
+    assert judge.overall("bullseye", "bullseye") == "bullseye"     # the rare both-lenses role
+
+
+def test_import_accepts_two_lens_and_pre_split_result_files():
+    from backend.finder import judge, rubric
+    allowed = {"p1": "h1"}
+    assert judge._validate({"posting_id": "p1", "grade_process": "bullseye",
+                            "grade_technical": "wrong"}, allowed) is None
+    assert judge._validate({"posting_id": "p1", "grade": "adjacent"}, allowed) is None   # pre-split file
+    assert judge._validate({"posting_id": "p1", "grade_process": "nope",
+                            "grade_technical": "wrong"}, allowed) is not None
+    assert judge._validate({"posting_id": "nope", "grade": "adjacent"}, allowed) is not None
+    assert set(rubric.GRADES) == {"bullseye", "adjacent", "stretch", "wrong"}

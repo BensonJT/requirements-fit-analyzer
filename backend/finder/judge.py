@@ -269,11 +269,14 @@ def fetch_postings(con, ids: list, tiers: dict) -> list:
 BATCH_HEADER = """# Labeling batch {n} — grade the WORK, not the candidate's odds
 
 {rubric}
-{lane}
+{lens_process}
+{lens_technical}
 {personal}
+{personal_process}
+{personal_technical}
 ## How to answer
 Return ONE JSON object per posting below, as a JSON array, written to `{result}`. No prose, no markdown fence.
-Grade every posting in this file. Use the posting_id exactly as given.
+Grade every posting in this file, on BOTH lenses. Use the posting_id exactly as given.
 
 ## Postings ({count})
 """
@@ -296,8 +299,12 @@ def write_batches(con, out_dir: str, queue: list, *, batch_size: int = BATCH_SIZ
         n = i // batch_size + 1
         name = f"batch_{n:03d}"
         result = f"{name}.result.json"
-        body = [BATCH_HEADER.format(n=n, rubric=rubric.RUBRIC_PUBLIC, lane=rubric.RUBRIC_LANE, personal=personal,
-                                    result=result, count=len(chunk))]
+        body = [BATCH_HEADER.format(
+            n=n, rubric=rubric.RUBRIC_PUBLIC, lens_process=rubric.RUBRIC_LENS_PROCESS,
+            lens_technical=rubric.RUBRIC_LENS_TECHNICAL, personal=personal,
+            personal_process=getattr(rubric, "RUBRIC_PERSONAL_PROCESS", ""),
+            personal_technical=getattr(rubric, "RUBRIC_PERSONAL_TECHNICAL", ""),
+            result=result, count=len(chunk))]
         for p in chunk:
             body.append(f"\n### {p.posting_id}\n**{p.employer} — {p.title}**\n")
             body.extend(f"- {u}" for u in p.units)
@@ -314,12 +321,21 @@ def write_batches(con, out_dir: str, queue: list, *, batch_size: int = BATCH_SIZ
             "dir": str(out)}
 
 
+def overall(grade_process: str, grade_technical: str) -> str:
+    """The better of the two lenses. A role the candidate can do through EITHER capability is work he has done,
+    so the overall label keeps the single-axis meaning every existing consumer already relies on."""
+    return min((grade_process, grade_technical), key=lambda g: rubric.GRADES.index(g))
+
+
 def _validate(obj: dict, allowed: dict) -> Optional[str]:
     pid = str(obj.get("posting_id", "")).strip()
     if pid not in allowed:
         return f"unknown posting_id {pid!r}"
-    if obj.get("grade") not in rubric.GRADES:
-        return f"{pid}: grade {obj.get('grade')!r} not in {rubric.GRADES}"
+    missing = [k for k in ("grade_process", "grade_technical") if obj.get(k) not in rubric.GRADES]
+    if missing and obj.get("grade") in rubric.GRADES and len(missing) == 2:
+        return None                      # a single-lens result file from before the split; still importable
+    if missing:
+        return f"{pid}: {', '.join(missing)} not in {rubric.GRADES}"
     return None
 
 
@@ -340,7 +356,13 @@ def status(out_dir: str, log=print) -> dict:
 def to_csv(con, path: str, log=print) -> str:
     """Every judged posting as a row to eyeball: grade, rationale, blocker, the score it had, and its URL."""
     con.execute("""COPY (
-        SELECT l.grade, l.lane, l.confidence, s.final_score, s.band, p.employer, p.title, l.blocker, l.rationale,
+        SELECT l.grade, l.grade_process, l.grade_technical,
+               CASE WHEN l.grade_process IS NULL THEN 'single-lens'
+                    WHEN l.grade_process = l.grade_technical THEN 'equal'
+                    WHEN list_position(['bullseye','adjacent','stretch','wrong'], l.grade_process)
+                       < list_position(['bullseye','adjacent','stretch','wrong'], l.grade_technical)
+                    THEN 'process' ELSE 'technical' END AS favoured_lens,
+               l.lane, l.confidence, s.final_score, s.band, p.employer, p.title, l.blocker, l.rationale,
                p.url, l.posting_id
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         LEFT JOIN vw_screen_latest s USING (posting_id)
@@ -374,8 +396,13 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
                 errors.append(f"{path.name}: {problem}")
                 continue
             pid = obj["posting_id"].strip()
-            seen[pid] = obj["grade"]
-            rows.append([pid, meta["postings"][pid], version, scorer, obj["grade"], obj.get("lane"),
+            gp, gt = obj.get("grade_process"), obj.get("grade_technical")
+            if gp in rubric.GRADES and gt in rubric.GRADES:
+                g = overall(gp, gt)
+            else:                        # pre-split result file: one grade, no lens breakdown
+                g, gp, gt = obj["grade"], None, None
+            seen[pid] = (g, gp, gt)
+            rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, obj.get("lane"),
                          obj.get("confidence"), (obj.get("blocker") or "")[:400],
                          (obj.get("rationale") or "")[:600], name, _now()])
     hashes = dict(_rows(con, "SELECT posting_id, coalesce(description_hash, '') FROM postings"))
@@ -383,14 +410,24 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
     for dup_id, rep in manifest.get("duplicates", {}).items():
         if rep in seen and dup_id in hashes:
             src = next(r for r in rows if r[0] == rep)
-            rows.append([dup_id, hashes[dup_id], version, scorer, src[4], src[5], src[6], src[7], src[8],
-                         f"dup:{rep}", _now()])
+            rows.append([dup_id, hashes[dup_id], version, scorer, *src[4:11], f"dup:{rep}", _now()])
             copied += 1
     if rows:
-        con.executemany("INSERT OR REPLACE INTO llm_labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        con.executemany("INSERT OR REPLACE INTO llm_labels (posting_id, description_hash, rubric_version, "
+                        "scorer, grade, grade_process, grade_technical, lane, confidence, blocker, rationale, "
+                        "batch, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     counts = dict(_rows(con, "SELECT grade, count(*) FROM llm_labels WHERE rubric_version = ? GROUP BY 1", [version]))
+    lenses = _rows(con, """SELECT grade_process, grade_technical, count(*) FROM llm_labels
+                           WHERE rubric_version = ? AND grade_process IS NOT NULL GROUP BY 1, 2""", [version])
     log(f"Judge import: {len(rows)} labels written ({copied} copied to near-duplicates), {len(errors)} rejected; "
-        f"grades so far {counts}")
+        f"overall grades so far {counts}")
+    if lenses:
+        good = {"bullseye", "adjacent"}
+        both = sum(c for gp, gt, c in lenses if gp in good and gt in good)
+        proc = sum(c for gp, gt, c in lenses if gp in good and gt not in good)
+        tech = sum(c for gp, gt, c in lenses if gt in good and gp not in good)
+        log(f"  by lens: process-only {proc} · technical-only {tech} · BOTH {both} · neither "
+            f"{sum(c for _, _, c in lenses) - proc - tech - both}")
     for e in errors[:10]:
         log(f"  rejected: {e}")
     return {"written": len(rows), "copied": copied, "errors": errors, "grades": counts}

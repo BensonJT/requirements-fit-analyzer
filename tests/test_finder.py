@@ -1246,3 +1246,44 @@ def test_model_version_changes_when_a_grade_changes_not_just_the_id_set():
     c = features.model_version([["llm:x", 1, 0.6], ["llm:y", 0, 1.0]], params)   # weight changed
     assert a != b and a != c and b != c
     assert a == features.model_version([["llm:y", 0, 1.0], ["llm:x", 1, 1.0]], params)   # order-independent
+
+
+# --- Clearance: held vs obtainable (user ruling 2026-09-16) -----------------------------------------
+# "Ability to obtain" means the employer sponsors and funds it, so it is not a blocker; only a clearance
+# that must ALREADY be held is. The old rule flagged any clearance word and cost real roles -- CACI
+# "Business Process Consultant" (93) and Guidehouse "Senior Business Process Analyst" (91) among them.
+
+def _clearance_flags(text):
+    return [f for f in rules.screen_row(_row(description_text=text)).flags if "clearance" in f]
+
+
+def test_obtainable_clearance_is_not_a_blocker():
+    f = _clearance_flags("Clearance Required : Ability to Obtain Public Trust. U.S. Citizenship with the "
+                         "ability to obtain and maintain a federal Public Trust clearance.")
+    assert f and "reachable" in f[0], f
+
+
+def test_sponsored_hard_clearance_is_also_reachable():
+    """Even TS/SCI is not a blocker when the employer offers to sponsor it."""
+    f = _clearance_flags("Must be eligible to obtain a TS/SCI security clearance; we sponsor.")
+    assert f and "reachable" in f[0], f
+
+
+def test_clearance_that_must_be_held_is_a_blocker():
+    for text in ("Requires an active TS/SCI clearance with polygraph.",
+                 "Candidate must currently hold a Top Secret security clearance.",
+                 "An active secret clearance is required on day one."):
+        f = _clearance_flags(text)
+        assert f and "already be held" in f[0], (text, f)
+
+
+def test_hard_level_without_sponsorship_is_a_blocker():
+    f = _clearance_flags("TS/SCI security clearance required for this position.")
+    assert f and "already be held" in f[0], f
+
+
+def test_compensation_boilerplate_raises_no_clearance_flag():
+    """'...skill sets, experience, security clearances, licensure...' is a pay paragraph, not a requirement."""
+    assert _clearance_flags(
+        "Compensation decisions depend on skill sets, experience and training, security clearances, "
+        "licensure and certifications, and other business needs.") == []

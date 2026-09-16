@@ -1098,3 +1098,100 @@ def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatc
     calib = coverage.current_calibration(con)
     assert calib["version"] == result["version"] and calib["strong"] == result["strong"]
     con.close()
+
+
+# ---------------------------------------------------------------- the labeling run (judge)
+from backend.finder import judge, rubric  # noqa: E402
+
+
+def _judge_corpus(tmp_path):
+    """Two survivors with different JDs, one exact repost, and one rejected posting."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    jobs = [N.base(req_id="A1", title="Director, Process Excellence", url="https://x/A1", location="Remote - USA",
+                   workplace_type="remote"),
+            N.base(req_id="A2", title="Director, Business Transformation", url="https://x/A2",
+                   location="Remote - USA", workplace_type="remote"),
+            N.base(req_id="A3", title="Director, Process Excellence (Repost)", url="https://x/A3",
+                   location="Remote - USA", workplace_type="remote"),
+            N.base(req_id="B1", title="Line Cook", url="https://x/B1", location="Springfield, IL")]
+    store.record_board(con, "Acme", "greenhouse", jobs, now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h1', description_fetched_at = ? "
+                "WHERE req_id IN ('A1', 'A3')", [REQ_JD, now])
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h2', description_fetched_at = ? "
+                "WHERE req_id = 'A2'", [REQ_JD.replace("process excellence", "transformation"), now])
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h3', description_fetched_at = ? "
+                "WHERE req_id = 'B1'", [OFF_REQ_JD, now])
+    pipeline.screen(con, log=_quiet)
+    m = _evidence_manifest(tmp_path)
+    evidence.rebuild(con, m, FakeEncoder(), log=_quiet)
+    ids = [r[0] for r in con.execute("SELECT posting_id FROM postings ORDER BY req_id").fetchall()]
+    coverage.cover(con, m, FakeEncoder(), posting_ids=ids, log=_quiet)
+    return con, dict(con.execute("SELECT req_id, posting_id FROM postings").fetchall())
+
+
+def test_judge_queue_interleaves_and_dedupes_only_identical_text(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    pool = {"high": ["a", "b", "c"], "low": ["x", "y"], "reject": ["r"]}
+    mixed = judge.interleave(pool)
+    assert sorted(mixed) == sorted([("a", "high"), ("b", "high"), ("c", "high"), ("x", "low"), ("y", "low"),
+                                    ("r", "reject")])
+    assert [t for _, t in mixed][:3] == ["high", "high", "high"]      # the confusable band leads each wave
+    ids = list(by_req.values())
+    dup = judge.duplicate_map(con, ids)
+    assert dup == {by_req["A3"]: by_req["A1"]} or dup == {by_req["A1"]: by_req["A3"]}   # the repost only
+    assert by_req["A2"] not in dup and by_req["A2"] not in dup.values()                 # a sibling role survives
+    con.close()
+
+
+def test_judge_export_import_round_trip_and_bad_results(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    queue = [(by_req[r], "high") for r in ("A1", "A2", "A3")] + [(by_req["B1"], "reject")]
+    out = tmp_path / "batches"
+    stats = judge.write_batches(con, str(out), queue, batch_size=2, log=_quiet)
+    assert stats["duplicates"] == 1 and stats["postings"] == 3
+    manifest = json.loads((out / "manifest.json").read_text())
+    text = (out / "batch_001.md").read_text()
+    assert rubric.RUBRIC_PUBLIC.strip()[:40] in text and "CANDIDATE RECORD" in text        # rubric travels with it
+    assert "Mapped the order-to-delivery value stream" not in text                         # never the evidence text
+    judged = [p for b in manifest["batches"].values() for p in b["postings"]]
+    (out / "batch_001.result.json").write_text(json.dumps(
+        [{"posting_id": judged[0], "grade": "bullseye", "lane": "primary", "confidence": "high", "blocker": "",
+          "rationale": "process ownership work"},
+         {"posting_id": judged[1], "grade": "wrong", "lane": "wrong", "confidence": "high", "blocker": "kitchen",
+          "rationale": "line cooking"}]))
+    (out / "batch_002.result.json").write_text("```json\n" + json.dumps(
+        [{"posting_id": judged[2], "grade": "adjacent", "lane": "secondary", "confidence": "low", "blocker": "",
+          "rationale": "adjacent work"},
+         {"posting_id": "f" * 20, "grade": "bullseye"},                    # not exported: refused
+         {"posting_id": judged[2], "grade": "amazing"}]) + "\n```")        # invalid grade: refused
+    result = judge.load_results(con, str(out), scorer="test-scorer", log=_quiet)
+    assert len(result["errors"]) == 2 and result["copied"] == 1            # the repost copied its representative
+    grades = dict(con.execute("SELECT posting_id, grade FROM vw_llm_labels_latest").fetchall())
+    assert grades[by_req["A3"]] == grades[by_req["A1"]]
+    assert set(grades.values()) <= set(rubric.GRADES) and len(grades) == 4
+    pending = judge.status(str(out), log=_quiet)
+    assert pending["pending"] == [] and len(pending["done"]) == 2
+    (out / "batch_002.result.json").unlink()
+    assert judge.status(str(out), log=_quiet)["pending"] == ["batch_002"]  # the resume point
+    csv_path = tmp_path / "labels.csv"
+    judge.to_csv(con, str(csv_path), log=_quiet)
+    assert "bullseye" in csv_path.read_text()
+    con.close()
+
+
+def test_judge_agreement_reads_the_users_own_decisions(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", [by_req["A1"], now])
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'function: wrong lane', 'cli', NULL, ?)",
+                [by_req["A2"], now])
+    rows = [[by_req["A1"], "h1", "rv", "test", "wrong", "wrong", "high", "", "", "b", now],
+            [by_req["A2"], "h2", "rv", "test", "bullseye", "primary", "high", "", "", "b", now]]
+    con.executemany("INSERT INTO llm_labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    out = judge.agreement(con, log=_quiet)
+    assert out["pursued"] == {"wrong": 1} and out["passed_function"] == {"bullseye": 1}   # both are disagreements
+    con.close()

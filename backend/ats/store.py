@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 4  # v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
+SCHEMA_VERSION = 5  # v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -193,6 +193,16 @@ CREATE TABLE IF NOT EXISTS coverage (
     gaps JSON, matches JSON, notes JSON, scored_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, evidence_version, model, calibration)
 );
+-- Graded function labels from an LLM judge (Phase 4 / the labeling run): one row per posting per rubric+scorer.
+CREATE TABLE IF NOT EXISTS llm_labels (
+    posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, rubric_version VARCHAR NOT NULL,
+    scorer VARCHAR NOT NULL,                 -- e.g. claude-sonnet-batch
+    grade VARCHAR NOT NULL,                  -- bullseye | adjacent | stretch | wrong
+    lane VARCHAR, confidence VARCHAR, blocker VARCHAR, rationale VARCHAR, batch VARCHAR,
+    judged_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
+);
+
 -- Hard negatives for calibration that are not decisions: audit list + the fit model's confident mistakes (§16.1).
 CREATE TABLE IF NOT EXISTS hard_negatives (
     posting_id VARCHAR NOT NULL, source VARCHAR NOT NULL, note VARCHAR, refreshed_at TIMESTAMP NOT NULL,
@@ -292,6 +302,11 @@ CREATE OR REPLACE VIEW vw_decisions AS
 CREATE OR REPLACE VIEW vw_coverage_latest AS
     SELECT c.* FROM coverage c JOIN postings p ON p.posting_id = c.posting_id AND coalesce(p.description_hash, '') = c.description_hash
     QUALIFY row_number() OVER (PARTITION BY c.posting_id ORDER BY c.scored_at DESC) = 1;
+
+CREATE OR REPLACE VIEW vw_llm_labels_latest AS
+    SELECT l.* FROM llm_labels l JOIN postings p ON p.posting_id = l.posting_id
+      AND coalesce(p.description_hash, '') = l.description_hash
+    QUALIFY row_number() OVER (PARTITION BY l.posting_id ORDER BY l.judged_at DESC) = 1;
 
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
 CREATE OR REPLACE VIEW vw_hard_negatives AS

@@ -169,6 +169,11 @@ def cmd_train(con, a):
             print(f"  {name:<10} AUC {auc_all}  (n={n_all})")
 
 
+def judge_batch_default() -> int:
+    from backend.finder import judge
+    return judge.BATCH_SIZE
+
+
 def _manifest(a):
     from backend.finder import evidence
     path = evidence.manifest_path(a.manifest)
@@ -196,6 +201,24 @@ def cmd_coverage(con, a):
         coverage.calibrate(con, manifest, encoder, n_pseudo=a.pseudo, hard_top=a.hard_top)
         return
     coverage.cover(con, manifest, encoder, posting_ids=a.posting or None, all_rows=a.all, limit=a.limit)
+
+
+def cmd_judge(con, a):
+    from backend.finder import judge
+    if a.action == "export":
+        pool = judge.pools(con, n_reject_content=a.reject_content, n_reject_logistics=a.reject_logistics,
+                           n_reject_random=a.reject_random)
+        queue = judge.interleave(pool, limit=a.limit)
+        print({k: len(v) for k, v in pool.items()}, "-> queued", len(queue))
+        judge.write_batches(con, a.dir, queue, batch_size=a.batch_size)
+    elif a.action == "import":
+        judge.load_results(con, a.dir, scorer=a.scorer)
+    elif a.action == "status":
+        judge.status(a.dir)
+    else:
+        judge.agreement(con)
+        if a.csv:
+            judge.to_csv(con, a.csv)
 
 
 def cmd_setup_check(con, a):
@@ -274,6 +297,18 @@ def main():
     s.add_argument("--pseudo", type=int, default=300, help="pseudo-negatives for the sanity AUC (default 300)")
     s.add_argument("--hard-top", type=int, default=200, help="highest-fit unlabeled postings used as hard negatives")
     s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("judge", parents=[common], help="LLM labeling run: export batches, import graded labels")
+    s.add_argument("action", choices=["export", "import", "status", "report"])
+    s.add_argument("--csv", help="report: write every judged posting to this CSV for eyeballing")
+    s.add_argument("--dir", default="db/batches", help="batch directory (gitignored)")
+    s.add_argument("--limit", type=int, help="stop the queue after N postings")
+    s.add_argument("--batch-size", type=int, default=judge_batch_default())
+    s.add_argument("--scorer", default="claude-sonnet-batch")
+    s.add_argument("--reject-content", type=int, default=100, help="rejected on content: measures false negatives")
+    s.add_argument("--reject-logistics", type=int, default=100, help="rejected on location/pay but fit >= 0.5")
+    s.add_argument("--reject-random", type=int, default=50)
+    s.set_defaults(func=cmd_judge)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

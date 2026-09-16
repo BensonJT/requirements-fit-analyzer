@@ -29,10 +29,15 @@ def sweep(con, rows, workers=8, max_pages=None, log=print):
     stats = dict(run_id=run_id, attempted=len(rows), succeeded=0, failed=0, seen=0, new=0, reopened=0, closed=0)
     log(f"Sweeping {len(rows)} boards with {workers} workers (run {run_id})...")
 
+    scopes = {(r[0], r[1]): {"strategy": r[2], "facet_parameter": r[3], "value_ids": r[4]}
+              for r in con.execute("SELECT employer, platform, strategy, facet_parameter, value_ids "
+                                   "FROM board_scope").fetchall()}
+
     def pull(row):
         t = time.monotonic()
         try:
-            jobs = adapters.list_jobs(row, max_pages=max_pages)
+            jobs = adapters.list_jobs(row, max_pages=max_pages,
+                                      scope=scopes.get((row["employer"], row["platform"])))
             return row, jobs, None, time.monotonic() - t
         except Exception as e:  # noqa: BLE001 — every failure is logged per board
             return row, None, e, time.monotonic() - t

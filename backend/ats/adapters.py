@@ -13,6 +13,7 @@ Design (see DESIGN_ats_registry.md §6a / §14):
   posting, never re-fetched — see sweep.py's detail stage.
 - A detail call that 404s means the posting is gone; the caller closes it.
 """
+import inspect
 import json
 import re
 import time
@@ -127,46 +128,80 @@ def _workday_scope(c, url):
     return facets, True
 
 
-def workday_jobs(row, max_pages=None):
+def _workday_plan(scope):
+    """([(label, appliedFacets)], clamped) -- the pulls that together cover one board.
+
+    Every strategy is the same execution path with a different plan, so `partition` is a plan builder
+    rather than a second pull mechanism: `plain` is one unfiltered pull, `country` one US-filtered pull,
+    `partition` one pull per facet value, unioned.
+    """
+    if not scope:
+        return None, False                                   # caller probes live
+    strategy = scope.get("strategy")
+    param = scope.get("facet_parameter")
+    ids = json.loads(scope.get("value_ids") or "null") or []
+    if strategy == "country" and param and ids:
+        return [("us", {param: ids})], False
+    if strategy == "partition" and param and ids:
+        return [(v, {param: [v]}) for v in ids], False
+    return [("all", {})], strategy == "truncate"
+
+
+def _workday_pull(c, url, public, applied, max_pages):
+    """(postings, truncated) for one filtered pull, paginating CXS to the end."""
+    out, offset, limit, total, pages = [], 0, 20, None, 0     # CXS rejects limit > 20
+    while True:
+        body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": ""}
+        data = _request(c, "POST", url, json=body).json()
+        postings = data.get("jobPostings") or []
+        if total is None:
+            # Only the first page reports a trustworthy total; Wells Fargo's tenant returns
+            # total=0 on every later page (found 2026-09-14), so never re-read it.
+            total = data.get("total") or 0
+        for p in postings:
+            bullets = p.get("bulletFields") or []
+            req_id = bullets[0] if bullets else p.get("externalPath")
+            loc_text = p.get("locationsText") or p.get("locationText")
+            out.append(N.base(
+                req_id=req_id,
+                title=p.get("title"),
+                url=f"{public}{p.get('externalPath', '')}",
+                location_primary=N.primary_location(loc_text),
+                workplace_type=N.workplace_type(None, loc_text),
+                posted_at=N.parse_date(p.get("postedOn")),
+                raw_json=N.raw(p),
+                _external_path=p.get("externalPath"),
+            ))
+        pages += 1
+        offset += limit
+        if len(postings) < limit or (total and offset >= total):
+            return out, False
+        if max_pages and pages >= max_pages:
+            return out, True
+        time.sleep(PAGE_DELAY)
+
+
+def workday_jobs(row, max_pages=None, scope=None):
+    """One board, pulled according to its stored `board_scope` plan (or a live probe when it has none)."""
     tenant, wd, site = row["identifier_1"], row["identifier_2"], row["identifier_3"]
     if not site:
         raise ValueError(f"{row['employer']}: Workday row has no site slug (identifier_3)")
-    host = _workday_host(tenant, wd)
-    url = f"{host}/wday/cxs/{tenant}/{site}/jobs"
+    url = f"{_workday_host(tenant, wd)}/wday/cxs/{tenant}/{site}/jobs"
     public = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
-    out, offset, limit, total, pages = [], 0, 20, None, 0  # CXS rejects limit > 20
+    plan, clamped = _workday_plan(scope)
+    out, seen = [], set()
     with client() as c:
-        applied, clamped = _workday_scope(c, url)
-        while True:
-            body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": ""}
-            data = _request(c, "POST", url, json=body).json()
-            postings = data.get("jobPostings") or []
-            if total is None:
-                # Only the first page reports a trustworthy total; Wells Fargo's tenant
-                # returns total=0 on every later page (found 2026-09-14), so never
-                # re-read it.
-                total = data.get("total") or 0
-            for p in postings:
-                bullets = p.get("bulletFields") or []
-                req_id = bullets[0] if bullets else p.get("externalPath")
-                loc_text = p.get("locationsText") or p.get("locationText")
-                out.append(N.base(
-                    req_id=req_id,
-                    title=p.get("title"),
-                    url=f"{public}{p.get('externalPath', '')}",
-                    location_primary=N.primary_location(loc_text),
-                    workplace_type=N.workplace_type(None, loc_text),
-                    posted_at=N.parse_date(p.get("postedOn")),
-                    raw_json=N.raw(p),
-                    _external_path=p.get("externalPath"),
-                ))
-            pages += 1
-            offset += limit
-            if len(postings) < limit or (total and offset >= total):
-                break
-            if max_pages and pages >= max_pages:
-                return Truncated(out)
-            time.sleep(PAGE_DELAY)
+        if plan is None:                                     # never discovered: fall back to probing
+            applied, clamped = _workday_scope(c, url)
+            plan = [("all", applied)]
+        for _label, applied in plan:
+            got, truncated = _workday_pull(c, url, public, applied, max_pages)
+            clamped = clamped or truncated
+            for p in got:                                    # partitions overlap; union on the req key
+                key = p.get("req_id") or p.get("url")
+                if key not in seen:
+                    seen.add(key)
+                    out.append(p)
     return Truncated(out) if clamped else out
 
 
@@ -799,12 +834,16 @@ IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)
 
 
-def list_jobs(row, max_pages=None):
+def list_jobs(row, max_pages=None, scope=None):
     """Whole-board pull. Raises on hard failure so the caller never close-passes a
-    board it didn't actually read. Returns a `Truncated` list if max_pages tripped."""
+    board it didn't actually read. Returns a `Truncated` list if max_pages tripped.
+
+    `scope` is the board's `board_scope` row; adapters that understand it pull to its plan."""
     fn = _LIST.get(row["platform"])
     if fn is None:
         raise ValueError(f"no adapter for platform {row['platform']!r}")
+    if scope is not None and "scope" in inspect.signature(fn).parameters:
+        return fn(row, max_pages=max_pages, scope=scope)
     return fn(row, max_pages=max_pages)
 
 

@@ -1,6 +1,6 @@
 """The judge's rubric (sprint plan §10, §15.5, §16.8).
 
-`RUBRIC_PUBLIC` and `RUBRIC_LANE` are committed and contain nothing personal: the grading scale, the output
+`RUBRIC_PUBLIC` and the two `RUBRIC_LENS_*` blocks are committed and contain nothing personal: the grading scale, the output
 contract, and a neutral description of the target function. `rubric_local.py` (gitignored) supplies
 `RUBRIC_PERSONAL`, the candidate's own profile prose, and is only sent on the `personal` prompt profile
 (paid tier or a local model) or in Claude Code batch files, which never leave the machine.
@@ -33,35 +33,56 @@ RULES
 - If the supplied text is too thin to judge, grade `stretch` and set confidence "low".
 - Be decisive. A corpus where everything is `adjacent` is useless.
 
+TWO LENSES. Grade each posting TWICE, independently, against the two lens descriptions below:
+- grade_process   : how well the role matches the PROCESS / OPERATING-MODEL / CHANGE-MANAGEMENT lens
+- grade_technical : how well it matches the TECHNICAL / DATA / ANALYTICAL lens
+
+Use the same four grades for both. MOST ROLES ARE STRONG ON AT MOST ONE LENS, and a low score on the other lens
+is the normal, correct answer -- it is a statement about the ROLE, not a criticism of the candidate. Do not
+inflate the weaker lens to be generous, and do not deflate it because the role is strong on the other. A role
+that genuinely demands both is rare and valuable, so record it honestly when you see it.
+
 OUTPUT: one JSON object per posting, nothing else:
-{"posting_id": "<id>", "grade": "bullseye|adjacent|stretch|wrong", "lane": "primary|secondary|wrong",
+{"posting_id": "<id>", "grade_process": "bullseye|adjacent|stretch|wrong",
+ "grade_technical": "bullseye|adjacent|stretch|wrong", "lane": "primary|secondary|wrong",
  "confidence": "high|medium|low", "blocker": "<the single biggest gap, or empty>",
- "rationale": "<one sentence naming the actual work, not the title>"}
+ "rationale": "<one sentence naming the actual work, and which lens it lands on>"}
 """
 
-# Neutral target description, safe to send on a free API tier (§16.8 `public` profile).
-RUBRIC_LANE = """
-TARGET FUNCTION (neutral description)
-- Primary: enterprise operations process excellence — process improvement, operational excellence, business
-  process optimization, global process ownership, business transformation, Lean Six Sigma, continuous
-  improvement, operating-model design, change management in the adoption-and-ownership sense.
-- Equally primary: workforce / capacity / demand modelling, operations forecasting, and the analytics and data
-  work that produces an operating decision. This is NOT a lesser lane and carries no grade cap. Judge analytics
-  roles by the OBJECT of the analysis — operations decisions are primary; marketing, product or risk analytics
-  are `adjacent`.
-- Engineering-titled roles (data / analytics / BI engineer) are decided by the STACK and the expectations in the
-  JD, never by the title. Building models, pipelines and analysis on a familiar stack is in lane; owning the
-  platform — streaming infrastructure, cloud build-out, CI/CD, ML model engineering — is not.
-- Wrong: plant-floor / manufacturing continuous improvement, product operations, sales or revenue operations,
-  IT service-management change control, and roles whose real requirement is industry tenure.
+# Neutral lens descriptions, safe to send on a free API tier (§16.8 `public` profile).
+RUBRIC_LENS_PROCESS = """
+LENS 1 — PROCESS / OPERATING MODEL / CHANGE MANAGEMENT (grade_process)
+- `bullseye`: process improvement, operational excellence, business process optimization, global process
+  ownership, business transformation, Lean Six Sigma / Lean, continuous improvement, operating-model and
+  process design, process governance and ownership, CHANGE MANAGEMENT in the adoption-and-ownership sense
+  (stakeholder readiness, resistance, driving a new way of working into an organization), and designing the
+  framework or operating routine for how work gets planned and run.
+- `adjacent`: programme / project / portfolio management, business operations or chief-of-staff work where the
+  real job is coordinating across functions, or consulting delivery of the above.
+- `wrong`: plant-floor / manufacturing continuous improvement, product operations, sales or revenue operations,
+  IT service-management change control (ITIL change tickets are NOT change management in this sense).
 """
 
+RUBRIC_LENS_TECHNICAL = """
+LENS 2 — TECHNICAL / DATA / ANALYTICAL (grade_technical)
+- `bullseye`: quantitative modelling of a business -- capacity, workforce, demand, throughput, cost-to-serve;
+  forecasting and scenario analysis; budget and financial modelling; the measurement baseline itself; building
+  the data pipelines, reporting and dashboards an operating decision rests on.
+- `adjacent`: senior analytics / BI / insights work whose object is something else (marketing, product, risk,
+  commercial), or analytics governance and methodology validation.
+- `wrong`: platform and software engineering as the job -- streaming or distributed infrastructure, cloud
+  build-out, CI/CD and data-platform ownership, microservice or API product engineering -- and data-scientist
+  seats whose work is building ML / NLP / RAG models.
+- Judge the STACK and the expectations named in the JD, never the job title.
+"""
 
 def rubric_version(extra: str = "") -> str:
     """Changes when any prompt text changes, so relabelled rows are distinguishable."""
     from . import requirements
-    personal = globals().get("RUBRIC_PERSONAL", "")
-    payload = RUBRIC_PUBLIC + RUBRIC_LANE + personal + "|".join(GRADES) + requirements.splitter_fingerprint() + extra
+    personal = "".join(globals().get(k, "") for k in
+                       ("RUBRIC_PERSONAL", "RUBRIC_PERSONAL_PROCESS", "RUBRIC_PERSONAL_TECHNICAL"))
+    payload = (RUBRIC_PUBLIC + RUBRIC_LENS_PROCESS + RUBRIC_LENS_TECHNICAL + personal + "|".join(GRADES)
+               + requirements.splitter_fingerprint() + extra)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 

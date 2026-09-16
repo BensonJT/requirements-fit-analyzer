@@ -565,3 +565,57 @@ Pilot evidence (batches 001-002, 50 postings): Henry Schein R134977 → `bullsey
 - [ ] Fit model retrained with the graded negatives; report AUC and, specifically, whether the named misfires drop below the bullseye.
 - [ ] Coverage re-calibrated against the real hard-negative set; the §15.7 eyeball re-run and its verdict recorded.
 - [ ] Level 1 miss rate reported from the graded rejects.
+
+## 18. Amendment — two lenses, and how the single-lens rubric failed (2026-09-16, user decision; binding, supersedes §17.1's "one question only")
+
+**Why this exists.** §17 bought 3,009 graded labels and they worked: retraining the fit model on them moved AUC-vs-`wrong` to 0.946 and recovered the content-gate's false negatives (Amentum "Business Process Specialist", a graded bullseye, went from fit 0.12 to 0.744). But reading those labels exposed a defect in the rubric itself, and fixing it exposed a design limit that no amount of rubric prose can fix.
+
+### 18.1 The defect: one axis could not carry two capabilities
+
+`RUBRIC_PERSONAL` said *"SECONDARY lane (cap at `adjacent`): senior, strategic, leadership-facing data / analytics / BI work"* and described the analytics record in a single clause. Measured consequence: **bullseye by lane was primary 208, secondary 0** — not one analytics posting in 3,009 could ever be a bullseye, by construction. The cap was binding on 247 secondary-lane rows and pushed others into `wrong`.
+
+It also lost specific, checkable grades. Capital One "Principal Associate, Financial Planning & Analysis" was graded `wrong` with the rationale *"the core work is corporate FP&A, a distinct finance discipline"* — the judge called FP&A unfamiliar work because the record it was shown did not contain FP&A, though the candidate reengineered a $3B/$2.2B FP&A forecasting and budget cycle with DMAIC.
+
+**Root cause, and it generalizes:** the cap was never detecting what it claimed to. It encoded a *positioning* decision (data/AI is the surprise value-add, not the headline) and a *gate risk* (timed coding assessments) inside a *capability* label. Three different questions compressed into one grade. Every fix attempted was another prose arbitration rule — "judge the object of the analysis", "the stack decides" — and each one traded one misgrading for another.
+
+### 18.2 Corrections made to the single-lens rubric first (all measured)
+
+Rewritten from the §5 evidence sources (`Resume_Bullets.csv`, `Resume_Blocks.csv`, `Bio_Jeff_Professional.md`) rather than paraphrase: the Force-to-Load capacity model, the FWA five-year truck-roll forecast (**FWA = Fixed Wireless Access, not fraud/waste/abuse** — verified before writing), FP&A forecasting and budget management, the production data pipelines, the platform list from the TorchStone resume, and the negative platform evidence (no Appian/Pega/Nintex, no Power Automate, light ServiceNow). Engineering titles became stack-conditional rather than a blanket `wrong`. `RUBRIC_LANE`, the committed half, carried the identical cap and was fixed too.
+
+**Validation, clean proportional sample n=575:** 79% of grades unchanged · good-fit 9.4% → 19.3% · `wrong` 79.0% → 70.6% · only 3 of 45 bullseyes demoted (one correctly: Voya "AI Security Architect" → `wrong`) · 31 rows recovered from `wrong`, concentrated in FP&A and hybrid process/BI roles. Every recovered row's rationale named actual duties rather than citing the rubric — the test for whether the judge had begun pattern-matching the instructions.
+
+### 18.3 The two-lens design (supersedes the single grade)
+
+Each posting is graded **twice in one judging pass**: `grade_process` (process excellence, operating model, **change management** in the adoption-and-ownership sense) and `grade_technical` (quantitative modelling, forecasting, data engineering, BI delivery). `grade` remains the overall label and is **the better of the two lenses** — a role reachable through either capability is work the candidate has done — so `vw_label_set`, the fit model and the reports keep working unchanged.
+
+**One pass, two grades, not two passes.** The cost is reading the JD; a second grade off the same read measured 78KB per batch against 74KB single-lens.
+
+Allocation rules that are user decisions, recorded so they are not relitigated:
+- **Change management sits on the process lens only.** ITIL/ITSM change control is not change management and stays `wrong`.
+- **Agentic AI tools count on BOTH lenses**, because the use is broad and not just coding: reasoning partner for process analysis and decomposition, strategy development, and human-in-the-loop workflows over curated databases — the "operator who codes with agentic AI assistance" pattern. Process lens = designing the HITL workflow, governance and organizational adoption; technical lens = directing the tools against written specifications to ship software, pipelines and analysis. Still distinct from *building* ML/NLP/RAG models, which stays `wrong` on the technical lens.
+- **Technical platforms weigh on the technical lens.**
+- **The three flagship projects (GNO Force-to-Load, FWA forecast, FP&A automation) appear on BOTH lenses with different emphasis** — process for the decomposition, model design and operating-routine redesign; technical for building the pipelines and automated analytics. They are written up as evidence that the capability is **domain-portable across field operations, fixed wireless and finance**, deliberately so that the rubric does not read as a workforce-analytics specialism.
+- **Forester is on both**: Lean Six Sigma methodology translated into software requirements (process), and 18+ sprints of multi-tenant SaaS with architecture contribution and agentic AI direction (technical).
+- **Domain-agnostic on both lenses.** The process capability applies to anyone who has a process; the technical capability travels the same way. Unfamiliar industry never lowers a grade. Where a JD makes deep industry tenure a hard requirement, that is named as the **blocker** — their expectation is the obstacle, not the capability.
+
+### 18.4 What is deliberately NOT in the rubric
+
+**The coding-assessment constraint.** Level 1 catches only what a JD discloses (`ASSESSMENT_GATE_TERMS`, `CODING_TEST_TERMS`, and the `BLOCKED_POSTERS` employer list) — measured: **242 of 80,272 active postings, 0.3%**, and widening the coding rule beyond tier 3 would newly reject exactly one posting, a false positive. But the judge reading a JD has precisely the same information as the regex and cannot predict an undisclosed assessment either. The old cap was using "is this an analytics role" as a **proxy** for assessment risk, and that proxy is what killed the workforce-analytics roles the user actively wants. Assessment risk is discovered, not predicted: it belongs in `BLOCKED_POSTERS` as it is learned, and in the user's judgement at application time.
+
+### 18.5 Schema and tooling
+
+Schema **v7**, additive: `llm_labels.grade_process` and `.grade_technical` (NULL on pre-split rows, which reads correctly as "graded before the lenses existed"); `judge.overall()`; `_validate` still accepts pre-split result files so the 890 existing labels stay valid; `vw_lens_grades` exposes both grades plus a `lens_bucket` of `process` / `technical` / `both` / `neither`; `judge report --csv` gains `grade_process`, `grade_technical` and `favoured_lens`.
+
+**Report plan (user request, not yet built): three lists — strong on process, strong on technical, and strong on BOTH.** The both-lenses list is the point: it is the candidate's least substitutable shape and was invisible under one axis. GM "Senior Process Transformation Business Intelligence" (*"builds Python/SQL data pipelines and LLM-powered business tools under a Process Transformation mandate"*) is the worked example.
+
+### 18.6 Queue-ordering bug, recorded because it nearly caused a wrong decision
+
+The first `--relabel` queue concatenated grades alphabetically, so it was sorted by old grade. Batches 1–12 were 100% old-`adjacent` rows and the running tally showed a 55% good-fit rate against an 18.5% corpus baseline — which reads exactly like a rubric gone permissive, and nearly triggered a rewrite of a rubric that was in fact correct. Caught by the migration matrix returning 208 old-`adjacent` and nothing else. `_spread()` now sorts on each posting's fractional position within its own grade, so every slice carries the corpus mix (§17.2), and `--relabel` is idempotent: it queues only postings whose newest label predates the current `rubric_version`. **Lesson for any future run: never read a mid-run tally as a corpus estimate without checking how the queue was ordered.**
+
+### 18.7 Acceptance
+
+- [ ] The corpus is re-graded under two lenses (currently MIXED: 890 at a single-lens corrected rubric, 2,083 at the original — do not retrain or read a corpus-wide distribution until this is resolved).
+- [ ] Grade distribution reported per lens, plus the `lens_bucket` crosstab; the `both` count is the headline.
+- [ ] Fit model retrained on the new overall grades; report AUC, AUC-vs-`wrong`, and OOF fit by grade among SURVIVORS (the flat 0.77 / 0.64 / 0.65 / 0.63 is the number to beat).
+- [ ] The three report lists built and reviewed by the user.
+- [ ] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.

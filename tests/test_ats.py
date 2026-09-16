@@ -266,3 +266,20 @@ def test_lever_text_keeps_the_duties_and_requirements_sections():
     assert text.startswith("AHEAD builds") and text.rstrip().endswith("equal opportunity employer.")
     assert lever_text({"descriptionPlain": "only a blurb"}) == "only a blurb"
     assert lever_text({}) == ""
+
+
+def test_oracle_detail_labels_its_sections():
+    """Oracle returns description / responsibilities / qualifications as separate unlabelled fields; without
+    headings the finder cannot tell the role section from the person section (NFCU's Principal Business Analyst
+    stored 5,056 chars that never contained the word 'Responsibilities')."""
+    from backend.ats import adapters, normalize as N
+    d = {"ExternalDescriptionStr": "<p>About the role.</p>",
+         "ExternalResponsibilitiesStr": "<ul><li>Own the intake process</li></ul>",
+         "ExternalQualificationsStr": "<ul><li>8 years of experience</li></ul>"}
+    parts = [d.get("ExternalDescriptionStr"),
+             f"<p>Responsibilities</p>{d['ExternalResponsibilitiesStr']}" if d.get("ExternalResponsibilitiesStr") else None,
+             f"<p>Qualifications</p>{d['ExternalQualificationsStr']}" if d.get("ExternalQualificationsStr") else None]
+    text = N.html_to_text("\n".join(p for p in parts if p))
+    assert "Responsibilities" in text and "Qualifications" in text
+    assert "Own the intake process" in text and "8 years of experience" in text
+    assert text.index("Responsibilities") < text.index("Qualifications")

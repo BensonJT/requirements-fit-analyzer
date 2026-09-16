@@ -201,7 +201,9 @@ def oracle_orc_detail(row, posting):
     if not items:
         raise Gone(f"no detail items {url}")
     d = items[0]
-    parts = [d.get("ExternalDescriptionStr"), d.get("ExternalResponsibilitiesStr"), d.get("ExternalQualificationsStr")]
+    parts = [d.get("ExternalDescriptionStr"),
+             f"<p>Responsibilities</p>{d['ExternalResponsibilitiesStr']}" if d.get("ExternalResponsibilitiesStr") else None,
+             f"<p>Qualifications</p>{d['ExternalQualificationsStr']}" if d.get("ExternalQualificationsStr") else None]
     text = N.html_to_text("\n".join(p for p in parts if p))
     pay = N.pay_from_text(text)
     locs = [d.get("PrimaryLocation")] + list(d.get("secondaryLocations") or [])

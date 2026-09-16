@@ -42,6 +42,13 @@ is the normal, correct answer -- it is a statement about the ROLE, not a critici
 inflate the weaker lens to be generous, and do not deflate it because the role is strong on the other. A role
 that genuinely demands both is rare and valuable, so record it honestly when you see it.
 
+A LENS WITH NO RELEVANT CONTENT IN THE POSTING IS `wrong` ON THAT LENS, NOT `stretch`. `stretch` requires
+genuine partial overlap that you can NAME in your rationale. If you cannot point to the overlapping work, the
+grade is `wrong`. Do not use `stretch` as a polite middle when the posting simply contains nothing for that
+lens -- an HR business-partner role with no analysis in it is `wrong` on the technical lens, and a pure data
+pipeline role with no process ownership in it is `wrong` on the process lens. Hedging destroys the signal: it
+is the difference between "this role needs both capabilities" and "I was unsure".
+
 OUTPUT: one JSON object per posting, nothing else:
 {"posting_id": "<id>", "grade_process": "bullseye|adjacent|stretch|wrong",
  "grade_technical": "bullseye|adjacent|stretch|wrong", "lane": "primary|secondary|wrong",

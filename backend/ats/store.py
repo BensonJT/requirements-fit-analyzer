@@ -330,9 +330,12 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
            l.blocker, l.rationale, s.final_score, s.band, s.verdict,
            l.grade_process IN ('bullseye', 'adjacent') AS process_strong,
            l.grade_technical IN ('bullseye', 'adjacent') AS technical_strong,
+           -- `both` requires at least one bullseye. adjacent/adjacent is mediocre on both lenses, not the rare
+           -- role that genuinely demands both, and letting it in fills the list the user most wants with
+           -- lukewarm rows (9 of the 25 'both' rows on the 2026-09-16 pilot were adjacent/adjacent).
            CASE WHEN l.grade_process IS NULL THEN 'single-lens'
                 WHEN l.grade_process IN ('bullseye','adjacent') AND l.grade_technical IN ('bullseye','adjacent')
-                THEN 'both'
+                     AND 'bullseye' IN (l.grade_process, l.grade_technical) THEN 'both'
                 WHEN l.grade_process IN ('bullseye','adjacent') THEN 'process'
                 WHEN l.grade_technical IN ('bullseye','adjacent') THEN 'technical'
                 ELSE 'neither' END AS lens_bucket

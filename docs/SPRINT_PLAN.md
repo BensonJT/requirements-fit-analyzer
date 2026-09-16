@@ -612,10 +612,31 @@ Schema **v7**, additive: `llm_labels.grade_process` and `.grade_technical` (NULL
 
 The first `--relabel` queue concatenated grades alphabetically, so it was sorted by old grade. Batches 1–12 were 100% old-`adjacent` rows and the running tally showed a 55% good-fit rate against an 18.5% corpus baseline — which reads exactly like a rubric gone permissive, and nearly triggered a rewrite of a rubric that was in fact correct. Caught by the migration matrix returning 208 old-`adjacent` and nothing else. `_spread()` now sorts on each posting's fractional position within its own grade, so every slice carries the corpus mix (§17.2), and `--relabel` is idempotent: it queues only postings whose newest label predates the current `rubric_version`. **Lesson for any future run: never read a mid-run tally as a corpus estimate without checking how the queue was ordered.**
 
-### 18.7 Acceptance
+### 18.7 Pilot results and the two decisions they forced (2026-09-16, n=99, balanced 25 per old grade)
+
+**Model choice, measured not assumed.** The same 25 postings were graded by Sonnet and by Opus. Process lens: 80% exact, 96% within one grade. Technical lens: 64% exact, **100% within one grade**, with Opus systematically more generous (mean shift −0.28). Opus hedges toward `stretch`/`adjacent` where Sonnet says `wrong` — on a plant-floor Lean role, on a posting whose text is too thin to grade, and on an HR business-partner role with no analysis in it. Opus also produced 8 "both-lens" roles against Sonnet's 5, which inflates precisely the signal that matters most. **Sonnet is the right grader here and Opus is not worth the money.** (There is no reasoning-effort knob on subagents; the only lever is the model.)
+
+**Lens independence confirmed.** On the 99-posting pilot the two lenses gave **different grades on 67 of 99 postings (67%)**. Anchoring — grading once and sliding the second grade to match — would have shown up as near-total agreement. It did not. Worked examples: Novartis "Executive Director, Strategic Projects Lead" `bullseye`/`wrong`; Salesforce "Lead, Workforce Intelligence" `wrong`/`bullseye`; GM "Senior Process Transformation BI Data Analyst" `wrong`/`bullseye` (correctly reading past the title to a build role).
+
+**A decisiveness rule was added to `RUBRIC_PUBLIC` between the two pilots:** a lens with no relevant content is `wrong` on that lens, not `stretch`; `stretch` requires overlap the judge can name. Technical-lens `stretch` fell from 20% to 12%.
+
+**Decision 1 — `both` requires at least one `bullseye`.** Counting bullseye+adjacent as "strong" put `adjacent`/`adjacent` in the both bucket: 9 of 25 were lukewarm-on-both rather than the rare role that genuinely demands both. Tightened in `vw_lens_grades`; the pilot's both count went 25 → **16**.
+
+**Decision 2 — `grade` is the AVERAGE of the two lenses, not the better of them.** Taking the max inflated the corpus by construction (18 of 25 old `stretch` rows became good simply because two judgments replaced one). On the same 99 postings, max gave bullseye 36 / stretch 9; average gives bullseye 16 / stretch 28. Ties round toward the better grade so a role excellent on one lens and irrelevant on the other still surfaces.
+
+**`grade` is now explicitly a compatibility column.** The user's actual decision — apply, and position the package as process, technical or both — is made from `grade_process` and `grade_technical` **individually**, because a role strong on one lens is worth pursuing on that lens's positioning. Any single number destroys that: `bullseye`/`wrong` and `adjacent`/`adjacent` both average to `adjacent` and mean completely different things.
+
+**Known limitation, stated plainly: run-to-run variance on individual postings is real.** Oracle "Sr HR Business Partner" was graded `adjacent`/`wrong`, then `stretch`/`stretch`, then `bullseye`/`stretch` across three runs, and the last is probably a misgrade. Batch-level `stretch` usage ranged 1–5 across four batches of 25. Aggregates at n≈100 are stable; **single rows are not, and no report should be read as if they were.**
+
+### 18.8 Next phase — a fit model per lens
+
+The single TF-IDF fit model is the last place the one-axis design survives. With two label columns the right architecture is two models producing `fit_process` and `fit_technical`, which is also what the three report lists need in order to rank within each list. Until that exists, the single model trains on the averaged `grade` and is a compromise. Blend weights will need revisiting: content is at 0.90 after the 2026-09-15 sweep, but a two-lens content score may want its own.
+
+### 18.9 Acceptance
 
 - [ ] The corpus is re-graded under two lenses (currently MIXED: 890 at a single-lens corrected rubric, 2,083 at the original — do not retrain or read a corpus-wide distribution until this is resolved).
 - [ ] Grade distribution reported per lens, plus the `lens_bucket` crosstab; the `both` count is the headline.
 - [ ] Fit model retrained on the new overall grades; report AUC, AUC-vs-`wrong`, and OOF fit by grade among SURVIVORS (the flat 0.77 / 0.64 / 0.65 / 0.63 is the number to beat).
-- [ ] The three report lists built and reviewed by the user.
+- [ ] The three report lists built and reviewed by the user: strong process, strong technical, and `both`
+      (at least one bullseye). Rank within each list; do not merge them into one ordering.
 - [ ] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.

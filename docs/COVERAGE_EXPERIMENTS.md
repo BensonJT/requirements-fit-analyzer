@@ -13,6 +13,13 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | R1 | baseline, evidence embedded 9/15 (missing 30 units) | 0.562 | 0.558 | 0.690 | 0.712 (w 0.6) | 0.806 | 46.0 / 44.9 |
 | R2 | baseline, evidence synced from Postgres | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
 | S1 | evidence = bullets + duty statements + SOAR only | 0.550 | 0.543 | 0.706 | 0.661 (w 0.6) | 0.785 | 23.2 / 20.2 |
+| S2a | R2 re-run, adds the stretch set (806) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
+
+**Against `stretch` (the confusable band, never used to pick thresholds):**
+
+| Run | coverage_gated | fit_heldout | blend (best w) |
+|---|---|---|---|
+| S2a | 0.575 | **0.955** | 0.854 |
 
 ## R1 — baseline (2026-09-16 15:48, calibration `daaf23f5d142`, 1,138 s)
 First run that completed (earlier attempts died on the 9p mount; see STATUS). Evidence: 2,888 units embedded 2026-09-15 23:39, before 30 units of bullet edits on 9/16.
@@ -35,6 +42,12 @@ Hypothesis: 1,803 article units dominate the evidence and make data/AI engineeri
 - AUC: coverage_required 0.550 · coverage_role 0.507 · coverage_gated 0.543 · fit_heldout 0.706 · blend 0.652/0.661/0.648/0.590 · sanity 0.785
 - Top hard negatives are still engineering/AI roles: Machinify Staff AI Engineer (50.0), Guidehouse Palantir Enterprise Ontology Architect (50.0), Novartis Executive Director Agentic Lab (45.0), Blue Yonder Principal Data Platform Engineer (43.8), Marriott Director AI Application Engineering (42.6).
 - **Reading:** rejected. Removing articles halved everyone's coverage, positives and negatives alike, and the ranking got slightly worse. The evidence mix is not the cause; sentence-level topic matching is. **Production keeps the full evidence manifest.**
+
+## S2a — baseline plus a stretch negative set (16:49, calibration `49e4f039319b`, 673 s; scratch DB)
+Code change only in reporting: calibration now also scores the 806 postings the judge graded `stretch` (label 0, career-site text ≥ 800 chars) and reports AUC against them. They are not used to choose thresholds.
+- Hard-negative AUCs identical to R2 (as they must be): coverage_gated 0.559 · fit_heldout 0.706 · blend_0.75 0.706.
+- **vs stretch:** coverage_required 0.576 · coverage_gated 0.575 · **fit_heldout 0.955** · blend_0.75 0.854.
+- **Reading — the yardstick was biased.** The fit model separates positives from the confusable band almost perfectly on held-out folds, yet looked mediocre (0.706) against the hard negatives. 200 of those 439 are `fit_top`: unlabeled postings selected *because* the fit model scored them highest, which caps the fit model's AUC on that set by construction (and they are unconfirmed guesses, not judged negatives). Coverage is weak on both sets, and blending it in drags the stretch AUC from 0.955 to 0.854. From S2 on, calibration also reports AUC against the 299 judge-confirmed `wrong` rows alone.
 
 ## Plan for the next steps (decided with the user 2026-09-16)
 - **S2** — requirement text embedded with the posting title around it (`"<title>: <requirement>"`), bge-small. Also adds a second negative set: postings the judge graded `stretch` (the confusable band), with a re-run baseline (S2a) so the stretch AUC has a reference.

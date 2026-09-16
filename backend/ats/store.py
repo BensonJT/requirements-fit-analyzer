@@ -215,6 +215,27 @@ CREATE TABLE IF NOT EXISTS llm_labels (
     PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
 );
 
+-- What each board's own search API says it can filter by. Captured by `finder.py facets --discover` rather
+-- than hardcoded: tenants publish their own value ids, and the facet parameter itself differs (Accenture
+-- exposes locationMainGroup -> Country, Booz Allen exposes only a flat city list and 400s on locationCountry).
+CREATE TABLE IF NOT EXISTS board_facets (
+    employer VARCHAR NOT NULL, platform VARCHAR NOT NULL,
+    facet_parameter VARCHAR NOT NULL,        -- e.g. locationMainGroup, jobFamilyGroup
+    group_descriptor VARCHAR NOT NULL,       -- the nested group, e.g. 'Country' or 'City'; '' when flat
+    value_id VARCHAR NOT NULL, descriptor VARCHAR NOT NULL, count INTEGER,
+    discovered_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (employer, platform, facet_parameter, group_descriptor, value_id, descriptor)
+);
+
+-- The resolved enumeration strategy per board: how to pull it so the whole board is reachable and US-scoped.
+-- `strategy` is plain | country | partition | truncate. A board is only close-passed when fully enumerated.
+CREATE TABLE IF NOT EXISTS board_scope (
+    employer VARCHAR NOT NULL, platform VARCHAR NOT NULL,
+    strategy VARCHAR NOT NULL, facet_parameter VARCHAR, value_ids VARCHAR,   -- JSON array
+    reported_total INTEGER, clamped BOOLEAN, note VARCHAR, verified_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (employer, platform)
+);
+
 -- Hard negatives for calibration that are not decisions: audit list + the fit model's confident mistakes (§16.1).
 CREATE TABLE IF NOT EXISTS hard_negatives (
     posting_id VARCHAR NOT NULL, source VARCHAR NOT NULL, note VARCHAR, refreshed_at TIMESTAMP NOT NULL,

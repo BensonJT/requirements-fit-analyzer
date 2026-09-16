@@ -312,18 +312,36 @@ class _StubClient:
         return self._scoped if applied else self._unfiltered
 
 
-def _page(total, facet_sum):
-    return _Resp({"total": total, "jobPostings": [],
-                  "facets": [{"facetParameter": "jobFamilyGroup",
-                              "values": [{"count": facet_sum}]}]})
+def _page(total, real_count, multi_valued=None):
+    """A CXS page: `real_count` is the single-valued timeType sum, `multi_valued` an inflated location sum."""
+    facets = [{"facetParameter": "timeType", "values": [{"count": real_count}]}]
+    if multi_valued:
+        facets.append({"facetParameter": "locationMainGroup", "values": [{"count": multi_valued}]})
+    return _Resp({"total": total, "jobPostings": [], "facets": facets})
 
 
-def test_workday_clamp_detected_from_facet_sums():
+def test_workday_clamp_detected_from_a_single_valued_facet():
     from backend.ats import adapters
-    assert adapters._workday_total_is_clamped({"total": 2000, "facets": [
-        {"values": [{"count": 44187}]}]}) is True
-    assert adapters._workday_total_is_clamped({"total": 255, "facets": [
-        {"values": [{"count": 255}]}]}) is False
+    clamped = adapters._workday_total_is_clamped
+    # Accenture: timeType says 44,216 postings, `total` says 2000.
+    assert clamped(_page(2000, 44216).json()) is True
+    # Booz Allen's margin is thin but real (2,386 vs 2,000).
+    assert clamped(_page(2000, 2386).json()) is True
+    assert clamped(_page(254, 254).json()) is False
+
+
+def test_multi_valued_facets_do_not_fake_a_clamp():
+    """A job in three cities counts three times in the location facet. Using the widest facet called
+    Autodesk (405 real, 630 in locations) and Guidehouse clamped when both are complete."""
+    from backend.ats import adapters
+    assert adapters._workday_total_is_clamped(_page(405, 376, multi_valued=630).json()) is False
+    assert adapters._workday_total_is_clamped(_page(757, 757, multi_valued=1400).json()) is False
+
+
+def test_clamp_falls_back_to_the_known_ceiling_without_timetype():
+    from backend.ats import adapters
+    assert adapters._workday_total_is_clamped({"total": 2000, "facets": []}) is True
+    assert adapters._workday_total_is_clamped({"total": 812, "facets": []}) is False
 
 
 def test_workday_scope_uses_us_filter_when_it_actually_applies():

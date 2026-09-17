@@ -646,3 +646,53 @@ The single TF-IDF fit model is the last place the one-axis design survives. With
       cannot reproduce that split (F1 0.64 / 0.61, precision ~0.5) and must not be asked to.
       Actionable at build time: both 200, process 540, technical 222.
 - [ ] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.
+
+## 19. Amendment — coverage recalibration and experiments (2026-09-16/17, Opus; RESULTS + OPEN DECISIONS, not yet a user decision)
+
+This section records what was built and measured after §18, and the decisions it puts in front of the user. Nothing here changes a binding rule until the user confirms it; each proposal is marked. Full per-run record: **`docs/COVERAGE_EXPERIMENTS.md`**. Session state: `docs/STATUS.md` "NOW".
+
+### 19.1 What changed in the codebase and environment
+
+- **Lens models corrected** (`72167e5`): in-sample calibration numbers were replaced with out-of-fold ones; OOF mean probability falls monotonically bullseye → adjacent → stretch → wrong on both lenses (AUC 0.95 each).
+- **Judged `wrong` labels feed the hard negatives** (`e8431f9`): `vw_hard_negatives` was empty; `refresh_hard_negatives` now draws from three sources (audit · judged_wrong top-300 by fit · fit_top 200).
+- **The repo moved to the WSL ext4 disk** (`~/jobsearch`, `621fec4`). Heavy ML imports over the `/mnt/e` 9p mount failed under Windows memory pressure (bus error, ENOMEM on `open()`, one WSL crash). The E: copy is deleted. Venv, `db/` and gitignored files live natively. Caveat: the ext4 disk is a VHDX on a nearly full C:.
+- **Evidence reads PostgreSQL** (`b1c9d3d`): new `postgres` source type (`psql --csv`, `path = "$RESUME_DB_URL"` from `.env`); bullets, duty statements and claim guards come from the `resume` database views instead of CSV exports. `evidence.ensure_current` re-embeds only changed units before cover/calibrate; a rebuild refuses to empty a listed source that is unreachable. The encoder now loads the manifest's `embed_model` (it silently used the default before).
+- **Experiment switches** (`e5cbc39`, env, unset = production): `JOBSEARCH_REQ_CONTEXT=title`, `JOBSEARCH_RERANKER=<cross-encoder>`, `JOBSEARCH_RERANK_TOP=<n>`. `requirement_units` has no model column in its primary key, so a variant must run on its own DB copy.
+- **Calibration reporting** (`e5cbc39`, `d8fe17a`, `1566e32`): AUC is now also reported vs the judge's `stretch` rows (806) and vs judge-confirmed `wrong` only (299); hard-negative fit uses out-of-fold scores for labeled rows. Tests: 131.
+
+### 19.2 Results (coverage AUC; fit model shown for reference)
+
+| Run | Change | vs hard neg (439) | vs judged wrong (299) | vs stretch (806) |
+|---|---|---|---|---|
+| baseline (R2/S2a/S2c) | bge-small, cosine bands | 0.559 | 0.582 | 0.575 |
+| S1 | evidence = bullets + duties + SOAR only | 0.543 | — | — |
+| S2 | requirement embedded as "<title>: <requirement>" | 0.607 | 0.637 | 0.610 |
+| S3 | bge-base-en-v1.5 (768-d) | 0.566 | 0.621 | 0.628 |
+| **S4a** | **MiniLM cross-encoder reranks top-5 evidence** | 0.604 | 0.677 | **0.669** |
+| S4b | S4a + title context | 0.617 | 0.683 | 0.664 |
+| fit model (held-out) | — | 0.706 | 0.995 | **0.955** |
+
+### 19.3 Findings
+
+1. **Coverage does not rank.** Best variant 0.669 vs the fit model's 0.955 on the confusable band; every blend lowers the fit model's stretch AUC. §16.6's 3b (turning on `CONTENT_BLEND` and the coverage gate) is not supported by the evidence.
+2. **The reranker fixes coverage's failure mode.** Bi-encoders (small or base) match on topic, so data/AI *engineering* roles read as covered; the cross-encoder removes them (smoke test: "Staff AI Engineer: build ML pipelines" vs an article about AI assistants scores 0.000). Title context adds nothing on top of it and reintroduces title-word false positives. The evidence mix was not the cause (S1).
+3. **The calibration target is biased.** `fit_top` negatives are selected for high fit, so they cap the fit model's AUC by construction, and after reranking several read as genuine fits. Judged `wrong` rows are mostly easy (fit median 0.23). `stretch` is the honest confusable set.
+4. **Thresholds want continuous credit under the reranker** (COVER_PARTIAL pinned at the grid floor, 0.05, in both reranker runs).
+5. **Cost** (4 CPU threads, i7-11370H): baseline embedding ~15 min for 2,735 postings; title context ~5×; bge-base ~2 h; reranking ~2 h 15 min (~40 pairs/s). The daily increment is a few hundred postings.
+
+### 19.4 Proposals for the user (not binding until confirmed)
+
+- **(a)** Retire 3b: coverage stays at weight 0 in `combine` permanently and ships as an **explainer** (gaps + matched evidence in the report) using bge-small + MiniLM reranker, no title context. Replaces §16.6's 3b gate and the §15.7 eyeball thresholds, which were written for coverage-as-ranker.
+- **(b)** Recalibrate on graded rows only: replace `fit_top` with `stretch` + judged `wrong` (+ user labels) as the calibration target.
+- **(c)** Next coverage variant if (a) is accepted: credit = reranker probability (no bands).
+- **(d)** Parked user idea: per-requirement matches (with `bullet_id`) as **advisory, tie-breaking** metadata for the Keystone job application skill's bullet selection; the LLM still decides and story groups stay whole. Needs `bullet_id` in match refs, full per-requirement storage, and a `--jd-file` entry point. Vault note: `Professional/Areas/Job_Search/Tools/IDEA_Coverage_Bullet_Selection.md`.
+- **(e)** A third grading lens for applied-AI work (enablement / adoption / governance / agentic delivery vs hands-on AI platform engineering), raised 2026-09-17; worked example Navy Federal *Principal AI Engineer (Agentic AI)*, judged wrong/wrong, user reads it as a partial fit. Needs a rubric lens block, `grade_ai` + view, a corpus regrade (~3,000 postings) and a third lens model.
+- Still open from earlier: the level ceiling rule (STATUS "QUEUED"), `pipeline.combine` blend weights for the two lens scores (§18.9), storage (compact the VHDX; a second VHDX on E: for `db/` and Meridian's Postgres).
+
+### 19.5 Acceptance record
+
+- [x] `coverage --calibrate` completes on the native venv (R1 onward) and reports thresholds, AUCs, medians and the paired gap (1.7 points, under §15.7's 5-point bar).
+- [x] Evidence reads the official PostgreSQL record; unit ids identical to the CSV path (2,918 units, 113 guards).
+- [x] Every experiment recorded with calibration version, thresholds, AUCs on all negative sets, top false positives and a reading.
+- [ ] §15.7 eyeball (Henry Schein R134977 ≥ 80 etc.) — **not run**; superseded if proposal (a) is accepted.
+- [ ] User decisions (a)–(e).

@@ -208,6 +208,32 @@ SENIOR_LEVEL_TITLE_TERMS = ["director", "vice president", "vp", "svp", "evp", "p
 EARLY_CAREER_TITLE_TERMS = ["intern", "internship", "summer associate", "co-op", "apprentice", "apprenticeship",
                             "new grad", "graduate program", "entry level", "entry-level", "junior", "jr"]
 
+# ---- Level fit (finder sec 20.2). A second, independent level signal alongside level_rule above: it never
+# rejects or flags (verdict/rule_score untouched), it only writes notes["level_fit"] for the report and the
+# human-vs-rule agreement check in report_feedback. Title and Required-block signals only.
+LEVEL_OUT_OF_REACH_TITLE_TERMS = [
+    "senior director", "sr. director", "sr director", "executive director", "vice president", "vp", "svp",
+    "evp", "avp", "assistant vice president", "head of", "chief", "cxo", "general manager", "managing director",
+]
+# A Director title with no scope hit is stretch_up ("Director-type promotion"); "senior director" must match
+# out-of-reach above, not this -- level_fit_rule checks out-of-reach terms before folding this one in.
+LEVEL_STRETCH_TITLE_TERMS = ["director", "chief of staff"]
+LEVEL_IN_RANGE_TITLE_TERMS = [
+    "principal", "senior", "sr.", "sr ", "lead", "staff", "manager", "consultant", "analyst", "specialist",
+    "architect", "engineer", "program manager", "project manager", "owner",
+]
+# Org-building scope: each distinct term counts once, capped at 2 hits in level_fit_rule so a wordy JD
+# cannot pile up. LARGE_TEAM_MARKERS (above) joins this family.
+ORG_BUILDING_TERMS = [
+    "build and lead", "build and scale", "build the org", "build the organization", "build a team",
+    "build the team", "build out the team", "scale the organization", "global teams", "global organization",
+    "spans of control", "span of control", "executive leadership team", "member of the executive",
+    "leaders of leaders", "manager of managers", "managers of managers", "org design",
+]
+# "N years managerial / people leadership" above this is a scope hit; written minimums are scored
+# separately from scope ("Master's + 10 yrs" alone is never a scope hit). Tighten in profile_local.py.
+LEVEL_MANAGERIAL_YEARS_MAX = 3
+
 # ---- Outside the US (finder hard reject). A location segment naming one of these, with no US state or
 # "United States" in any segment, is outside the US. Place names that are also common US places with no
 # state attached (Dublin, Paris, Athens, Birmingham, Manchester, Cambridge, Georgia, Jersey, Jordan) are left out.
@@ -294,7 +320,8 @@ FAITH_COMP_FLOOR = None    # comp floor when FAITH_SIGNALS fire
 # (sprint plan §16.1). A calibration input, exempt from the rules version.
 AUDIT_NEGATIVES = []
 
-REMOTE_TERMS = ["remote", "work from home", "telework", "anywhere in the u", "virtual"]
+REMOTE_TERMS = ["remote", "work from home", "telework", "anywhere in the u", "virtual",
+               "us off-site", "#li-remote", "#bi-remote"]
 
 # Seniority words that earn a small bonus (Principal IC primary; Sr Mgr/Dir JD-gated).
 SENIOR_TITLE_TERMS = ["principal", "senior", "sr.", "sr ", "lead", "director", "head of", "manager", "vice president", "vp", "staff"]

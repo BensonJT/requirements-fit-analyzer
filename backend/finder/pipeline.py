@@ -158,10 +158,11 @@ def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
 # costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
 _BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
                             "fit_prob": "DOUBLE", "fit_process": "DOUBLE", "fit_technical": "DOUBLE",
+                            "fit_ai": "DOUBLE", "level_fit": "VARCHAR",
                             "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
                             "flags": "JSON", "top_terms": "JSON", "joined": "VARCHAR"}])
 _BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "fit_process", "fit_technical",
-               "final_score", "band", "reasons", "flags", "top_terms")
+               "fit_ai", "level_fit", "final_score", "band", "reasons", "flags", "top_terms")
 
 
 def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
@@ -174,10 +175,10 @@ def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
                     "SELECT unnest(json_transform($1, $2), recursive := true)", [payload, _BATCH_SHAPE])
         con.execute("""
             INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
-                                            rule_score, fit_prob, fit_process, fit_technical, final_score, band,
-                                            reasons, flags, top_terms)
+                                            rule_score, fit_prob, fit_process, fit_technical, fit_ai, level_fit,
+                                            final_score, band, reasons, flags, top_terms)
             SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, fit_process, fit_technical,
-                   final_score, band, reasons, flags, top_terms
+                   fit_ai, level_fit, final_score, band, reasons, flags, top_terms
             FROM screen_batch""", [rv, mv, now])
         con.execute("""
             UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
@@ -234,8 +235,9 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
            log=print) -> dict:
     """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band.
 
-    `lens_models` ({lens: model}) adds fit_process / fit_technical alongside fit_prob; they are stored and
-    reported only, and never move final_score."""
+    `lens_models` ({lens: model}) adds fit_process / fit_technical / fit_ai alongside fit_prob; they are
+    stored and reported only, and never move final_score. `level_fit` (20.2) comes from the level rule inside
+    `rules.screen_row` and is likewise stored and reported only -- it never changes verdict or rule_score."""
     t0, started = time.monotonic(), _now()
     rv, mv = version.rules_version(), (model or {}).get("version", "none")
     calib = {"fit_weight": (model or {}).get("fit_weight")}
@@ -255,6 +257,10 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
                          "rule_score": rec.rule_score, "fit_prob": fit_prob,
                          "fit_process": lens_probs.get("process", none_col)[i],
                          "fit_technical": lens_probs.get("technical", none_col)[i],
+                         "fit_ai": lens_probs.get("ai", none_col)[i],
+                         # Agent A's level rule writes this note; until it lands rec.notes has no "level_fit"
+                         # key and .get() returns None, same as an unscreened lens probability.
+                         "level_fit": rec.notes.get("level_fit"),
                          "final_score": final, "band": band,
                          "reasons": rec.reasons, "flags": rec.flags, "top_terms": top})
             verdicts[rec.verdict] += 1

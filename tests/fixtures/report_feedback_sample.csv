@@ -1,0 +1,8 @@
+posting_id,report_files,employer,title,url,description_hash,snapshot_final_score,snapshot_band,snapshot_grade_process,snapshot_grade_technical,human_grade,level_fit,verdict,reason_code,reason_detail,positioning,judge_agreement,confidence,basis,assessor,assessed_at,confirmed_by_user,note,grade_before_split,needs_confirm,split_reason
+ffd44f80b3b41c8480e5,Applications/Acme_P1/notes.md,Acme,Principal Operations Analyst,https://x/P1,hash1,72,strong,bullseye,adjacent,bullseye,in_range,build,,,,,high,jd_read,user,2026-09-10T09:00:00,TRUE,,,FALSE,
+,,Acme,Director of Operations,https://x/P2,hash2,55,partial,adjacent,wrong,adjacent,out_of_reach,consider,,,,,medium,metadata,claude-sonnet-review,2026-09-11T09:00:00,TRUE,,,FALSE,
+,,Acme,Ghost Role,https://x/does-not-exist,hash3,,,,,,,pass,function,,,,low,metadata,claude-sonnet-review,2026-09-11T09:05:00,FALSE,,,,
+c49dc2a8674ae44345e5,,Acme,Senior Process Lead,https://x/P4,stale-hash-zzz,60,partial,adjacent,adjacent,stretch,stretch_up,consider,,,,,medium,jd_read,user,2026-09-12T09:00:00,TRUE,,,FALSE,
+7a449bd57ff258e8e879,,Acme,VP of Operations,https://x/P5,hash5,40,weak,stretch,wrong,wrong,too_low,pass,function,,,,high,jd_read,human-override,2026-09-13T09:00:00,TRUE,,,FALSE,
+7a449bd57ff258e8e879,,Acme,VP of Operations,https://x/P5,hash5,40,weak,stretch,wrong,adjacent,in_range,consider,,,,,medium,metadata,claude-sonnet-review,2026-09-14T09:00:00,TRUE,,,FALSE,
+70429eaf2b60702c4d25,,Acme,Manager of Analytics,https://x/P6,hash6,65,strong,bullseye,bullseye,bullseye,in_range,build,,,,,high,jd_read,claude-sonnet-review,2026-09-15T09:00:00,FALSE,,,TRUE,

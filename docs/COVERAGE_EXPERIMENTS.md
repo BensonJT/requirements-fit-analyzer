@@ -29,7 +29,7 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | **S4a** | **0.669** | 0.955 | 0.757 |
 | S4b | 0.664 | 0.955 | 0.808 |
 
-**Against judge-confirmed `wrong` only (n=299, reported from S2 on):** S2 coverage 0.637 · S3 coverage 0.621 · S4a coverage 0.677 · **S4b coverage 0.683** · fit_heldout 0.995 in all.
+**Against judge-confirmed `wrong` only (n=299, reported from S2 on):** baseline (S2c) coverage 0.582 · S2 coverage 0.637 · S3 coverage 0.621 · S4a coverage 0.677 · **S4b coverage 0.683** · fit_heldout 0.995 in all.
 
 Note on `fit_heldout` for hard negatives: up to S2 the code read the live screen's fit_prob, which is in-sample for training rows; from S3/S4a it uses out-of-fold scores (1,317 of the 1,320 judged-wrong postings are training rows). The judged-wrong figure stayed at 0.995 after the fix, so these rows are genuinely easy for the fit model, not leaked.
 
@@ -98,7 +98,30 @@ S4a's reranker (MiniLM, top 5) on S2's title-context retrieval; the cross-encode
 - Top hard negatives: Capital One Manager Project Management – Product Operations (58.9), **Guidehouse Data Platform Lead (56.6)**, Microsoft Senior Technical Program Manager (56.1), **Freddie Mac Technical Lead GenAI & Automation Engineering (50.8)**, Capital One Principal Data Analyst (48.1), Novartis Director AI Foundations Engineering (47.9), **Machinify Staff AI Engineer (47.5)**.
 - **Reading — a bigger encoder helps a little and does not fix the failure.** +0.053 over baseline vs stretch and +0.007 vs hard negatives, but the data/AI engineering roles are still near the top: a bi-encoder, of any size, compresses each sentence to one point before comparing, so topic still dominates. The reranker (S4a) beats it on every negative set at similar total cost. Its strong threshold also sat at the grid's lower edge (bge-base cosines run lower than bge-small's), so the cosine grid would need widening before it is used again. Not worth the 768-d schema change on its own.
 
-## Plan for the next steps (decided with the user 2026-09-16)
+## S2c — clean baseline re-run (2026-09-17 01:36, calibration `b64879c393ed`, 962 s; scratch DB)
+S2a again with the final reporting code (judged-wrong AUC, out-of-fold fit for labeled hard negatives), so every set has a baseline.
+- Identical to S2a on hard negatives (coverage_gated 0.559 · fit_heldout 0.706 · blend_0.75 0.706) and stretch (coverage 0.575 · fit 0.955 · blend 0.854) — the fit fix changed no figure, confirming the earlier numbers.
+- **Baseline vs judge-confirmed wrong (n=299):** coverage_gated **0.582** · fit_heldout 0.995 · blend_0.75 0.922.
+
+## Conclusions (2026-09-17)
+
+| Coverage AUC | vs hard neg | vs judged wrong | vs stretch | cost for the calibration set |
+|---|---|---|---|---|
+| Baseline (bge-small) | 0.559 | 0.582 | 0.575 | ~15 min embedding |
+| S1 core evidence only | 0.543 | — | — | same |
+| S2 title context | 0.607 | 0.637 | 0.610 | ~50 min embedding |
+| S3 bge-base | 0.566 | 0.621 | 0.628 | ~2 h embedding + 768-d schema |
+| **S4a MiniLM reranker** | 0.604 | 0.677 | **0.669** | baseline + ~2 h 15 min reranking |
+| S4b reranker + title | 0.617 | **0.683** | 0.664 | S2 + ~3 h reranking |
+| fit model alone (held-out) | 0.706 | 0.995 | **0.955** | — |
+
+1. **Coverage does not rank.** No variant comes near the fit model on the confusable band (best 0.669 vs 0.955), and every blend lowers the fit model's stretch AUC. Keep coverage at weight 0 in the screen.
+2. **The reranker is the right fix for what coverage is for — explaining a match.** It is the only change that removed the data/AI engineering false positives and it has the best sanity AUC. Title context adds nothing on top of it; a larger bi-encoder helps less than the reranker and keeps the topic-overlap failure. If coverage ships as an explainer, ship **bge-small + MiniLM reranker, no title context** (S4a).
+3. **The calibration target is biased.** `fit_top` hard negatives are selected for high fit, and after reranking several read as real fits (McKesson Lead Workforce Intelligence Consultant, Capital One Product Operations PM). Replace them with judged rows before calibrating anything again.
+4. **Thresholds want continuous credit.** Both reranker runs pinned COVER_PARTIAL at the grid's 0.05 floor. If coverage is kept as an explainer, credit = reranker probability (no bands) is the next variant to test.
+5. **Parked use:** per-requirement matches as advisory, tie-breaking metadata for resume bullet selection — see Keystone `Professional/Areas/Job_Search/Tools/IDEA_Coverage_Bullet_Selection.md`.
+
+## Plan as run (decided with the user 2026-09-16)
 - **S2** — requirement text embedded with the posting title around it (`"<title>: <requirement>"`), bge-small. Also adds a second negative set: postings the judge graded `stretch` (the confusable band), with a re-run baseline (S2a) so the stretch AUC has a reference.
 - **S3** — bge-base-en-v1.5 (768-d, ~440 MB) in place of bge-small (384-d).
 - **S4** — a cross-encoder reranker over each requirement's top evidence matches (cross-encoder/ms-marco-MiniLM-L-6-v2 first; BAAI/bge-reranker-base if time allows).

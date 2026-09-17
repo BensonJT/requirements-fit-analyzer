@@ -457,7 +457,11 @@ def level_fit_rule(title: str, text: str, annual_top: Optional[float] = None,
 
     mgr_years = _managerial_years(block)
     mgr_scope = 0
-    if mgr_years is not None and mgr_years > P.LEVEL_MANAGERIAL_YEARS_MAX:
+    out_years = getattr(P, "LEVEL_MANAGERIAL_YEARS_OUT", None)
+    if mgr_years is not None and out_years is not None and mgr_years >= out_years:
+        mgr_scope = 2   # "5+ years managing people" is a level above the record on its own (user, 2026-09-17)
+        hits.append(f"managerial years {mgr_years} >= {out_years}")
+    elif mgr_years is not None and mgr_years > P.LEVEL_MANAGERIAL_YEARS_MAX:
         mgr_scope = 1
         hits.append(f"managerial years {mgr_years} > {P.LEVEL_MANAGERIAL_YEARS_MAX}")
 

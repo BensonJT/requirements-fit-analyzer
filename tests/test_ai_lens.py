@@ -188,3 +188,9 @@ def test_pools_only_ai_title_returns_only_ai_titled_active_postings(tmp_path):
     assert set(pool.get("ai_title", [])) == {by_req["A1"], by_req["A2"]}
     assert pool.get("high") == [] and pool.get("low") == [] and pool.get("reject") == []
     con.close()
+
+
+def test_ai_lens_names_opportunity_evaluation_and_the_engineering_seat_rule():
+    from backend.finder import rubric
+    assert "EVALUATING AI / automation / RPA opportunities" in rubric.RUBRIC_LENS_AI
+    assert "The Required block decides the seat" in rubric.RUBRIC_LENS_AI

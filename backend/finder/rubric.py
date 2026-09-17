@@ -93,16 +93,29 @@ LENS 3 — APPLIED AI (grade_ai)
   (skills / procedures, memory, deterministic tool calls for the non-judgement steps), evaluation and
   regression discipline for knowledge work (reference sets, LLM-as-judge with calibration against humans,
   acceptance thresholds), human-in-the-loop grounding and review gates, model routing and token/cost judgement
-  (tiering, fallback, graceful degradation), and driving adoption -- teaching teams to build and use AI
-  assistants inside an approved platform.
+  (tiering, fallback, graceful degradation), driving adoption -- teaching teams to build and use AI
+  assistants inside an approved platform -- and EVALUATING AI / automation / RPA opportunities: deciding which
+  workflows are ready, building the business case and the measurement baseline (hours and cost with and
+  without the automation), and prioritising by value and feasibility. A process-transformation role whose
+  Required block asks for AI/automation opportunity evaluation and business cases is a bullseye here, not
+  merely adjacent: the judgement about where a model belongs IS the applied-AI work.
 - `adjacent`: AI programme / transformation / governance leadership where the work above is directed rather
-  than done; analytics or process roles where AI-assisted delivery is one named expectation among several.
+  than done and no evaluation or delivery duty is named; analytics or process roles where "AI" appears as a
+  general expectation with no opportunity assessment, delivery or adoption duty behind it.
 - `stretch`: named overlap only (e.g. prompt design or RAG configuration as a minor duty inside a role that is
   otherwise something else).
 - `wrong`: building models (ML / NLP / RAG engineering, fine-tuning, model research), AI platform or
   infrastructure engineering, distributed services in Python as the job, AI security threat modelling as a
-  primary duty, and "AI" as marketing vocabulary with no AI work in the duties.
-- Judge the duties, not the title; "AI" in a title is not evidence.
+  primary duty, and "AI" as marketing vocabulary with no AI work in the duties. ALSO `wrong`: an engineering
+  seat whose Required block asks for production code (Python / TypeScript), years of software or ML
+  engineering, or building and deploying LLM / RAG / agent applications to production as core qualifications
+  -- a forward-deployed or solutions engineer, however much the duties also mention evaluation suites,
+  workflow mapping or adoption. Name that overlap in the rationale; do not credit it as `stretch` or
+  `adjacent`. The Required block decides the seat; the duties describe it.
+- The line is CREATING or ENGINEERING the AI system versus TEACHING an existing model to perform a job:
+  skills, procedures, evals, tool calls and adoption around a model are applied AI; writing the production
+  application or the model is engineering.
+- Judge the duties and the Required block, not the title; "AI" in a title is not evidence.
 """
 
 def rubric_version(extra: str = "") -> str:

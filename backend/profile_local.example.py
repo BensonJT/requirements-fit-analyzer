@@ -16,6 +16,10 @@ FAITH_COMP_FLOOR = 85_000
 # ---- Level fit (finder sec 20.2) -- mirrored here (not just in profile.py) so tests that monkeypatch this
 # example file always see a known value, regardless of what a real profile_local.py sets.
 LEVEL_MANAGERIAL_YEARS_MAX = 3     # tighten in your own profile_local.py, e.g. 2, if your bar is lower
+# At or above this many years of PEOPLE management the ask is two scope hits (out_of_reach on its own);
+# between the two limits it is one (stretch_up). The grey zone the user named: sell 15+ years of cross-functional
+# leadership, or not.
+LEVEL_MANAGERIAL_YEARS_OUT = 5
 LEVEL_OUT_OF_REACH_TITLE_TERMS = [
     "senior director", "sr. director", "sr director", "executive director", "vice president", "vp", "svp",
     "evp", "avp", "assistant vice president", "head of", "chief", "cxo", "general manager", "managing director",

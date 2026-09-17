@@ -160,9 +160,19 @@ def _workday_plan(scope):
     return [("all", {})], strategy == "truncate"
 
 
+def _workday_page_ids(postings):
+    """The req/path keys of one CXS page, used to detect Workday repeating page 1."""
+    ids = []
+    for p in postings:
+        bullets = p.get("bulletFields") or []
+        ids.append(bullets[0] if bullets else p.get("externalPath"))
+    return ids
+
+
 def _workday_pull(c, url, public, applied, max_pages):
     """(postings, truncated) for one filtered pull, paginating CXS to the end."""
     out, offset, limit, total, pages = [], 0, 20, None, 0     # CXS rejects limit > 20
+    clamped, first_page_ids = False, None
     while True:
         body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": ""}
         data = _request(c, "POST", url, json=body).json()
@@ -171,6 +181,18 @@ def _workday_pull(c, url, public, applied, max_pages):
             # Only the first page reports a trustworthy total; Wells Fargo's tenant returns
             # total=0 on every later page (found 2026-09-14), so never re-read it.
             total = data.get("total") or 0
+            # A board previously discovered as unclamped (or one with a stored `plain`/`country`
+            # scope) can grow past the ceiling between runs -- check every pull's first page live
+            # rather than trusting board_scope, or the close-pass silently closes real reqs.
+            if _workday_total_is_clamped(data):
+                clamped = True
+            first_page_ids = _workday_page_ids(postings)
+        elif offset > 0 and total == 0 and _workday_page_ids(postings) == first_page_ids:
+            # Workday answers an out-of-range offset with page 1 rather than an empty page, so a
+            # board with no trustworthy `total` (0 or missing) needs its own stop condition:
+            # once a later page repeats page 1's ids, the board has been fully seen -- and since
+            # we can't confirm that from `total`, the pull is never safe to close-pass on.
+            return out, True
         for p in postings:
             bullets = p.get("bulletFields") or []
             req_id = bullets[0] if bullets else p.get("externalPath")
@@ -188,7 +210,7 @@ def _workday_pull(c, url, public, applied, max_pages):
         pages += 1
         offset += limit
         if len(postings) < limit or (total and offset >= total):
-            return out, False
+            return out, clamped
         if max_pages and pages >= max_pages:
             return out, True
         time.sleep(PAGE_DELAY)
@@ -683,7 +705,13 @@ def _eightfold_pages(c, url, host, max_pages):
         out.extend(_eightfold_position(host, p) for p in positions)
         pages += 1
         start += EIGHTFOLD_PAGE
-        if not positions or start >= total:
+        if not positions:
+            # A tenant that omits `count` reports total=0 even with real postings (found on a
+            # board that returned a full first page of 10 with no `count` field at all); a
+            # non-empty page under total=0 is never a complete board, so it must come back
+            # Truncated or the close-pass reads every other posting as taken down.
+            return out, total, bool(out) and not total
+        if total and start >= total:
             return out, total, False
         if max_pages and pages >= max_pages:
             return out, total, True

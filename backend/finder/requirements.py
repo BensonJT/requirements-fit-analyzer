@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from backend import profile as P
 
-from . import rules
 from .labels import strip_boilerplate
 
 SPLITTER_VERSION = "2026-09-16.1"   # bump when splitting or classing changes (part of the requirement cache key)
@@ -47,6 +46,12 @@ YEARS_PHRASE = re.compile(
     r"|combined|direct|practical|working|total|increasing(?:ly)?|responsible|work|industry))*"
     r"(?:\s+(?:experience|exp\.?))?(?:\s+(?:in|with|of|as|leading|working|doing|within|at|across))?\s*", re.I)
 _BULLET = re.compile(r"^\s*(?:[-*•·▪◦●○■□➢►✓–—]+|\d{1,2}[.)])\s*")
+# Verb-ish tokens: a non-bulleted line carrying one of these reads as a sentence, not a heading label.
+_VERBISH = re.compile(
+    r"\b(?:\w+ing|is|are|was|were|be|been|do|does|did|have|has|had|will|shall|can|must"
+    r"|manage[sd]?|lead[s]?|develop[s]?|design[s]?|build[s]?|coordinat\w*|deliver[s]?"
+    r"|implement[s]?|analy\w*|drive[s]?|own[s]?|partner[s]?|migrat\w*|creat\w*"
+    r"|provide[s]?|support[s]?|ensure[sd]?|maintain[s]?|perform[s]?|collaborat\w*)\b", re.I)
 _JOIN_WORDS = re.compile(r"(?:\b(?:and|or|the|a|an|of|to|with|for|in|on|as|by|at)|[&,])\s*$", re.I)
 # Employer notices that survive boilerplate stripping (pay-range statements, scam warnings, career-site pointers).
 NOTICE = re.compile(r"\b(scams?|fraud\w*|money transfers?|credit card numbers|official (?:u\.s\. )?website"
@@ -54,6 +59,11 @@ NOTICE = re.compile(r"\b(scams?|fraud\w*|money transfers?|credit card numbers|of
                     r"|eligible for (?:a |an )?(?:bonus|incentive|commission)|for more information about career"
                     r"|to advance to a new job level|not genuine)\b", re.I)
 PAY = re.compile(r"\$\s?\d|\b(?:salary|pay range|base pay|hourly rate)\b", re.I)
+# Action verbs that rescue a line from `logistics`: a line naming a piece of work (even one that
+# also mentions hybrid/remote/clearance/etc.) is `work`, not logistics -- the verb is the subject.
+WORK_RESCUE = re.compile(
+    r"\b(?:experience|process\w*|lead\w*|manag\w*|improv\w*|coordinat\w*|design\w*|build\w*|deliver\w*"
+    r"|migrat\w*|implement\w*|analy\w*|develop\w*|own\w*|driv\w*|partner\w*)\b", re.I)
 
 
 @dataclass
@@ -87,10 +97,15 @@ def rejoin_lines(text: str) -> list:
 
 
 def _heading_kind(line: str):
-    """The section a heading-shaped line opens, 'drop', or None when the line is content."""
-    s = _BULLET.sub("", line).strip().rstrip(":").strip()
-    shaped = s and len(s) <= 60 and len(s.split()) <= 7 and not s.endswith(".")
-    if not shaped and not (line.rstrip().endswith(":") and len(s) <= 80):
+    """The section a heading-shaped line opens, 'drop', or None when the line is content.
+    A bulleted line is always content -- a bullet marks a claim, never a heading."""
+    if _BULLET.match(line):
+        return None
+    raw = line.rstrip()
+    s = raw.rstrip(":").strip()
+    ends_colon = raw.endswith(":") and len(s) <= 80
+    short_label = bool(s) and len(s) <= 60 and len(s.split()) <= 4 and not s.endswith(".") and not _VERBISH.search(s)
+    if not (ends_colon or short_label):
         return None
     if LOGISTICS.search(s) and not re.search(DROP_HEADINGS, s, re.I):
         return None
@@ -107,12 +122,15 @@ def _heading_kind(line: str):
 
 
 def _subheading(line: str) -> bool:
-    """An unrecognized heading-shaped line (a label, not a claim): ends with ':' or is Title Case."""
-    s = _BULLET.sub("", line).strip()
-    if len(s) > 60 or len(s.split()) > 7 or s.endswith("."):
+    """An unrecognized heading-shaped line (a label, not a claim): ends with ':', or is a short
+    (<=4 word), verb-free, Title Case label. A bulleted line is never a subheading -- it is a claim."""
+    if _BULLET.match(line):
         return False
+    s = line.strip()
     if s.endswith(":"):
-        return True
+        return len(s.rstrip(":").strip()) <= 80
+    if len(s) > 60 or len(s.split()) > 4 or s.endswith(".") or _VERBISH.search(s):
+        return False
     words = [w for w in re.findall(r"[A-Za-z][\w'’-]*", s) if w.lower() not in ("and", "or", "of", "the", "a", "an",
                                                                             "to", "for", "in", "on", "with", "&")]
     return bool(words) and all(w[0].isupper() for w in words)
@@ -148,12 +166,24 @@ def _domain_line(text: str) -> bool:
     return bool(re.search(rf"(?<!\d)\d{{1,2}}\+?\s*years?[^.\n]{{0,60}}?(?<![a-z0-9])({alt})(?![a-z0-9])", text, re.I))
 
 
+def _logistics_is_subject(text: str) -> bool:
+    """The logistics term reads as what the line is about, not an aside inside a work line: the
+    line is short, opens with the logistics phrasing, or logistics terms dominate its words."""
+    words = text.split()
+    if len(words) <= 6:
+        return True
+    if LOGISTICS.search(" ".join(words[:3])):
+        return True
+    hits = LOGISTICS.findall(text)
+    return len(hits) >= max(2, len(words) // 6)
+
+
 def classify(text: str) -> tuple:
     """(klass, text): logistics and domain lines keep their text; a years line becomes its skill remainder
     (work) or `level` when nothing is left."""
     if PAY.search(text):
         return "logistics", text
-    if LOGISTICS.search(text) and len(rules.find_terms(["experience", "process", "lead", "manage", "improve"], text)) == 0:
+    if LOGISTICS.search(text) and not WORK_RESCUE.search(text) and _logistics_is_subject(text):
         return "logistics", text
     if _domain_line(text):
         return "domain", text
@@ -181,12 +211,13 @@ def split_requirements(text: str, max_units: int = 0) -> list:
             continue
         if section == "drop" or NOTICE.search(line) or _subheading(line):
             continue
+        bulleted = bool(_BULLET.match(line))   # an itemized bullet is a deliberate claim, even a short one
         for piece in _pieces(_BULLET.sub("", line).strip()):
             piece = piece.strip()
             if not (10 <= len(piece) <= MAX_UNIT + 50):   # short level lines count as level; short work drops below
                 continue
             klass, unit_text = classify(piece)
-            if klass == "work" and len(unit_text) < MIN_UNIT:
+            if klass == "work" and not bulleted and len(unit_text) < MIN_UNIT:
                 continue
             key = unit_text.lower()
             if key in seen:

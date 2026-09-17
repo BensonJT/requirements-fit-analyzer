@@ -439,7 +439,7 @@ def ensure_current(con, manifest: Manifest, encoder, log=print) -> Optional[str]
     stored = stored_version(con, model)
     try:
         units = iter_units(manifest)
-    except Exception as exc:
+    except (OSError, FileNotFoundError, subprocess.CalledProcessError, tomllib.TOMLDecodeError) as exc:
         log(f"Evidence: sources unreadable ({type(exc).__name__}: {exc}); using stored version {stored}")
         return stored
     if evidence_version(units, model) == stored:

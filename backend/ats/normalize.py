@@ -143,15 +143,30 @@ def primary_location(text):
 
 
 # ---------------------------------------------------------------- description
+_BLOCK_TAGS = ("p", "div", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "ul", "ol", "section")
+
+
 def html_to_text(raw):
-    """Plain text from an HTML (possibly double-escaped, as Greenhouse does) blob."""
+    """Plain text from an HTML (possibly double-escaped, as Greenhouse does) blob.
+
+    A block-level tag (p/div/li/br/h1-6/tr/ul/ol/section) ends a line; everything else is
+    inline and only gets a space, or two adjacent inline runs glue together with no
+    separator at all ("<strong>Lean</strong> Six Sigma" was coming out "Lean\\n Six Sigma").
+    <script>/<style> content is dropped instead of being read as text.
+    """
     if not raw:
         return None
     s = str(raw)
     if "<" not in s and "&lt;" in s:
         s = html.unescape(s)
-    text = BeautifulSoup(s, "lxml").get_text("\n")
+    soup = BeautifulSoup(s, "lxml")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    for tag in soup.find_all(_BLOCK_TAGS):
+        tag.insert_after("\n")
+    text = soup.get_text(" ")
     text = re.sub(r"[ \t\xa0]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return text or None
 

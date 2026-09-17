@@ -47,6 +47,23 @@ def test_html_to_text_handles_double_escaped():
     assert N.html_to_text("<ul><li>a</li><li>b</li></ul>") == "a\nb"
 
 
+def test_html_to_text_keeps_inline_tags_from_splitting_a_sentence():
+    """An inline tag (<strong>, <em>, <b>, <span>, ...) must not break a sentence onto its own
+    line -- get_text("\\n") did this for every tag alike, so 'Lean Six Sigma' with the first
+    word bolded came out 'Lean\\n Six Sigma'. Only block-level tags start a new line."""
+    assert N.html_to_text("<p><strong>Lean</strong> Six Sigma</p>") == "Lean Six Sigma"
+    assert N.html_to_text("Own <b>process excellence</b> for the region.") == "Own process excellence for the region."
+
+
+def test_html_to_text_still_breaks_lines_on_block_tags():
+    assert N.html_to_text("<p>First paragraph.</p><p>Second paragraph.</p>") == "First paragraph.\nSecond paragraph."
+    assert N.html_to_text("Line one<br>Line two") == "Line one\nLine two"
+
+
+def test_html_to_text_drops_script_and_style_content():
+    assert N.html_to_text("<p>Visible</p><script>var x = 'not text';</script><style>.a{color:red}</style>") == "Visible"
+
+
 # ---------------------------------------------------------------- store lifecycle
 def _job(req, title="Process Lead", desc=None):
     return N.base(req_id=req, title=title, url=f"https://x/{req}", description_text=desc)
@@ -124,6 +141,53 @@ def test_detail_candidates_since_limits_to_new_postings(tmp_path):
     backlog = store.detail_candidates(con, ["workday"], None, 100, employers=["Acme"])
     assert {r[3] for r in backlog} == {"OLD1", "OLD2", "NEW1"}
     assert store.detail_candidates(con, ["greenhouse"], None, 100, since=run_start) == []
+
+
+def test_apply_detail_counts_attempts_even_on_an_empty_fetch(tmp_path):
+    """A fetch that comes back with no description_text still has to count against the
+    budget, or the same dead posting is retried every run forever."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 14, 8)
+    store.record_board(con, "Acme", "workday", [_job("R1")], now)
+    pid = con.execute("SELECT posting_id FROM postings").fetchone()[0]
+    assert con.execute("SELECT detail_attempts FROM postings WHERE posting_id = ?", [pid]).fetchone()[0] == 0
+    store.apply_detail(con, pid, {"description_text": None}, now)
+    store.apply_detail(con, pid, {"description_text": None}, now)
+    assert con.execute("SELECT detail_attempts FROM postings WHERE posting_id = ?", [pid]).fetchone()[0] == 2
+
+
+def test_record_detail_error_also_counts_against_the_budget(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 14, 8)
+    store.record_board(con, "Acme", "workday", [_job("R1")], now)
+    pid = con.execute("SELECT posting_id FROM postings").fetchone()[0]
+    store.record_detail_error(con, pid, now)
+    assert con.execute("SELECT detail_attempts FROM postings WHERE posting_id = ?", [pid]).fetchone()[0] == 1
+
+
+def test_detail_candidates_excludes_exhausted_postings_unless_retrying(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 14, 8)
+    store.record_board(con, "Acme", "workday", [_job("R1"), _job("R2")], now)
+    rows = {r[0]: r[1] for r in con.execute("SELECT req_id, posting_id FROM postings").fetchall()}
+    for _ in range(store.DETAIL_MAX_ATTEMPTS):
+        store.apply_detail(con, rows["R1"], {"description_text": None}, now)
+
+    cands = store.detail_candidates(con, ["workday"])
+    assert {c[3] for c in cands} == {"R2"}  # R1 aged out after DETAIL_MAX_ATTEMPTS empty tries
+
+    all_cands = store.detail_candidates(con, ["workday"], retry_exhausted=True)
+    assert {c[3] for c in all_cands} == {"R1", "R2"}
+
+
+def test_detail_candidates_prefers_fewest_attempts_first(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 14, 8)
+    store.record_board(con, "Acme", "workday", [_job("R1"), _job("R2")], now)
+    rows = {r[0]: r[1] for r in con.execute("SELECT req_id, posting_id FROM postings").fetchall()}
+    store.apply_detail(con, rows["R1"], {"description_text": None}, now)  # R1 tried once, R2 never
+    cands = store.detail_candidates(con, ["workday"])
+    assert [c[3] for c in cands] == ["R2", "R1"]
 
 
 # ---------------------------------------------------------------- eightfold
@@ -207,6 +271,41 @@ def test_eightfold_union_of_two_orders_and_truncation(monkeypatch):
     monkeypatch.setattr(A, "_eightfold_pages", lambda c, u, h, m: ([A._eightfold_position(h, {"id": 1, "name": "A"})], 5, False))
     got = A.eightfold_jobs(row)
     assert getattr(got, "truncated", False) and len(got) == 1
+
+
+def test_eightfold_pages_truncated_when_tenant_omits_count(monkeypatch):
+    """A tenant that never sends `count` reports total=0 even with a full page of real
+    postings; that must never read as 'the whole (empty) board', or the close-pass
+    closes every live req on it."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    pages = [
+        {"positions": [{"id": i, "name": f"Role {i}"} for i in range(10)]},  # no "count" key
+        {"positions": []},
+    ]
+
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, url, **kw):
+            p = pages[min(self.calls, len(pages) - 1)]
+            self.calls += 1
+            return _Resp(p)
+
+    out, total, truncated = A._eightfold_pages(_Client(), "https://x/api", "https://x", None)
+    assert total == 0 and len(out) == 10 and truncated is True
+
+
+def test_eightfold_pages_empty_board_is_not_truncated(monkeypatch):
+    """A genuinely empty board (total=0, no positions at all) is not a clamp failure."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+
+    class _Client:
+        def request(self, method, url, **kw):
+            return _Resp({"positions": []})
+
+    out, total, truncated = A._eightfold_pages(_Client(), "https://x/api", "https://x", None)
+    assert out == [] and total == 0 and truncated is False
 
 
 # ---------------------------------------------------------------- paylocity
@@ -560,3 +659,39 @@ def test_partition_forgives_a_shortfall_no_larger_than_the_measured_churn(monkey
 def test_drift_does_not_excuse_a_gap_bigger_than_itself(monkeypatch):
     jobs = _partition_board(monkeypatch, [2394, 2396], {"a": 1500, "b": 850})
     assert len(jobs) == 2350 and jobs.truncated is True
+
+
+# --- Live clamp check on every pull, independent of a stored board_scope --------------------------
+
+def test_workday_pull_flags_a_live_clamp_even_under_a_plain_scope(monkeypatch):
+    """A board discovered under 2,000 (stored scope 'plain'/'country') can grow past the ceiling
+    later. `_workday_pull` must catch that on the first page of every pull, not just when the
+    board has never been scoped before."""
+    from backend.ats import adapters
+    monkeypatch.setattr(adapters, "PAGE_DELAY", 0)
+    payload = {"total": 2000, "jobPostings": [],
+               "facets": [{"facetParameter": "timeType", "values": [{"count": 2600}]}]}
+
+    class _OneShotClient:
+        def request(self, method, url, **kw):
+            return _Resp(payload)
+
+    out, truncated = adapters._workday_pull(_OneShotClient(), "u", "https://public", {}, None)
+    assert out == [] and truncated is True
+
+
+def test_workday_pull_stops_when_workday_repeats_page_one(monkeypatch):
+    """Workday answers an out-of-range offset with page 1 rather than an empty page, so a board
+    with no trustworthy `total` (0 or missing) needs its own stop condition."""
+    from backend.ats import adapters
+    monkeypatch.setattr(adapters, "PAGE_DELAY", 0)
+    page = {"total": 0, "jobPostings": [{"bulletFields": [f"R{i}"], "title": f"T{i}", "externalPath": f"/{i}"}
+                                        for i in range(20)],
+            "facets": []}
+
+    class _RepeatClient:
+        def request(self, method, url, **kw):
+            return _Resp(page)
+
+    out, truncated = adapters._workday_pull(_RepeatClient(), "u", "https://public", {}, None)
+    assert len(out) == 20 and truncated is True  # only page 1's postings kept, loop didn't spin forever

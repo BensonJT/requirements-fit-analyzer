@@ -27,8 +27,8 @@ ROW_COLUMNS = ("posting_id", "employer", "platform", "req_id", "title", "url", "
 # New, JD changed since the last screen, or screened under another rules/model version.
 RESCREEN_SQL = """
 SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
-WHERE p.status = 'active' AND (s.posting_id IS NULL OR s.rules_version != ? OR s.model_version != ?
-      OR s.screened_at < p.description_fetched_at)"""
+WHERE p.status = 'active' AND (s.posting_id IS NULL OR s.rules_version IS DISTINCT FROM ?
+      OR s.model_version IS DISTINCT FROM ? OR s.screened_at < p.description_fetched_at)"""
 
 
 def _now():
@@ -247,7 +247,7 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
         lens_probs = lens_scores(lens_models, rows)
         none_col = [None] * len(rows)
         for i, (row, fit_prob, top) in enumerate(zip(rows, probs, terms)):
-            rec = rules.screen_row(row, rv)
+            rec = rules.screen_row(row)
             apply_content_gate(rec, fit_prob)
             final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
                                   rejected=rec.verdict == "reject", flags=penalized_flags(rec.flags))

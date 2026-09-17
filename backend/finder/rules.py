@@ -92,8 +92,10 @@ def required_block(text: str) -> str:
 
 
 # ---------------------------------------------------------------- JD rules
-_PCT = r"(?<!\d)(\d{1,2})\s*%"
-_SPAN = re.compile(r"(?<!\d)(\d{1,2})\s*%?\s*(?:-|–|—|to)\s*(\d{1,2})\s*%")
+# \d{1,3} so "100%" matches too; the <= 100 guard on the parsed value keeps a stray "250%" typo
+# (or an unrelated three-digit number caught in the travel window) from being read as a percentage.
+_PCT = r"(?<!\d)(\d{1,3})\s*%"
+_SPAN = re.compile(r"(?<!\d)(\d{1,3})\s*%?\s*(?:-|–|—|to)\s*(\d{1,3})\s*%")
 _SINGLE = re.compile(_PCT)
 
 
@@ -108,11 +110,12 @@ def travel_rule(title: str, text: str) -> RuleResult:
         span = _SPAN.search(window)
         if span:
             a, b = int(span.group(1)), int(span.group(2))
-            if worst_span is None or b > worst_span[1]:
+            if a <= 100 and b <= 100 and (worst_span is None or b > worst_span[1]):
                 worst_span = (a, b)
             continue
         for n in (int(x) for x in _SINGLE.findall(window)):
-            worst_single = n if worst_single is None else max(worst_single, n)
+            if n <= 100:
+                worst_single = n if worst_single is None else max(worst_single, n)
     reasons, flags, notes = [], [], {}
     if worst_span:
         a, b = worst_span
@@ -131,7 +134,13 @@ def travel_rule(title: str, text: str) -> RuleResult:
     return reasons, flags, notes
 
 
-_REPORTS = re.compile(r"(?<!\d)(\d{1,3})\+?\s*(?:direct[- ]reports|people managers?)|(?:team|staff) of\s*(\d{1,3})(?!\d)", re.I)
+# Only an explicit direct-report phrase can reject: "12 direct reports", "5 people managers",
+# "manage 8 reports". "team of N" / "staff of N" / "organization of N" is program or org headcount
+# (CACI's "team of 250+ professionals", "lead a team of 12 analysts") and never rejects on its own --
+# see the flag-only branch below.
+_REPORTS = re.compile(r"(?<!\d)(\d{1,3})\+?\s*(?:direct[- ]reports?|people managers?)"
+                      r"|manage\s*(\d{1,3})\+?\s*(?:direct[- ])?reports?", re.I)
+_TEAM_SIZE = re.compile(r"(?:team|staff|organization|org)\s+of\s*(\d{1,3})(?!\d)", re.I)
 
 
 def direct_reports_rule(title: str, text: str) -> RuleResult:
@@ -141,12 +150,18 @@ def direct_reports_rule(title: str, text: str) -> RuleResult:
         return [], [], {}
     reasons, flags, notes = [], [], {}
     counts = [int(a or b) for a, b in _REPORTS.findall(text)]
+    team_counts = [int(n) for n in _TEAM_SIZE.findall(text)]
     if counts:
         n = max(counts)
         notes["reports"] = n
         if n > 2 * limit:
             reasons.append(f"large team ({n} direct reports)")
         elif n > limit:
+            flags.append(f"team of {n} (limit {limit})")
+    if team_counts:
+        n = max(team_counts)
+        notes["reports"] = max(notes.get("reports", 0), n)
+        if n > limit:
             flags.append(f"team of {n} (limit {limit})")
     markers = find_terms(P.LARGE_TEAM_MARKERS, text)
     if markers:
@@ -451,7 +466,7 @@ def profile_score(components: dict) -> int:
     return int(sum(weights[k] * components[k] for k in weights) / sum(weights.values()) + 0.5)
 
 
-def screen_row(row: dict, rv: Optional[str] = None) -> ScreenRecord:
+def screen_row(row: dict) -> ScreenRecord:
     """Card-level screen + JD rules + tier + profile score for one postings row.
     rule_score is the profile score (level, location, pay, title on 0-100); content fit is blended in the pipeline."""
     title = row.get("title") or ""

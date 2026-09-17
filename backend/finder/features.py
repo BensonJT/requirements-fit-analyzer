@@ -35,6 +35,10 @@ from backend.screen import company_keys, company_matches, norm_company, similar_
 from .labels import strip_boilerplate
 
 MODEL_DIR = os.path.join(os.path.dirname(store.DEFAULT_DB_PATH), "models")
+# Mirrors store.DEFAULT_DB_PATH's own derivation (three dirname calls off this file, same nesting depth as
+# backend/ats/store.py) so a `models.path` row can be stored relative to it and stay portable across machines --
+# an absolute path baked in from a deleted drive (e.g. /mnt/e/code/jobsearch/...) is exactly the bug this fixes.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOW_DATA_MIN = 150          # positives or pseudo-negatives with text below this = low-data warning
 LOW_DATA_FIT_WEIGHT = 0.15  # pipeline.combine weight for `fit` under the warning
 FEATURE_VERSION = "4"       # bump when doc_text / vectorizer settings change (part of model_version)
@@ -185,13 +189,13 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     weights = [float(r["weight"] or 1.0) for r in rows]
     # Each vault positive with a matched posting is also trained on as that posting's career-site text, so the
     # positives come from career sites too and "looks like a career-site page" stops meaning "not a fit".
-    groups, pairs = list(range(n_jobs)), {}
+    groups, pairs = _text_group_ids(rows), {}
     for i, copy in _career_site_copies(con, rows).items():
         pairs[i] = len(texts)
         texts.append(copy)
         y.append(y[i])
         weights.append(weights[i])
-        groups.append(i)
+        groups.append(groups[i])   # the copy stays in its vault row's group, whatever id that group already has
     params = {"C": C, "min_df": min_df, "max_df": max_df, "ngram": list(ngram), "max_features": max_features, "cv": cv,
               "lens": lens or "overall",
               "seed": seed, "features": FEATURE_VERSION, "copies": len(pairs), "stop_words": hashlib.sha1(
@@ -211,9 +215,13 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
                          seed=seed, max_df=max_df, groups=groups)
     oof = np.asarray(cvr["oof"])
     y_arr = np.asarray(y)
-    pred = (oof >= 0.5).astype(int)
-    confusion = {"tp": int(((pred == 1) & (y_arr == 1)).sum()), "fp": int(((pred == 1) & (y_arr == 0)).sum()),
-                 "fn": int(((pred == 0) & (y_arr == 1)).sum()), "tn": int(((pred == 0) & (y_arr == 0)).sum())}
+    # Career-site copies (appended above, index >= n_jobs) are extra training signal for the SAME job as an
+    # earlier row; a metric meant to read as "one row per job" -- confusion, oof AUC, held-out fit means --
+    # must be computed on the first n_jobs rows only, or it silently double-counts those jobs.
+    oof_jobs, y_jobs = oof[:n_jobs], y_arr[:n_jobs]
+    pred = (oof_jobs >= 0.5).astype(int)
+    confusion = {"tp": int(((pred == 1) & (y_jobs == 1)).sum()), "fp": int(((pred == 1) & (y_jobs == 0)).sum()),
+                 "fn": int(((pred == 0) & (y_jobs == 1)).sum()), "tn": int(((pred == 0) & (y_jobs == 0)).sum())}
 
     vec, clf = _pipeline_parts(C, min_df, ngram, max_features, max_df)
     clf.fit(vec.fit_transform(texts), y_arr, sample_weight=np.asarray(weights))
@@ -223,23 +231,28 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{version}.joblib")
     joblib.dump(model, path)
+    # Store the path relative to the repo root, not absolute: an absolute path baked in from a machine/drive that
+    # later disappears (the deleted /mnt/e checkout) is unrecoverable, while a relative one just needs REPO_ROOT
+    # (load_latest resolves it back to the same absolute path via os.path.join, so this is a no-op for callers).
+    stored_path = os.path.relpath(path, REPO_ROOT)
     kind = f"tfidf_lr_{lens}" if lens else "tfidf_lr"
     con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, "
                 "cv_precision_at_20, path, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [version, kind, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], path, json.dumps(notes)])
+                [version, kind, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], stored_path,
+                 json.dumps(notes)])
 
     in_sample = clf.predict_proba(vec.transform(texts[:n_jobs]))[:, 1]
     source_gap = _source_gap(con, rows, oof, pairs)
     result = {
         "model_version": version, "path": path, "n_pos": n_pos, "n_neg": n_neg,
-        "cv_auc": cvr["auc"], "cv_precision_at_20": cvr["precision_at_20"], "oof_auc": _auc(y, oof),
+        "cv_auc": cvr["auc"], "cv_precision_at_20": cvr["precision_at_20"], "oof_auc": _auc(y_jobs, oof_jobs),
         "source_gap": source_gap, "coefficients": _extreme_terms(vec, clf),
-        "confusion_at_0_5": confusion, "pos_mean_fit_oof": float(oof[y_arr == 1].mean()),
-        "pos_mean_fit_in_sample": float(in_sample[y_arr[:n_jobs] == 1].mean()),
-        "neg_mean_fit_oof": float(oof[y_arr == 0].mean()), "warnings": warnings, "fit_weight": fit_weight,
+        "confusion_at_0_5": confusion, "pos_mean_fit_oof": float(oof_jobs[y_jobs == 1].mean()),
+        "pos_mean_fit_in_sample": float(in_sample[y_jobs == 1].mean()),
+        "neg_mean_fit_oof": float(oof_jobs[y_jobs == 0].mean()), "warnings": warnings, "fit_weight": fit_weight,
         "rows": rows, "oof": cvr["oof"], "n_by_source": dict(Counter(r["source"] for r in rows)),
-        "grades": grade_report(rows, oof[:n_jobs]),
-        "grades_graded_only": grade_report(rows, oof[:n_jobs], positives_from="graded"),
+        "grades": grade_report(rows, oof_jobs),
+        "grades_graded_only": grade_report(rows, oof_jobs, positives_from="graded"),
     }
     log(f"Model {version}: {n_pos} pos / {n_neg} pseudo-neg · {cv}-fold AUC {_fmt(cvr['auc'])} · precision@20 "
         f"{_fmt(cvr['precision_at_20'])} · positives mean fit {result['pos_mean_fit_oof']:.2f} held-out / "
@@ -256,6 +269,19 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
             f"{_fmt(result['grades_graded_only'].get('auc_vs_wrong'))} / "
             f"{_fmt(result['grades_graded_only'].get('auc_vs_stretch'))})")
     return result
+
+
+def _text_group_ids(rows: list) -> list:
+    """Stable group id per row, from a sha1 of its normalized `text`: identical-text rows -- a repost sharing a
+    description_hash, or a judge `dup:` copy of a vault row -- get the same id and so can never split across
+    CV folds. `range(n_jobs)` groups (the old behaviour) let two rows of the same JD land in different folds,
+    which is leakage: the model gets test-set credit for having memorized text it also saw in training."""
+    seen: dict = {}
+    ids = []
+    for r in rows:
+        key = hashlib.sha1((r["text"] or "").strip().lower().encode("utf-8")).hexdigest()
+        ids.append(seen.setdefault(key, len(seen)))
+    return ids
 
 
 def _career_site_copies(con, rows: list) -> dict:
@@ -339,19 +365,40 @@ def latest_row(con, lens=None) -> Optional[tuple]:
                        "ORDER BY trained_at DESC LIMIT 1", [kind]).fetchone()
 
 
-def load_latest(con, lens=None, log=print) -> Optional[dict]:
+def _resolve_model_path(path: str, model_dir: Optional[str] = None) -> Optional[str]:
+    """The stored `models.path` resolved to a real file, or None.
+
+    A relative path is joined against REPO_ROOT (the portable form `train` now writes). Failing that -- an
+    absolute path from another machine/drive (e.g. the deleted /mnt/e checkout), or any path whose file has
+    since moved -- falls back to the file's basename inside MODEL_DIR and, if given, `model_dir`, since the
+    joblib itself is what matters and it is always named `<version>.joblib`."""
+    if not path:
+        return None
+    candidates = [path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)]
+    base = os.path.basename(path)
+    candidates.append(os.path.join(MODEL_DIR, base))
+    if model_dir:
+        candidates.append(os.path.join(model_dir, base))
+    return next((c for c in candidates if os.path.exists(c)), None)
+
+
+def load_latest(con, lens=None, log=print, model_dir: Optional[str] = None) -> Optional[dict]:
     """The newest trained model for `lens` (None = the averaged-grade model), or None when none exists,
-    its file is gone, or scikit-learn is missing."""
+    its file is gone, or scikit-learn is missing.
+
+    `model_dir` is an extra fallback location to check by basename (see `_resolve_model_path`) -- useful when a
+    non-default `train(..., model_dir=...)` was used and the DB row's path no longer resolves as-is."""
     row = latest_row(con, lens=lens)
     if not row:
         return None
     version, path, _ = row
-    if not path or not os.path.exists(path):
+    resolved = _resolve_model_path(path, model_dir)
+    if not resolved:
         log(f"Model {version}: file {path} missing; rules only.")
         return None
     try:
         import joblib
-        model = joblib.load(path)
+        model = joblib.load(resolved)
     except ImportError:
         log(f"Model {version} exists but scikit-learn/joblib is not installed; rules only.")
         return None
@@ -363,12 +410,12 @@ LENSES = ("process", "technical")
 # `lens_standout_p()` macros next to the view that reads them (backend/ats/store.py).
 
 
-def load_lens_models(con, log=print) -> dict:
+def load_lens_models(con, log=print, model_dir: Optional[str] = None) -> dict:
     """{lens: model} for every lens that has a trained model on disk. Missing lenses are simply absent, so
     the screen runs unchanged on a database that never trained them."""
     out = {}
     for lens in LENSES:
-        model = load_latest(con, lens=lens, log=log)
+        model = load_latest(con, lens=lens, log=log, model_dir=model_dir)
         if model is not None:
             out[lens] = model
     return out
@@ -406,16 +453,18 @@ def top_terms(model: dict, text: str, k: int = 6) -> list:
 
 def signal_report(con, result: dict) -> list:
     """(signal, auc_all, auc_non_pseudo, n_all, n_non_pseudo) for rule_score, fit_prob (held-out), embed_sim
-    and the blend, over training rows whose posting has a screen."""
-    from .pipeline import combine
+    and the blend, over training rows whose posting has a screen.
+
+    `blend` is read straight from `vw_screen_latest.final_score` -- the score the pipeline actually stored --
+    rather than recomputed via `pipeline.combine()` here. Recomputing it needs the exact `flags`/`llm_score`
+    the original screen used (`combine(..., rejected=...)` alone drops the penalty flags and re-derives a
+    number that was never the one shown anywhere), so reading it back is both simpler and correct."""
     screens = {r[0]: r[1:] for r in con.execute(
-        "SELECT posting_id, rule_score, tier, verdict, embed_sim FROM vw_screen_latest").fetchall()}
-    calib = {"fit_weight": result.get("fit_weight")}
+        "SELECT posting_id, rule_score, embed_sim, final_score FROM vw_screen_latest").fetchall()}
     table = []
     for r, fit in zip(result["rows"], result["oof"]):
         if r["posting_id"] in screens:
-            rule_score, tier, verdict, embed_sim = screens[r["posting_id"]]
-            blend = combine(rule_score, fit, embed_sim, None, calib, tier=tier, rejected=verdict == "reject")[0]
+            rule_score, embed_sim, blend = screens[r["posting_id"]]
             table.append((r["source"] != "pseudo_neg", r["label"], rule_score, fit, embed_sim, blend))
     out = []
     for name, col in (("rule_score", 2), ("fit_prob", 3), ("embed_sim", 4), ("blend", 5)):

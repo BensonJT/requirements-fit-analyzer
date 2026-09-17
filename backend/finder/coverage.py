@@ -228,16 +228,38 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def current_calibration(con) -> dict:
-    """Newest `models` row of kind 'coverage' (thresholds in notes JSON), else the defaults."""
-    row = con.execute("SELECT model_version, notes FROM models WHERE kind = 'coverage' "
-                      "ORDER BY trained_at DESC LIMIT 1").fetchone()
-    calib = {"version": "default", "strong": DEFAULT_STRONG, "partial": DEFAULT_PARTIAL, "reject": None,
-             "review": None, "blend": None}
-    if row:
-        calib.update(json.loads(row[1] or "{}"))
-        calib["version"] = row[0]
-    return calib
+def current_calibration(con, *, encoder: Optional[str] = None, reranker: Optional[str] = None,
+                        req_context: Optional[str] = None, log=print) -> Optional[dict]:
+    """Newest `models` row of kind 'coverage' whose notes' encoder/reranker/req_context match the running
+    config (thresholds in notes JSON). A threshold set tuned under a different encoder or reranker would be
+    applied to cosines/reranker probabilities it was never calibrated against -- comparing 0.72 against a
+    reranker's 0-1 probability, say. With no config given (encoder, reranker and req_context all None -- an
+    ad hoc lookup, not a scoring run), returns the newest row regardless of what it was tuned on.
+
+    Returns the default (uncalibrated) dict when no calibration row exists at all. Returns None when
+    calibrations exist but none matches the given config -- `cover()` treats that the same as uncalibrated."""
+    default = {"version": "default", "strong": DEFAULT_STRONG, "partial": DEFAULT_PARTIAL, "reject": None,
+               "review": None, "blend": None}
+    rows = con.execute("SELECT model_version, notes FROM models WHERE kind = 'coverage' "
+                       "ORDER BY trained_at DESC").fetchall()
+    if not rows:
+        return default
+    if encoder is None and reranker is None and req_context is None:
+        calib = dict(default)
+        calib.update(json.loads(rows[0][1] or "{}"))
+        calib["version"] = rows[0][0]
+        return calib
+    for version, notes_json in rows:
+        notes = json.loads(notes_json or "{}")
+        if notes.get("encoder") == encoder and notes.get("reranker") == reranker and notes.get("req_context") == req_context:
+            calib = dict(default)
+            calib.update(notes)
+            calib["version"] = version
+            return calib
+    log(f"  no calibration matches the running config (encoder={encoder!r}, reranker={reranker!r}, "
+        f"req_context={req_context!r}) among {len(rows)} stored calibration(s); coverage will store with no "
+        f"verdict thresholds")
+    return None
 
 
 def survivor_ids(con, *, evidence_version: Optional[str] = None, model: Optional[str] = None,
@@ -444,7 +466,14 @@ def cover(con, manifest, encoder, *, posting_ids: Optional[list] = None, all_row
     ev_version = E.stored_version(con, model)
     if not ev_units:
         raise RuntimeError("no evidence units stored; run `finder.py evidence --rebuild` first")
-    calib = current_calibration(con)
+    # `cover()` never runs a reranker (that's a calibrate()-only experiment), so the running config here is
+    # just the encoder and the JOBSEARCH_REQ_CONTEXT mode; a calibration tuned under a different one would
+    # apply its strong/partial cosine thresholds to a space they were never measured against.
+    calib = current_calibration(con, encoder=getattr(encoder, "name", model), reranker=None,
+                                req_context=req_context() or None, log=log)
+    if calib is None:
+        calib = {"version": "default", "strong": DEFAULT_STRONG, "partial": DEFAULT_PARTIAL, "reject": None,
+                 "review": None, "blend": None}
     if posting_ids is None:
         posting_ids = survivor_ids(con, since=since, limit=limit) if all_rows else survivor_ids(
             con, evidence_version=ev_version, model=model, calibration=calib["version"], since=since, limit=limit)
@@ -511,13 +540,18 @@ def refresh_hard_negatives(con, hard_top: int = 200, judged_top: int = JUDGED_TO
       model's own confident mistakes, still useful for the rows nobody has graded.
     """
     now = _now()
-    audit = [a for a in (P.AUDIT_NEGATIVES or []) if re.fullmatch(r"[0-9a-f]{20}", str(a))]
-    unknown = [a for a in (P.AUDIT_NEGATIVES or []) if a not in audit]
+    # `stretch` postings are the judge's confusable-but-not-wrong band, held out as its own evaluation set
+    # (see aucs_stretch below) -- they never belong in fit_top or audit, which are meant to be clear negatives.
+    stretch_ids = {r[0] for r in con.execute(
+        "SELECT posting_id FROM vw_llm_labels_latest WHERE grade = 'stretch'").fetchall()}
+    audit = [a for a in (P.AUDIT_NEGATIVES or []) if re.fullmatch(r"[0-9a-f]{20}", str(a)) and a not in stretch_ids]
+    unknown = [a for a in (P.AUDIT_NEGATIVES or []) if a not in audit and a not in stretch_ids]
     top = con.execute("""
         SELECT s.posting_id, s.fit_prob FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND p.description_text IS NOT NULL AND s.fit_prob IS NOT NULL AND s.tier IS NULL
           AND s.posting_id NOT IN (SELECT posting_id FROM label_docs WHERE posting_id IS NOT NULL AND label = 1)
           AND s.posting_id NOT IN (SELECT posting_id FROM decisions)
+          AND s.posting_id NOT IN (SELECT posting_id FROM vw_llm_labels_latest WHERE grade = 'stretch')
         ORDER BY s.fit_prob DESC, s.posting_id LIMIT ?""", [int(hard_top) + len(audit)]).fetchall()
     top = [(pid, fit) for pid, fit in top if pid not in audit][:int(hard_top)]
     judged = con.execute("""
@@ -596,7 +630,8 @@ def _prepare(res: dict) -> dict:
 
 def _oof_fit(con, log=print) -> dict:
     """label_id -> held-out fit_prob, cross-validated with the newest model's parameters (in-sample fit would flatter
-    the fit model against coverage)."""
+    the fit model against coverage). Grouped by normalized text, same as features.cross_validate, so a JD posted
+    twice (or a vault/career-site copy of one) can't sit in both the train and test fold of a split."""
     from . import features
     model = features.load_latest(con, log=log)
     if model is None:
@@ -604,9 +639,11 @@ def _oof_fit(con, log=print) -> dict:
     prm = model["params"]
     rows = features.training_set(con)
     texts = [features.doc_text(r["title"], r["text"], r["company"]) for r in rows]
+    groups = [hashlib.sha1((r["text"] or "").strip().lower().encode("utf-8")).hexdigest() for r in rows]
     cvr = features.cross_validate(texts, [int(r["label"]) for r in rows], [float(r["weight"] or 1) for r in rows],
                                   C=prm["C"], min_df=prm["min_df"], ngram=tuple(prm["ngram"]),
-                                  max_features=prm["max_features"], cv=prm["cv"], seed=prm["seed"], max_df=prm["max_df"])
+                                  max_features=prm["max_features"], cv=prm["cv"], seed=prm["seed"], max_df=prm["max_df"],
+                                  groups=groups)
     return {r["label_id"]: p for r, p in zip(rows, cvr["oof"])}
 
 
@@ -724,6 +761,13 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
                          round(float(strong), 2), round(float(partial), 2)))
     grid.sort(reverse=True)
     best_auc, strong, partial = grid[0]
+    partial_grid = list(np.arange(p_lo, strong - step + 0.001, step))
+    if strongs.size and (abs(strong - float(strongs[0])) < 1e-9 or abs(strong - float(strongs[-1])) < 1e-9):
+        log(f"  WARNING: grid search picked COVER_STRONG={strong} at the edge of its search grid "
+            f"({strongs[0]:.2f}-{strongs[-1]:.2f}); widen the grid before trusting this threshold")
+    if partial_grid and (abs(partial - float(partial_grid[0])) < 1e-9 or abs(partial - float(partial_grid[-1])) < 1e-9):
+        log(f"  WARNING: grid search picked COVER_PARTIAL={partial} at the edge of its search grid "
+            f"({partial_grid[0]:.2f}-{partial_grid[-1]:.2f}); widen the grid before trusting this threshold")
     pos_s = _grid_scores(pos_docs, strong, partial, avail)
     hard_s = _grid_scores(hard_docs, strong, partial, avail)
     pseudo_s = _grid_scores(pseudo_docs, strong, partial, avail)
@@ -745,27 +789,46 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
             return cov
         return 100 * fit if cov is None else w * cov + (1 - w) * 100 * fit
 
-    aucs = {"coverage_required": _auc_np([s["required"] for s in pos_s], [s["required"] for s in hard_s]),
-            "coverage_role": _auc_np([s["role"] for s in pos_s], [s["role"] for s in hard_s]),
-            "coverage_gated": best_auc, "fit_heldout": _auc_np(pos_fit, hard_fit)}
+    # Every AUC in this report is computed on the SAME row set: a posting needs >= MIN_WORK work units for
+    # `primary` coverage to exist at all, so fit_heldout/blend_* (which are otherwise defined for every row)
+    # are cut down to the rows coverage can actually score -- comparing them to coverage_required/coverage_gated
+    # on a bigger, easier row set made the AUCs look more different than they were.
+    valid_pos = [i for i, s in enumerate(pos_s) if s["primary"] is not None]
+    valid_hard = [i for i, s in enumerate(hard_s) if s["primary"] is not None]
+    pos_s_v, pos_fit_v = [pos_s[i] for i in valid_pos], [pos_fit[i] for i in valid_pos]
+    hard_s_v, hard_fit_v = [hard_s[i] for i in valid_hard], [hard_fit[i] for i in valid_hard]
+    n_rows = {"pos": len(valid_pos), "hard": len(valid_hard)}
+
+    aucs = {"coverage_required": _auc_np([s["required"] for s in pos_s_v], [s["required"] for s in hard_s_v]),
+            "coverage_role": _auc_np([s["role"] for s in pos_s_v], [s["role"] for s in hard_s_v]),
+            "coverage_gated": _auc_np([s["primary"] for s in pos_s_v], [s["primary"] for s in hard_s_v]),
+            "fit_heldout": _auc_np(pos_fit_v, hard_fit_v), "n_rows": n_rows}
     for w in BLEND_GRID:
-        aucs[f"blend_{w}"] = _auc_np([blend(s["primary"], f, w) for s, f in zip(pos_s, pos_fit)],
-                                     [blend(s["primary"], f, w) for s, f in zip(hard_s, hard_fit)])
+        aucs[f"blend_{w}"] = _auc_np([blend(s["primary"], f, w) for s, f in zip(pos_s_v, pos_fit_v)],
+                                     [blend(s["primary"], f, w) for s, f in zip(hard_s_v, hard_fit_v)])
     best_blend = max(BLEND_GRID, key=lambda w: aucs[f"blend_{w}"] or 0)
     pseudo_auc = _auc_np(pos_primary, [s["primary"] for s in pseudo_s])
     stretch_s = _grid_scores(stretch_docs, strong, partial, avail)
     stretch_fit = [oof.get(r["label_id"], screen_fit.get(r["posting_id"])) for r in stretch_rows]
+    valid_stretch = [i for i, s in enumerate(stretch_s) if s["primary"] is not None]
+    stretch_s_v = [stretch_s[i] for i in valid_stretch]
+    stretch_fit_v = [stretch_fit[i] for i in valid_stretch]
+    hard_pos_of = {orig: new for new, orig in enumerate(valid_hard)}   # original `hard` index -> position in *_v
     judged = [i for i, h in enumerate(hard) if h[1] == "judged_wrong"]
-    aucs_judged = {"coverage_gated": _auc_np([s["primary"] for s in pos_s], [hard_s[i]["primary"] for i in judged]),
-                   "fit_heldout": _auc_np(pos_fit, [hard_fit[i] for i in judged]),
-                   f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s, pos_fit)],
-                                                  [blend(hard_s[i]["primary"], hard_fit[i], best_blend) for i in judged])}
-    aucs_stretch = {"coverage_required": _auc_np([s["required"] for s in pos_s], [s["required"] for s in stretch_s]),
-                    "coverage_gated": _auc_np([s["primary"] for s in pos_s], [s["primary"] for s in stretch_s]),
-                    "fit_heldout": _auc_np(pos_fit, stretch_fit),
-                    f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s, pos_fit)],
+    judged_v = [hard_pos_of[i] for i in judged if i in hard_pos_of]
+    aucs_judged = {"coverage_gated": _auc_np([s["primary"] for s in pos_s_v], [hard_s_v[i]["primary"] for i in judged_v]),
+                   "fit_heldout": _auc_np(pos_fit_v, [hard_fit_v[i] for i in judged_v]),
+                   f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s_v, pos_fit_v)],
+                                                  [blend(hard_s_v[i]["primary"], hard_fit_v[i], best_blend)
+                                                   for i in judged_v]),
+                   "n_rows": {"pos": len(pos_s_v), "hard": len(judged_v)}}
+    aucs_stretch = {"coverage_required": _auc_np([s["required"] for s in pos_s_v], [s["required"] for s in stretch_s_v]),
+                    "coverage_gated": _auc_np([s["primary"] for s in pos_s_v], [s["primary"] for s in stretch_s_v]),
+                    "fit_heldout": _auc_np(pos_fit_v, stretch_fit_v),
+                    f"blend_{best_blend}": _auc_np([blend(s["primary"], f, best_blend) for s, f in zip(pos_s_v, pos_fit_v)],
                                                    [blend(s["primary"], f, best_blend)
-                                                    for s, f in zip(stretch_s, stretch_fit)])}
+                                                    for s, f in zip(stretch_s_v, stretch_fit_v)]),
+                    "n_rows": {"pos": len(pos_s_v), "stretch": len(stretch_s_v)}}
     paired = [(pos_s[i]["primary"], _grid_scores([d], strong, partial, avail)[0]["primary"]) for i, d in pairs]
     paired = [(a, b) for a, b in paired if a is not None and b is not None]
     gap = float(np.mean([b - a for a, b in paired])) if paired else None
@@ -782,13 +845,15 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
                 "VALUES (?, 'coverage', ?, ?, ?, ?, ?)", [version, _now(), len(pos_docs), len(hard_docs), best_auc,
                                                          json.dumps(notes, default=str)])
     fmt = lambda x: "n/a" if x is None else f"{x:.3f}"  # noqa: E731
+    fmt_aucs = lambda d: " · ".join(f"{k} {fmt(v)}" for k, v in d.items() if k != "n_rows")  # noqa: E731
     log(f"Calibration {version} ({time.monotonic() - t0:.0f}s): COVER_STRONG {strong} · COVER_PARTIAL {partial} · "
         f"COVERAGE_REJECT {fmt(reject)} · COVERAGE_REVIEW {fmt(review)}")
-    log("  AUC positives vs hard negatives: " + " · ".join(f"{k} {fmt(v)}" for k, v in aucs.items()))
-    log(f"  AUC positives vs judge-confirmed wrong only (n={len(judged)}; fit_top rows are chosen FOR high fit): "
-        + " · ".join(f"{k} {fmt(v)}" for k, v in aucs_judged.items()))
-    log(f"  AUC positives vs stretch (n={len(stretch_docs)}): "
-        + " · ".join(f"{k} {fmt(v)}" for k, v in aucs_stretch.items()))
+    log(f"  AUC positives vs hard negatives (rows scored: {n_rows['pos']} pos / {n_rows['hard']} hard -- every "
+        f"AUC below shares this row set): " + fmt_aucs(aucs))
+    log(f"  AUC positives vs judge-confirmed wrong only (rows: {aucs_judged['n_rows']['pos']} pos / "
+        f"{aucs_judged['n_rows']['hard']} hard; fit_top rows are chosen FOR high fit): " + fmt_aucs(aucs_judged))
+    log(f"  AUC positives vs stretch (rows: {aucs_stretch['n_rows']['pos']} pos / "
+        f"{aucs_stretch['n_rows']['stretch']} stretch): " + fmt_aucs(aucs_stretch))
     log(f"  best blend weight {best_blend} · sanity AUC positives vs pseudo-negatives {fmt(pseudo_auc)}")
     log(f"  medians: positives {fmt(notes['positive_median'])} · hard negatives {fmt(notes['hard_negative_median'])}")
     log(f"  paired gap (vault copy minus career-site copy, n={len(paired)}): {fmt(gap)} points")

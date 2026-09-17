@@ -141,6 +141,7 @@ def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PAT
                     store.close_posting(con, pid, now)
                     closed += 1
                 else:
+                    store.record_detail_error(con, pid, now)  # ages out after DETAIL_MAX_ATTEMPTS
                     errors += 1
             con.execute("COMMIT")
             b = per_board.setdefault(key, [0, len(groups[key])])

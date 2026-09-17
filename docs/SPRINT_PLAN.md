@@ -728,14 +728,21 @@ a posting is never made non-remote by a missing tag. Add the CACI / Blue Yonder 
    partition scopes keep them out of the pull; scored foreign rows already in the corpus stay for their labels.
 3. `rescreen-all`, then the coverage re-baseline on the fixed splitter.
 4. Only then Phase 4: Gemma sees a capped daily subset (in_range rows clearing a lens standout bar), and the Keystone
-   job application skill sees the top five to ten by Gemma's read plus the user's hand picks. Both caps live in
-   `profile_local` next to the pay floor, not in code.
+   job application skill sees the top rows by Gemma's read plus the user's hand picks. Both caps live in
+   `profile_local` next to the pay floor, not in code. **Starting values (user, 2026-09-17): Gemma cap 100 per day,
+   application-skill cap 10.** Verified 2026-09-17 on the Gemini API pricing page (updated 2026-09-16): Gemma 4 is
+   "free of charge" for input and output and its paid tier is "not available", so a billing-enabled key cannot be
+   charged for Gemma; the rate-limit page lists no Gemma row, so the build sets `GEMINI_RPM` / `GEMINI_TPM` /
+   `GEMINI_DAILY_CAP` from a live probe, and a 429 is a refusal, never a charge. Estimated ~15–30 s per screening
+   call, so 100 rows is a 30–50 minute nightly run.
 
 ### 20.5 The golden source (`Report_Feedback_20260916.xlsx`) — help wanted (user, 2026-09-17)
 The user has confirmed 41 of 232 rows and cannot read 200 JDs by hand. After the level rule exists: re-export the sheet
 with the rule's `level_fit`, the judge's two lens grades and the AI lens grade beside the human columns, and a
 `needs_you` flag on rows where any two of {rule, Opus review, judge, user} disagree by more than one step or where
 confidence is low. The user grades only the flagged rows. Rows the user never grades stay unconfirmed and never train.
+**Timing (user):** the user works the golden source after today's applications; do not run a Sonnet JD-read pass on the
+unconfirmed rows ahead of the level rule and the AI lens — one grading pass, not two.
 
 ## 21. Amendment — a third lens for applied AI (2026-09-17, Fable; PROPOSED, design with the user before building)
 **What it grades.** `grade_ai`: applied-AI capability as the user actually has it — agentic workflow design and delivery, context engineering (skills, memory, deterministic tools around a model), evals and regression discipline for knowledge work, human-in-the-loop grounding, model routing and token-cost judgment, adoption and teaching. The lens source is the coaching brief's decomposition (vault `Professional/Resources/AI_Experience_Coaching_Brief_20260916.md` §5.1–5.8), rewritten into rubric prose from the evidence sources, not paraphrased.

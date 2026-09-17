@@ -14,8 +14,9 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | R2 | baseline, evidence synced from Postgres | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
 | S1 | evidence = bullets + duty statements + SOAR only | 0.550 | 0.543 | 0.706 | 0.661 (w 0.6) | 0.785 | 23.2 / 20.2 |
 | S2a | R2 re-run, adds the stretch set (806) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
+| S2c | S2a re-run with the final reporting code (adds judged-wrong AUC) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | — |
+| S2 | requirement embedded as "<title>: <requirement>" | 0.610 | 0.607 | 0.706 | 0.736 (w 0.6) | 0.822 | — |
 | S3 | bge-base-en-v1.5 (768-d) in place of bge-small, no title, no reranker | 0.567 | 0.566 | 0.706 | 0.657 (w 0.75) | 0.803 | — |
-| **S2** | **requirement embedded as "<title>: <requirement>"** | **0.610** | **0.607** | 0.706 | 0.736 (w 0.6) | 0.822 | — |
 | S4a | MiniLM cross-encoder reranks top-5 evidence per requirement (bge-small, no title) | 0.605 | 0.604 | 0.706 | 0.651 (w 0.9) | **0.838** | — |
 | S4b | S4a + title context (S2) | **0.617** | **0.617** | 0.706 | 0.692 (w 0.75) | 0.808 | — |
 

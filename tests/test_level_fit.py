@@ -61,7 +61,7 @@ def test_managerial_years_over_limit_is_stretch_up():
     text = "Requires 4+ years of people management experience leading a team."
     _, _, notes = rules.level_fit_rule("Senior Manager, Operations", text, None)
     assert notes["level_fit"] == "stretch_up"
-    assert any(h.startswith("managerial years 5 > 3") for h in notes["level_fit_hits"])
+    assert any(h.startswith("managerial years 4 > 3") for h in notes["level_fit_hits"])
 
 
 def test_principal_with_nothing_else_is_in_range():

@@ -15,15 +15,19 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | S1 | evidence = bullets + duty statements + SOAR only | 0.550 | 0.543 | 0.706 | 0.661 (w 0.6) | 0.785 | 23.2 / 20.2 |
 | S2a | R2 re-run, adds the stretch set (806) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
 | **S2** | **requirement embedded as "<title>: <requirement>"** | **0.610** | **0.607** | 0.706 | 0.736 (w 0.6) | 0.822 | — |
+| S4a | MiniLM cross-encoder reranks top-5 evidence per requirement (bge-small, no title) | 0.605 | 0.604 | 0.706 | 0.651 (w 0.9) | **0.838** | — |
 
 **Against `stretch` (the confusable band, never used to pick thresholds):**
 
 | Run | coverage_gated | fit_heldout | blend (best w) |
 |---|---|---|---|
 | S2a | 0.575 | **0.955** | 0.854 |
-| S2 | **0.610** | 0.955 | 0.875 |
+| S2 | 0.610 | 0.955 | 0.875 |
+| **S4a** | **0.669** | 0.955 | 0.757 |
 
-Caution for R1–S2: `fit_heldout` on hard negatives mixed held-out scores (positives) with the live screen's IN-SAMPLE fit_prob (hard negatives, 299 of which are training rows). Coverage AUCs are unaffected; fit and blend AUCs on hard negatives are not clean. Fixed before S3 (see S2).
+**Against judge-confirmed `wrong` only (n=299, reported from S2 on):** S2 coverage 0.637 · **S4a coverage 0.677** · fit_heldout 0.995 in both.
+
+Note on `fit_heldout` for hard negatives: up to S2 the code read the live screen's fit_prob, which is in-sample for training rows; from S3/S4a it uses out-of-fold scores (1,317 of the 1,320 judged-wrong postings are training rows). The judged-wrong figure stayed at 0.995 after the fix, so these rows are genuinely easy for the fit model, not leaked.
 
 ## R1 — baseline (2026-09-16 15:48, calibration `daaf23f5d142`, 1,138 s)
 First run that completed (earlier attempts died on the 9p mount; see STATUS). Evidence: 2,888 units embedded 2026-09-15 23:39, before 30 units of bullet edits on 9/16.
@@ -57,10 +61,20 @@ Code change only in reporting: calibration now also scores the 806 postings the 
 `JOBSEARCH_REQ_CONTEXT=title`: each requirement unit is embedded as `"<posting title>: <requirement>"`; evidence units unchanged; bge-small. Nearly every unit becomes unique per posting (~7,000 distinct units per 200 postings), so embedding took ~48 min against ~10 for plain units.
 - Thresholds: COVER_STRONG 0.70 · COVER_PARTIAL 0.62 · REJECT 28.271 · REVIEW 37.857
 - AUC vs hard negatives: coverage_required **0.610** · coverage_role 0.584 · coverage_gated **0.607** · fit_heldout 0.706 · blend 0.730/**0.736**/0.720/0.663 · sanity 0.822
-- AUC vs judge-confirmed wrong only (n=299): coverage_gated 0.637 · fit 0.995 · blend_0.6 0.948 — **the fit and blend figures here are invalid**: the fit scores for these rows came from the live screen, which trained on them. Found from this output; `hard_fit` now uses out-of-fold scores wherever the posting is a training row (applies from S3).
+- AUC vs judge-confirmed wrong only (n=299): coverage_gated 0.637 · fit 0.995 · blend_0.6 0.948. The fit figure here came from the live screen (in-sample for these rows); `hard_fit` now uses out-of-fold scores, and S4a showed the same 0.995 with them, so the number holds.
 - AUC vs stretch (n=806): coverage_required 0.605 · coverage_gated **0.610** · fit_heldout 0.955 · blend_0.6 0.875
 - Top hard negatives by coverage: Machinify AI Engineer Agentic Systems (82.2), Salesforce Senior Manager Global Cloud Campaigns (80.0), Machinify Staff AI Engineer (80.0), CVS Health Senior Manager Release Engineering (80.0), Amgen Senior Manager Global ERP Operations Lead SAP (78.3), Databricks Director Agent & AI Search (77.3), Navy Federal Principal AI Engineer Agentic AI (76.9).
 - **Reading — the first real gain.** +0.048 on hard negatives and +0.035 on stretch, on coverage alone, from one line of context. It confirms the diagnosis (bare requirement sentences lose the role) but coverage is still far below the fit model on the confusable band (0.61 vs 0.955), and blending still lowers the stretch AUC. Kept as a candidate for S4; not a ranking signal on its own. Cost: ~5× the embedding time.
+
+## S4a — cross-encoder reranker, plain requirements (18:28, calibration `cafe29793f2a`, 8,238 s; scratch DB)
+`JOBSEARCH_RERANKER=cross-encoder/ms-marco-MiniLM-L-6-v2`, `JOBSEARCH_RERANK_TOP=5`, bge-small retrieval, no title context. For each requirement the 5 cosine-nearest evidence units are read together with the requirement by the cross-encoder; its sigmoid probability replaces the cosine in the band rule, on a 0.30–0.95 / 0.05–… grid. 332,686 distinct pairs in 8,085 s (~41 pairs/s at 4 threads).
+- Smoke test before the run: "Process Excellence: Lead Lean Six Sigma projects" vs an LSS bullet 0.603; "Staff AI Engineer: build ML pipelines with MLOps" vs an article about AI assistants **0.000** — the distinction cosine misses.
+- Thresholds: COVER_STRONG **0.95** · COVER_PARTIAL **0.05** — both at the edge of the grid. Almost nothing is "strong"; any probability ≥ 0.05 earns partial credit. The optimum wants a *continuous* credit, not bands (candidate S5).
+- AUC vs hard negatives: coverage_required 0.605 · coverage_role 0.547 · coverage_gated 0.604 · fit_heldout 0.706 · blend 0.597/0.616/0.647/0.651 · sanity **0.838** (best so far)
+- AUC vs judge-confirmed wrong (n=299): coverage_gated **0.677** · fit 0.995 · blend_0.9 0.805
+- AUC vs stretch (n=806): coverage_required **0.670** · coverage_gated **0.669** · fit 0.955 · blend_0.9 0.757
+- **Top hard negatives changed character.** The data/AI engineering roles are gone from the top. The highest-coverage "negatives" are now unlabeled `fit_top` rows that read like real fits: Capital One Manager Project Management – Product Operations (43.4), Microsoft Senior Manager Sales Operations Strategy Enablement (39.4), Navy Federal Program Manager (33.3), Microsoft Senior Technical Program Manager (31.4), **McKesson Lead Workforce Intelligence Consultant (29.7)**, Oracle Principal Program Manager – Repair Services Operations (27.8). Only two judged-`wrong` rows in the top 10.
+- **Reading — the reranker fixes the failure mode S1 diagnosed.** Best coverage result on the confusable band (+0.094 over baseline vs stretch, +0.04 vs judged wrong), best sanity AUC, and the false positives are now plausible fits rather than engineering jobs. The hard-negative AUC (0.604) is held down by `fit_top`, which increasingly looks like it contains real positives — that set should not be the calibration target. Coverage is still far below the fit model on ranking (0.67 vs 0.955) and blending still hurts; its value is as an **explainer** whose matches are now trustworthy, not as a ranker. Cost: ~2 h 15 min of CPU for the calibration set; the daily increment would be a few hundred postings.
 
 ## Plan for the next steps (decided with the user 2026-09-16)
 - **S2** — requirement text embedded with the posting title around it (`"<title>: <requirement>"`), bge-small. Also adds a second negative set: postings the judge graded `stretch` (the confusable band), with a re-run baseline (S2a) so the stretch AUC has a reference.

@@ -696,3 +696,27 @@ This section records what was built and measured after §18, and the decisions i
 - [x] Every experiment recorded with calibration version, thresholds, AUCs on all negative sets, top false positives and a reading.
 - [ ] §15.7 eyeball (Henry Schein R134977 ≥ 80 etc.) — **not run**; superseded if proposal (a) is accepted.
 - [ ] User decisions (a)–(e).
+
+## 20. Amendment — repairs, and a level rule (2026-09-17, Fable; §20.1 DONE, §20.2 PROPOSED, needs the user's confirmation)
+
+### 20.1 Repairs (commit `3763d6e`, tests 131 → 157)
+The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixed: all three fit models unloadable after the E: move (absolute `models.path`); CV folds not grouped by JD text (identical reposts in train and test); the requirement splitter dropping short skill bullets; remote detection reading 600 characters and trusting a generic ATS flag; "team of N" hard-rejecting as N direct reports; travel regex missing 100%; Workday clamp unchecked once a scope was stored; dead detail fetches eating the budget; Eightfold count=0 close-passing; tracker fuzzy match unbounded in time; inline HTML tags splitting sentences. **Every AUC quoted before this commit was measured with the leak and the splitter defect; the numbers below the retrain supersede them.** Known limits that remain: an ATS `onsite` flag with a specific city and a JD that never says remote stays on-site (Microsoft stores its remote flag in metadata the adapter does not keep); "US Off-Site" is one employer's label and is not a remote term.
+
+### 20.2 Level fit — a deterministic rule with its own column (PROPOSED)
+**Why.** Reviewing the surfaced rows, the user's `wrong` calls were mostly about level and scope, not function; grading them `wrong` would teach the model that work he does well is work he cannot do. Level is written in the JD, so it gets a rule, not a model, and human `level_fit` labels in `report_feedback` are the rule's test set.
+
+**Values, in priority order for the report:** `in_range` (senior IC, or manager / senior manager of a small team) → `stretch_up` (Director-type promotion) → `out_of_reach` (Senior Director, VP, AVP, Head of, Chief; org-building scope; P&L ownership; team above `MAX_DIRECT_REPORTS`) → `too_low` (junior / early-career signals, required years under the floor in `profile_local`, or band top under the pay floor). `unknown` when nothing is stated.
+
+**Signals (title and Required block only):** title tier; "N years managerial / people leadership"; org-building phrases ("build and lead a … organization", "global teams", "spans of control", "executive"); P&L; team size (from the fixed `_TEAM_SIZE` / `_REPORTS` split); the written minimums are scored separately from scope, so "Master's + 10 yrs" met with an org-building mandate is `out_of_reach` for scope, not for years. Two or more scope hits → `out_of_reach`; one → `stretch_up`; none with a senior title → `in_range`.
+
+**Schema:** `screens.level_fit VARCHAR` (v10, additive, filled by the rule at screen time; `rescreen-all` after). `report_feedback` table per the vault spec `Report_Feedback_Table_Spec.md` plus `level_fit`, `grade_before_split`, `needs_confirm`, `split_reason`; loaded from the vault CSV with `assessor` and `confirmed_by_user` as given. A view `vw_level_agreement` = rule vs confirmed human `level_fit`.
+
+**Report:** `Jobs_Found` and the lens lists sort `in_range` first, then `stretch_up`; `out_of_reach` and `too_low` are listed in a collapsed tail, never in the top blocks. Score is untouched until agreement is measured.
+
+**Acceptance:** agreement with the confirmed human rows reported (target ≥ 80% exact on `in_range` / `out_of_reach`, disagreements listed); the 232 feedback rows re-exported with the rule's answer beside the human column so the user grades only disagreements.
+
+## 21. Amendment — a third lens for applied AI (2026-09-17, Fable; PROPOSED, design with the user before building)
+**What it grades.** `grade_ai`: applied-AI capability as the user actually has it — agentic workflow design and delivery, context engineering (skills, memory, deterministic tools around a model), evals and regression discipline for knowledge work, human-in-the-loop grounding, model routing and token-cost judgment, adoption and teaching. The lens source is the coaching brief's decomposition (vault `Professional/Resources/AI_Experience_Coaching_Brief_20260916.md` §5.1–5.8), rewritten into rubric prose from the evidence sources, not paraphrased.
+**What it does not grade as a fit:** building models (ML/NLP/RAG engineering), AI platform / infrastructure engineering, distributed services in Python, AI security threat modelling as a primary duty. Those stay `wrong` on this lens; the coding-assessment constraint stays outside the rubric (§18.4).
+**Mechanics:** `llm_labels.grade_ai` (additive), a `vw_label_set_ai` view, `LENS_VIEWS` gains `ai`, `screens.fit_ai`, and the lens lists gain an `ai` bucket. `grade` (the overall) stays the average of process and technical; `ai` is reported beside them and never folded in.
+**Order and cost:** build only after §20.2 lands and the retrain numbers are recorded. Regrade in two steps: first the postings whose JD hits an AI-term list (estimate before running; expected several hundred) plus a stratified control sample of 100, measure lens independence as in §18.7, then decide whether the corpus regrade (~3,000 postings, ~5M Sonnet tokens) is worth it.

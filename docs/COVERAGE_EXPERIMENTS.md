@@ -14,6 +14,7 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 | R2 | baseline, evidence synced from Postgres | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
 | S1 | evidence = bullets + duty statements + SOAR only | 0.550 | 0.543 | 0.706 | 0.661 (w 0.6) | 0.785 | 23.2 / 20.2 |
 | S2a | R2 re-run, adds the stretch set (806) | 0.563 | 0.559 | 0.706 | 0.706 (w 0.75) | 0.806 | 46.2 / 45.0 |
+| S3 | bge-base-en-v1.5 (768-d) in place of bge-small, no title, no reranker | 0.567 | 0.566 | 0.706 | 0.657 (w 0.75) | 0.803 | — |
 | **S2** | **requirement embedded as "<title>: <requirement>"** | **0.610** | **0.607** | 0.706 | 0.736 (w 0.6) | 0.822 | — |
 | S4a | MiniLM cross-encoder reranks top-5 evidence per requirement (bge-small, no title) | 0.605 | 0.604 | 0.706 | 0.651 (w 0.9) | **0.838** | — |
 | S4b | S4a + title context (S2) | **0.617** | **0.617** | 0.706 | 0.692 (w 0.75) | 0.808 | — |
@@ -24,10 +25,11 @@ One record per run, newest last. Every run is `finder.py coverage --calibrate`: 
 |---|---|---|---|
 | S2a | 0.575 | **0.955** | 0.854 |
 | S2 | 0.610 | 0.955 | 0.875 |
+| S3 | 0.628 | 0.955 | 0.787 |
 | **S4a** | **0.669** | 0.955 | 0.757 |
 | S4b | 0.664 | 0.955 | 0.808 |
 
-**Against judge-confirmed `wrong` only (n=299, reported from S2 on):** S2 coverage 0.637 · S4a coverage 0.677 · **S4b coverage 0.683** · fit_heldout 0.995 in all.
+**Against judge-confirmed `wrong` only (n=299, reported from S2 on):** S2 coverage 0.637 · S3 coverage 0.621 · S4a coverage 0.677 · **S4b coverage 0.683** · fit_heldout 0.995 in all.
 
 Note on `fit_heldout` for hard negatives: up to S2 the code read the live screen's fit_prob, which is in-sample for training rows; from S3/S4a it uses out-of-fold scores (1,317 of the 1,320 judged-wrong postings are training rows). The judged-wrong figure stayed at 0.995 after the fix, so these rows are genuinely easy for the fit model, not leaked.
 
@@ -86,6 +88,15 @@ S4a's reranker (MiniLM, top 5) on S2's title-context retrieval; the cross-encode
 - AUC vs stretch (n=806): coverage_required 0.657 · coverage_gated 0.664 · fit 0.955 · blend_0.75 0.808
 - Top hard negatives: Amgen Agentic AI Business Solutions Director (80.0), Microsoft Senior Technical Program Manager (80.0), Amgen Senior Manager Global ERP Operations Lead SAP (77.7), Microsoft Senior Repair Network Operations Program Manager (75.0), Salesforce Senior Manager Global Cloud Campaigns (71.1), Navy Federal Principal AI Engineer Agentic AI (62.6), Freddie Mac Engineering Tech Lead Network Observability (57.1).
 - **Reading — title context adds nothing on top of the reranker.** Against S4a: +0.013 vs hard negatives and +0.006 vs judged wrong, but −0.005 vs stretch and a lower sanity AUC (0.808 vs 0.838). The differences are within noise, and some title-driven false positives came back (Navy Federal *Principal AI Engineer*, Freddie Mac *Engineering Tech Lead*): the cross-encoder partly matches on the title words instead of the requirement. It costs ~30% more reranker time and ~5× the embedding time. **S4a (reranker, no title) is the better configuration.** Blends are higher here, but every blend still sits well below the fit model alone on stretch (0.808 vs 0.955).
+
+## S3 — bge-base encoder (started 18:02, stopped at 3/14 batches to let S4 run first, resumed 23:44; calibration `e0e8da2a086c`, 6,706 s for the resumed part; scratch DB)
+`embed_model = "BAAI/bge-base-en-v1.5"` (768-d, 419 MB) for both evidence (2,918 units re-embedded) and requirements; vector columns widened to FLOAT[768] on the scratch copy; no title context, no reranker. About 3× bge-small's embedding time (~2 h in total for 2,735 postings).
+- Thresholds: COVER_STRONG **0.66** (bottom edge of the cosine grid) · COVER_PARTIAL 0.60 · REJECT 5.653 · REVIEW 10.657
+- AUC vs hard negatives: coverage_required 0.567 · coverage_role 0.564 · coverage_gated 0.566 · fit_heldout 0.706 · blend 0.644/0.655/0.657/0.613 · sanity 0.803
+- AUC vs judge-confirmed wrong (n=299): coverage_gated 0.621 · fit 0.995 · blend_0.75 0.846
+- AUC vs stretch (n=806): coverage_required 0.631 · coverage_gated 0.628 · fit 0.955 · blend_0.75 0.787
+- Top hard negatives: Capital One Manager Project Management – Product Operations (58.9), **Guidehouse Data Platform Lead (56.6)**, Microsoft Senior Technical Program Manager (56.1), **Freddie Mac Technical Lead GenAI & Automation Engineering (50.8)**, Capital One Principal Data Analyst (48.1), Novartis Director AI Foundations Engineering (47.9), **Machinify Staff AI Engineer (47.5)**.
+- **Reading — a bigger encoder helps a little and does not fix the failure.** +0.053 over baseline vs stretch and +0.007 vs hard negatives, but the data/AI engineering roles are still near the top: a bi-encoder, of any size, compresses each sentence to one point before comparing, so topic still dominates. The reranker (S4a) beats it on every negative set at similar total cost. Its strong threshold also sat at the grid's lower edge (bge-base cosines run lower than bge-small's), so the cosine grid would need widening before it is used again. Not worth the 768-d schema change on its own.
 
 ## Plan for the next steps (decided with the user 2026-09-16)
 - **S2** — requirement text embedded with the posting title around it (`"<title>: <requirement>"`), bge-small. Also adds a second negative set: postings the judge graded `stretch` (the confusable band), with a re-run baseline (S2a) so the stretch AUC has a reference.

@@ -233,6 +233,10 @@ ORG_BUILDING_TERMS = [
 # "N years managerial / people leadership" above this is a scope hit; written minimums are scored
 # separately from scope ("Master's + 10 yrs" alone is never a scope hit). Tighten in profile_local.py.
 LEVEL_MANAGERIAL_YEARS_MAX = 3
+# At or above this many years of PEOPLE management the ask is two scope hits (out_of_reach on its own);
+# between the two limits it is one (stretch_up). The grey zone the user named: sell 15+ years of cross-functional
+# leadership, or not.
+LEVEL_MANAGERIAL_YEARS_OUT = 5
 
 # ---- Outside the US (finder hard reject). A location segment naming one of these, with no US state or
 # "United States" in any segment, is outside the US. Place names that are also common US places with no

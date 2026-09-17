@@ -57,8 +57,8 @@ def test_director_alone_is_stretch_up():
 
 
 def test_managerial_years_over_limit_is_stretch_up():
-    # Example profile's LEVEL_MANAGERIAL_YEARS_MAX is 3; 5 exceeds it -- one scope hit, no title stretch.
-    text = "Requires 5+ years of people management experience leading a team."
+    # Example profile: MAX 3, OUT 5; 4 sits between them -- one scope hit, no title stretch.
+    text = "Requires 4+ years of people management experience leading a team."
     _, _, notes = rules.level_fit_rule("Senior Manager, Operations", text, None)
     assert notes["level_fit"] == "stretch_up"
     assert any(h.startswith("managerial years 5 > 3") for h in notes["level_fit_hits"])
@@ -197,3 +197,11 @@ def test_chief_of_staff_is_not_c_suite():
     assert notes["level_fit"] == "stretch_up", notes   # a deputy/director-band seat, confirmed by the user
     _, _, notes = rules.level_fit_rule("Chief Operating Officer", "Required\n- 8+ years of experience.", None, {})
     assert notes["level_fit"] == "out_of_reach"
+
+
+def test_managerial_years_at_or_over_the_out_limit_is_out_of_reach_alone():
+    text = "Required\n- 5+ years of experience managing a team of analysts.\n"
+    _, _, notes = rules.level_fit_rule("Senior Manager, Operations", text, None, {})
+    assert notes["level_fit"] == "out_of_reach" and any("managerial years 5 >=" in h for h in notes["level_fit_hits"])
+    text = "Required\n- 4 years of people management experience.\n"
+    assert rules.level_fit_rule("Senior Manager, Operations", text, None, {})[2]["level_fit"] == "stretch_up"

@@ -74,13 +74,42 @@ def annual_top(job: Listing) -> Optional[float]:
     return top
 
 
+# A REMOTE_TERMS hit that reads as a duties sentence, not a location/workplace statement --
+# "manage remote field teams", "supports remote sites" -- never counts as the posting's own location.
+_REMOTE_DUTY_RE = re.compile(
+    r"\bremote\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
+    r"office|offices|customer|customers|client|clients|user|users|support)\b", re.I)
+# Locations too generic for an ATS on-site/hybrid flag to be trusted at all (Microsoft's
+# "United States, Multiple Locations" onsite tag being the case that surfaced this).
+_GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
+
+
+def _remote_in_context(text: str) -> bool:
+    """A REMOTE_TERMS hit on a line/sentence that reads as a location or workplace statement --
+    "Location: US-REMOTE with the ability to travel...", "This role is fully remote" -- as opposed
+    to the same word used in passing inside a duties sentence (see `_REMOTE_DUTY_RE`)."""
+    for line in re.split(r"[\n.]+", text or ""):
+        if not line.strip() or _REMOTE_DUTY_RE.search(line):
+            continue
+        if _has(line.lower(), P.REMOTE_TERMS):
+            return True
+    return False
+
+
 def is_remote(job: Listing) -> bool:
-    if job.extra.get("workplace_type") == "remote":  # the ATS's own flag (finder rows)
+    workplace = job.extra.get("workplace_type")
+    if workplace == "remote":  # the ATS's own flag (finder rows)
         return True
-    if job.extra.get("workplace_type") in ("hybrid", "onsite"):  # stated (or read from the JD) beats a guess
-        return False
-    text = f"{job.title} {job.location} {job.description[:600]}".lower()
-    if _has(text, P.REMOTE_TERMS):
+    # The full JD, not just the first 600 characters -- Blue Yonder's "Location: US-REMOTE with the
+    # ability to travel up to 30%" line sits well past that cutoff.
+    jd_remote = _remote_in_context(f"{job.title}\n{job.location}\n{job.description}")
+    if workplace in ("hybrid", "onsite"):  # stated (or read from the JD) beats a guess...
+        generic_location = bool(_GENERIC_LOCATION_RE.search(job.location or ""))
+        if not (generic_location or jd_remote):
+            return False
+        # ...unless the ATS location is too generic to mean anything ("Multiple Locations", "United
+        # States", nationwide), or the JD itself explicitly states remote -- the JD read wins.
+    if jd_remote:
         return True
     # Same company + title posted in 3+ states is the multi-city "remote" signature (e.g. Coinbase).
     states = {loc.split(",")[-1].strip().lower() for loc in job.locations if "," in loc}

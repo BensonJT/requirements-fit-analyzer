@@ -17,6 +17,10 @@ from backend.screen import company_keys, company_matches, norm_company, similar_
 TRACKER_FILE = "Application_Tracker.md"
 VAULT_SUBDIR = os.path.join("Professional", "Areas", "Job_Search")
 _POSTING_ID = re.compile(r"\b[0-9a-f]{20}\b")
+_DATE_FMT = "%Y-%m-%d"
+FUZZY_MATCH_WINDOW_DAYS = 90  # a fuzzy company+title match must have been first seen within this
+                              # window of the tracker's date applied, or a 2025 application can
+                              # match an unrelated 2026 req that happens to share a title
 
 
 @dataclass
@@ -82,11 +86,24 @@ def parse_tracker(path) -> list:
     return rows
 
 
+def _parse_row_date(s):
+    """The tracker's `Date Applied` cell as a date, or None when it's missing/unparseable --
+    in which case the fuzzy match falls back to the old, date-blind behavior."""
+    try:
+        return datetime.strptime((s or "").strip(), _DATE_FMT).date()
+    except ValueError:
+        return None
+
+
 def match_rows(rows: list, postings: list) -> list:
     """(row, matched_posting_id, match_kind) per tracker row. `postings` = (posting_id, employer, title, first_seen_at).
 
-    Exact when the row's posting id exists; else fuzzy on company keys + similar title over that
-    employer's postings (active and closed), newest first_seen_at winning; else none.
+    Exact when the row's posting id exists (an exact req/url match, since the tracker only ever
+    records a posting id when a build recorded one). Else fuzzy on company keys + similar title
+    over that employer's postings (active and closed) -- but only among postings first seen
+    within FUZZY_MATCH_WINDOW_DAYS of the row's date applied, when both dates are known, so a
+    same-titled req from a different year doesn't steal the match; newest first_seen_at wins.
+    Else none.
     """
     known = {p[0] for p in postings}
     by_employer = defaultdict(list)
@@ -99,9 +116,19 @@ def match_rows(rows: list, postings: list) -> list:
             out.append((r, r.posting_id, "exact"))
             continue
         keys = company_keys(r.company)
-        cands = [(first_seen, pid)
-                 for employer, key in employer_keys.items() if company_matches(key, keys)
-                 for pid, title, first_seen in by_employer[employer] if similar_title(r.role, title)]
+        applied_date = _parse_row_date(r.date_applied)
+        cands = []
+        for employer, key in employer_keys.items():
+            if not company_matches(key, keys):
+                continue
+            for pid, title, first_seen in by_employer[employer]:
+                if not similar_title(r.role, title):
+                    continue
+                if applied_date is not None and first_seen is not None:
+                    fs_date = first_seen.date() if hasattr(first_seen, "date") else first_seen
+                    if abs((fs_date - applied_date).days) > FUZZY_MATCH_WINDOW_DAYS:
+                        continue
+                cands.append((first_seen, pid))
         out.append((r, max(cands)[1], "fuzzy") if cands else (r, None, "none"))
     return out
 

@@ -60,7 +60,14 @@ def test_travel_rule_flag_and_reason_branches():
     assert rules.travel_rule("", "Travel: 60% of the time.")[0] == ["travel 60% (limit 25%)"]
     assert rules.travel_rule("", "Expect 20-50% travel.")[0] == ["travel span 20-50% doubles the limit"]
     assert rules.travel_rule("", "Travel 10 to 30% annually.")[:2] == ([], ["travel span 10-30% (limit 25%)"])
-    assert rules.travel_rule("", "100% remote. Minimal travel (under 10%).")[:2] == ([], [])
+    # A "100%" describing something other than travel, far from the word, must not be misread as a travel figure.
+    assert rules.travel_rule("", "This posting is 100% remote, offers a great culture, strong benefits, and "
+                                 "excellent growth potential for candidates. Minimal travel is required, "
+                                 "under 10% annually.")[:2] == ([], [])
+    # \d{1,2} used to cap the regex below 100, so "100% travel" was silently unmatched -- fixed to \d{1,3}
+    # with a <=100 guard; it must reject exactly like a 75% figure does.
+    assert rules.travel_rule("", "Up to 100% travel required.")[0] == ["travel 100% (limit 25%)"]
+    assert rules.travel_rule("", "Up to 75% travel required.")[0] == ["travel 75% (limit 25%)"]
 
 
 def test_travel_rule_skipped_without_limit(monkeypatch):
@@ -74,6 +81,19 @@ def test_direct_reports_rule_branches():
     assert rules.direct_reports_rule("", "Manage 12 direct reports.")[0] == ["large team (12 direct reports)"]
     assert rules.direct_reports_rule("", "Own the hiring plan.")[1] == ["large-team markers (hiring plan)"]
     assert rules.direct_reports_rule("", "Manage 3 direct reports.")[:2] == ([], [])
+
+
+def test_direct_reports_rule_program_headcount_never_rejects():
+    # CACI: "team of 250+ professionals" is program headcount, not a direct-report count -- flag only, never reject.
+    reasons, flags, notes = rules.direct_reports_rule("", "Support a team of 250+ professionals on this program.")
+    assert reasons == [] and flags == ["team of 250 (limit 5)"] and notes["reports"] == 250
+    # "lead a team of 12 analysts" reads like a report count but is still "team of N" phrasing -- flag, not reject.
+    reasons, flags, notes = rules.direct_reports_rule("", "You will lead a team of 12 analysts on this initiative.")
+    assert reasons == [] and flags == ["team of 12 (limit 5)"]
+    # Only an explicit direct-report phrase can still reject.
+    assert rules.direct_reports_rule("", "This role carries 12 direct reports.")[0] == ["large team (12 direct reports)"]
+    assert rules.direct_reports_rule("", "You will manage 12 reports across two sites.")[0] == \
+        ["large team (12 direct reports)"]
 
 
 def test_domain_tenure_rule_flags_required_block_only():
@@ -283,6 +303,19 @@ def test_rescreen_predicate_selects_only_new_changed_or_version_changed(tmp_path
     assert pipeline.candidate_ids(con, rv, "other-model") != []
 
 
+def test_rescreen_predicate_is_null_safe(tmp_path):
+    """`!=` against a NULL rv/mv is NULL (unknown), not true, so a screened row would silently never come
+    up for rescreen if either version were ever passed as None -- IS DISTINCT FROM treats NULL as a real,
+    comparable value instead."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    ids = _seed(con)
+    pipeline.screen(con, log=_quiet)
+    rv = version.rules_version()
+    assert set(pipeline.candidate_ids(con, None, "none")) == set(ids.values())
+    assert set(pipeline.candidate_ids(con, rv, None)) == set(ids.values())
+    assert pipeline.candidate_ids(con, rv, "none") == []          # the real versions still match and skip a rescreen
+
+
 def test_shortlist_excludes_decided_and_tracked(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     extra = [N.base(req_id=r, title="Director of Operational Excellence", workplace_type="remote") for r in ("D", "E")]
@@ -349,6 +382,35 @@ def test_tracker_sync_exact_fuzzy_none_and_decisions(tmp_path):
     assert kinds["Acme Corp"] == "exact" and kinds["Initech"] == "fuzzy" and kinds["Hooli"] == "none"
     again = tracker_sync.sync(con, str(tmp_path), log=_quiet)
     assert again["decisions_added"] == 0 and con.execute("SELECT count(*) FROM tracker").fetchone()[0] == 5
+
+
+def test_match_rows_fuzzy_prefers_a_posting_near_the_application_date():
+    """A 2025 application must not fuzzy-match a same-titled 2026 req at the same employer --
+    only a posting first seen within FUZZY_MATCH_WINDOW_DAYS of the tracker's date applied
+    is eligible."""
+    rows = [tracker_sync.TrackerRow("Active", "2026-09-01", "Acme Corp", "Process Excellence Lead")]
+    postings = [
+        ("old", "Acme Corp", "Process Excellence Lead", datetime(2025, 1, 1)),
+        ("new", "Acme Corp", "Process Excellence Lead", datetime(2026, 8, 20)),
+    ]
+    matches = tracker_sync.match_rows(rows, postings)
+    _, matched, kind = matches[0]
+    assert (matched, kind) == ("new", "fuzzy")
+
+
+def test_match_rows_fuzzy_finds_nothing_outside_the_window():
+    rows = [tracker_sync.TrackerRow("Active", "2026-09-01", "Acme Corp", "Process Excellence Lead")]
+    postings = [("old", "Acme Corp", "Process Excellence Lead", datetime(2025, 1, 1))]
+    matches = tracker_sync.match_rows(rows, postings)
+    assert matches[0][1:] == (None, "none")
+
+
+def test_match_rows_fuzzy_falls_back_without_a_parseable_date():
+    """No date applied (or an unparseable one) keeps the old date-blind behavior."""
+    rows = [tracker_sync.TrackerRow("Active", "", "Acme Corp", "Process Excellence Lead")]
+    postings = [("old", "Acme Corp", "Process Excellence Lead", datetime(2020, 1, 1))]
+    matches = tracker_sync.match_rows(rows, postings)
+    assert matches[0][1:] == ("old", "fuzzy")
 
 
 # ---------------------------------------------------------------- report
@@ -575,8 +637,12 @@ def _trained(tmp_path, con):
     now = datetime(2026, 9, 15)
     rows = []
     for i in range(30):
-        rows.append([f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}", FIT_JD, 1, 1.0, now])
-        rows.append([f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}", OFF_JD, 0, 1.0, now])
+        # each row's text is distinct (a "case N" tag) so the text-hash CV groups (features._text_group_ids)
+        # don't collapse all 30 positives -- and all 30 negatives -- into a single group; real JDs vary too.
+        rows.append([f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}",
+                     f"{FIT_JD} Case {i}.", 1, 1.0, now])
+        rows.append([f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}",
+                     f"{OFF_JD} Case {i}.", 0, 1.0, now])
     rows.append(["ctx", "jobs_found_passed", "f.md: sales ops", None, "Gamma", "Process Lead", FIT_JD, 0, 1.0, now])
     con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     return features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
@@ -604,6 +670,107 @@ def test_train_predict_top_terms_and_load_latest(tmp_path):
     terms = features.top_terms(model, features.doc_text("Process Excellence Lead", FIT_JD))
     assert terms and all(c > 0 for _, c in terms) and len(terms) <= 6
     assert any("excellence" in t or "process" in t for t, _ in terms)
+
+    # `train` stores a path relative to the repo root, not the absolute one it wrote to (see REPO_ROOT).
+    stored_path = con.execute("SELECT path FROM models").fetchone()[0]
+    assert not os.path.isabs(stored_path) and stored_path == os.path.relpath(result["path"], features.REPO_ROOT)
+    con.close()
+
+
+def test_load_latest_falls_back_to_model_dir_when_stored_path_is_gone(tmp_path):
+    """Defect 1: a `models.path` row surviving from a deleted drive (an absolute path that no longer exists
+    anywhere) must still load as long as the joblib is sitting in MODEL_DIR (or the given `model_dir`) under
+    its own version name -- and a truly missing file must still come back as None, not raise."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    result = _trained(tmp_path, con)
+    version, real_path = result["model_version"], result["path"]
+    assert os.path.exists(real_path)
+
+    # simulate the stored row pointing at a drive that no longer exists
+    con.execute("UPDATE models SET path = ? WHERE model_version = ?",
+                [f"/nonexistent/dir/{version}.joblib", version])
+    model = features.load_latest(con, log=_quiet, model_dir=os.path.dirname(real_path))
+    assert model is not None and model["version"] == version
+
+    # a file that truly isn't anywhere (not in MODEL_DIR, not in model_dir) still returns None cleanly
+    con.execute("UPDATE models SET path = ? WHERE model_version = ?",
+                [f"/nonexistent/dir/{version}.joblib", version])
+    os.remove(real_path)
+    assert features.load_latest(con, log=_quiet, model_dir=os.path.dirname(real_path)) is None
+    con.close()
+
+
+def test_text_group_ids_shares_a_group_for_identical_text():
+    """Defect 2: two rows whose `text` is identical after normalization (a repost, a judge `dup:` copy) must
+    get the same CV group id, whatever their label_id/posting_id, so a StratifiedGroupKFold split can never
+    put one in train and the other in test."""
+    rows = [{"text": "Same JD text.  "}, {"text": "totally different job"}, {"text": "  SAME jd TEXT."}]
+    ids = features._text_group_ids(rows)
+    assert ids[0] == ids[2] and ids[0] != ids[1]
+
+
+def test_train_passes_text_based_groups_to_cross_validate(tmp_path, monkeypatch):
+    """Defect 2, integration: `train` must build its `groups` argument from text (not `range(n_jobs)`), so two
+    label rows with identical text land in the same fold no matter which source/id they came in under."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15)
+    rows = []
+    for i in range(20):
+        rows.append([f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}",
+                     f"{FIT_JD} Case {i}.", 1, 1.0, now])
+        rows.append([f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}",
+                     f"{OFF_JD} Case {i}.", 0, 1.0, now])
+    # a repost pair: identical text, different ids/sources/companies (so training_set's fuzzy company+title
+    # dedupe doesn't collapse them into one row before grouping even runs) -- must never split across folds
+    rows.append(["dup1", "application", None, None, "Zeta", "Repost Lead A", FIT_JD + " Case dup.", 1, 1.0, now])
+    rows.append(["dup2", "llm_judge", None, None, "Theta", "Repost Lead B", FIT_JD + " Case dup.", 1, 1.0, now])
+    con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    captured = {}
+    real_cv = features.cross_validate
+
+    def spy(texts, y, w, **kw):
+        captured["groups"] = kw.get("groups")
+        return real_cv(texts, y, w, **kw)
+
+    monkeypatch.setattr(features, "cross_validate", spy)
+    features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
+    groups = captured["groups"]
+    assert groups is not None and groups != list(range(len(groups)))   # not the old range()-per-row grouping
+
+    training_rows = features.training_set(con)
+    idx = {r["label_id"]: i for i, r in enumerate(training_rows)}
+    assert groups[idx["dup1"]] == groups[idx["dup2"]]
+    con.close()
+
+
+def test_train_metrics_exclude_career_site_copies(tmp_path):
+    """Defect 3: a vault positive whose matched posting's own JD text differs spawns a career-site copy that
+    `train` appends to y/weights/texts for extra training signal -- but confusion_at_0_5, pos/neg_mean_fit_oof
+    and oof_auc must describe one row per job (n_jobs), not double-count that job via its copy."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_label_corpus(con, n_each=20)
+    fit_pids = [r[0] for r in con.execute(
+        "SELECT posting_id FROM postings WHERE req_id LIKE 'F%' ORDER BY req_id").fetchall()]
+    now = datetime(2026, 9, 15)
+    rows = []
+    # each vault positive's own text differs from its matched posting's career-site JD -> spawns a copy
+    for i, pid in enumerate(fit_pids[:15]):
+        rows.append([f"app{i}", "application", None, pid, "Acme", f"Process Excellence Lead {i}",
+                     f"{FIT_JD} Vault-only phrasing {i}.", 1, 1.0, now])
+    for i in range(15):
+        rows.append([f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}",
+                     f"{OFF_JD} Case {i}.", 0, 1.0, now])
+    con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    result = features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
+    assert result["n_pos"] == 15 and result["n_neg"] == 15
+    n_jobs = result["n_pos"] + result["n_neg"]
+    assert len(result["oof"]) > n_jobs   # the copies really were appended
+    conf = result["confusion_at_0_5"]
+    assert conf["tp"] + conf["fp"] + conf["fn"] + conf["tn"] == n_jobs   # metrics describe one row per job
     con.close()
 
 
@@ -625,6 +792,50 @@ def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
     # a new model version makes every row due again; rules-only screens stay 'none'
     assert len(pipeline.candidate_ids(con, version.rules_version(), mv)) == 0
     assert len(pipeline.candidate_ids(con, version.rules_version(), "none")) == 6
+    con.close()
+
+
+def test_signal_report_blend_matches_stored_final_score(tmp_path):
+    """Defect 4: `signal_report`'s `blend` column must be the score the pipeline actually stored
+    (`vw_screen_latest.final_score`), not a value recomputed with `pipeline.combine(..., rejected=...)` and no
+    `flags=` -- that call drops the penalty flags a real screen applied, so it can't reproduce final_score."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    fit = [N.base(req_id=f"F{i}", title=f"Process Excellence Lead {i}", url=f"https://x/F{i}",
+                  location="Remote - USA", workplace_type="remote") for i in range(15)]
+    off = [N.base(req_id=f"O{i}", title=f"Software Engineer {i}", url=f"https://x/O{i}",
+                  location="Remote - USA", workplace_type="remote") for i in range(15)]
+    store.record_board(con, "Acme", "greenhouse", fit + off, now)
+    fit_pids = [r[0] for r in con.execute("SELECT posting_id FROM postings WHERE req_id LIKE 'F%' "
+                                          "ORDER BY req_id").fetchall()]
+    off_pids = [r[0] for r in con.execute("SELECT posting_id FROM postings WHERE req_id LIKE 'O%' "
+                                          "ORDER BY req_id").fetchall()]
+    rows = []
+    for i, pid in enumerate(fit_pids):
+        text = f"{FIT_JD} Case {i}."
+        con.execute("UPDATE postings SET description_text = ?, description_fetched_at = ? WHERE posting_id = ?",
+                    [text, now, pid])
+        rows.append([f"p{i}", "application", None, pid, "Acme", f"Process Excellence Lead {i}", text, 1, 1.0, now])
+    for i, pid in enumerate(off_pids):
+        text = f"{OFF_JD} Case {i}."
+        con.execute("UPDATE postings SET description_text = ?, description_fetched_at = ? WHERE posting_id = ?",
+                    [text, now, pid])
+        rows.append([f"n{i}", "pseudo_neg", None, pid, "Beta", f"Software Engineer {i}", text, 0, 1.0, now])
+    con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    result = features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
+    model = features.load_latest(con, log=_quiet)
+    pipeline.screen(con, model=model, log=_quiet)
+    stored = dict(con.execute("SELECT posting_id, final_score FROM vw_screen_latest").fetchall())
+
+    rows_out = features.signal_report(con, result)
+    blend_row = next(r for r in rows_out if r[0] == "blend")
+    assert blend_row[3] > 0   # n_all: at least one training row matched a screen
+
+    # cross-check by hand: every training row with a screen contributes its OWN stored final_score to the AUC
+    y_blend = [(r["label"], stored[r["posting_id"]]) for r in result["rows"] if r["posting_id"] in stored]
+    expected_auc = features._auc([y for y, _ in y_blend], [b for _, b in y_blend])
+    assert blend_row[1] == features._fmt(expected_auc)
     con.close()
 
 
@@ -668,6 +879,39 @@ def test_workplace_from_text_beats_the_multi_state_remote_guess():
     rec = rules.screen_row(row)
     assert rec.notes["workplace_inferred"] == "hybrid"
     assert "not remote and outside the commute area (per listing)" in rec.reasons
+
+
+def test_is_remote_reads_the_full_jd_and_the_jd_beats_a_generic_or_stale_ats_flag():
+    # Blue Yonder: the ATS says hybrid, but "Location: US-REMOTE ..." sits well past the old 600-char cutoff.
+    padding = ("Partner with cross-functional stakeholders to drive operational excellence and process "
+              "improvement across the organization. ") * 6
+    blue_yonder = S.Listing(source="ats", search_pass="", title="Principal Consultant", company="Blue Yonder",
+                            location="Dallas, TX", url="",
+                            extra={"workplace_type": "hybrid"},
+                            description=padding + "Location: US-REMOTE with the ability to travel up to 30%.")
+    assert len(blue_yonder.description) > 600
+    assert S.is_remote(blue_yonder)
+
+    # Microsoft: the ATS flags onsite, but the location is the generic "Multiple Locations" shape --
+    # that flag is never trusted on its own, and the JD's own remote statement wins.
+    microsoft = S.Listing(source="ats", search_pass="", title="Principal Program Manager", company="Microsoft",
+                          location="United States, Multiple Locations", url="",
+                          extra={"workplace_type": "onsite"},
+                          description="Location: Remote, United States. This position is remote eligible.")
+    assert S.is_remote(microsoft)
+
+    # A real onsite flag on a specific (non-generic) location is still trusted even if the JD mentions
+    # remote work in a duties sentence rather than as a location statement.
+    onsite = S.Listing(source="ats", search_pass="", title="Program Manager", company="Acme", location="Austin, TX",
+                       url="", extra={"workplace_type": "onsite"},
+                       description="Manage remote field teams across five states from our Austin office.")
+    assert not S.is_remote(onsite)
+
+    # Negative: "remote" used only inside a duties sentence, with no ATS flag or location signal, is not remote.
+    unflagged = S.Listing(source="ats", search_pass="", title="Program Manager", company="Acme",
+                          location="Austin, TX", url="", extra={},
+                          description="Manage remote field teams across five states from our Austin office.")
+    assert not S.is_remote(unflagged)
 
 
 def test_non_us_rule():
@@ -962,6 +1206,22 @@ kind = "narrative"
     con.close()
 
 
+def test_ensure_current_only_swallows_io_errors(tmp_path, monkeypatch):
+    """A source that's unreadable (missing file, bad toml, a failed subprocess) falls back to stored evidence
+    with a warning; a programming error in `iter_units` is a real bug and must not be hidden the same way."""
+    pytest.importorskip("numpy")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    m = _evidence_manifest(tmp_path)
+    enc = FakeEncoder()
+    evidence.rebuild(con, m, enc, log=_quiet)
+    def _boom(_manifest):
+        raise ValueError("boom")
+    monkeypatch.setattr(evidence, "iter_units", _boom)
+    with pytest.raises(ValueError, match="boom"):
+        evidence.ensure_current(con, m, enc, log=_quiet)
+    con.close()
+
+
 def test_evidence_rebuild_float384_and_cosine(tmp_path):
     pytest.importorskip("numpy")
     con = store.connect(str(tmp_path / "t.duckdb"))
@@ -1008,6 +1268,37 @@ def test_rejoin_lines_glues_split_sentences_and_drops_labels():
     units = requirements.split_requirements("Responsibilities\nEnterprise Operational Leadership\n"
                                             "Serves as the strategic operations advisor to the medical officers.\n")
     assert [u.text for u in units] == ["Serves as the strategic operations advisor to the medical officers."]
+
+
+def test_split_requirements_keeps_short_bulleted_skill_lines():
+    # A bullet marker is never a heading, even when it's short, Title Case, or names a PERSON_HEADINGS word.
+    jd = """Required Qualifications
+- 8+ years of experience in process improvement.
+- Lean Six Sigma Black Belt Certification
+- Advanced Excel skills
+- Strong SQL and Python experience
+- Bachelor's Degree in Business Administration
+- Skills: SQL, Python, Tableau
+"""
+    units = requirements.split_requirements(jd)
+    texts = [u.text for u in units]
+    for expect in ("Lean Six Sigma Black Belt Certification", "Advanced Excel skills",
+                  "Strong SQL and Python experience", "Bachelor's Degree in Business Administration"):
+        assert expect in texts, texts
+    assert any(t.startswith("Skills:") or t == "SQL, Python, Tableau" for t in texts), texts
+    assert all(u.section == "required" for u in units)
+
+
+def test_logistics_line_with_a_work_verb_is_not_logistics():
+    # "hybrid" alone doesn't make a line logistics when an action verb is doing the work.
+    assert requirements.classify("Coordinate hybrid cloud migrations across regions") == (
+        "work", "Coordinate hybrid cloud migrations across regions")
+    assert requirements.classify("Design and deliver remote-first onboarding across distributed teams") == (
+        "work", "Design and deliver remote-first onboarding across distributed teams")
+    # a genuine logistics line (no rescue verb, short / subject-led) still classifies as logistics.
+    assert requirements.classify("Must be willing to work a hybrid schedule with 3 days on-site per week")[0] == \
+        "logistics"
+    assert requirements.classify("Requires an active TS/SCI clearance with polygraph")[0] == "logistics"
 
 
 def test_credit_row_kind_weight_scales_credit_not_similarity():
@@ -1157,6 +1448,32 @@ def test_fit_stanza_coverage_parts():
     assert report.coverage_parts() == [] and report.coverage_detail() == []
 
 
+def test_refresh_hard_negatives_excludes_judge_stretch_grade(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    jobs = [N.base(req_id=f"S{i}", title=f"Line Cook {i}", url=f"https://x/S{i}", location="Springfield, IL")
+           for i in range(3)]
+    store.record_board(con, "Acme", "greenhouse", jobs, now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h1', description_fetched_at = ?",
+                [OFF_REQ_JD, now])
+    ids = [r[0] for r in con.execute("SELECT posting_id FROM postings ORDER BY req_id").fetchall()]
+    con.executemany("INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier, "
+                    "rule_score, fit_prob, final_score, band) VALUES (?, 'v1', 'none', ?, 'review', NULL, 10, ?, 10, "
+                    "'weak')", [[pid, now, 0.9 - i * 0.01] for i, pid in enumerate(ids)])
+    # the highest-fit posting is the confusable `stretch` band, not a confirmed negative -- it must never land
+    # in fit_top or audit, only in the separate stretch evaluation set.
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+                "grade_process, grade_technical, lane, confidence, blocker, rationale, batch, judged_at) "
+                "VALUES (?, 'h1', 'rv', 'test', 'stretch', 'stretch', 'stretch', 'secondary', 'high', '', '', "
+                "'b', ?)", [ids[0], now])
+    monkeypatch.setattr(P, "AUDIT_NEGATIVES", [ids[0]])
+    coverage.refresh_hard_negatives(con, hard_top=5, log=_quiet)
+    sources = dict(con.execute("SELECT posting_id, source FROM hard_negatives").fetchall())
+    assert ids[0] not in sources
+    assert sources.get(ids[1]) == "fit_top" and sources.get(ids[2]) == "fit_top"
+    con.close()
+
+
 def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatch):
     pytest.importorskip("sklearn")
     con = store.connect(str(tmp_path / "t.duckdb"))
@@ -1169,7 +1486,10 @@ def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatc
     rows = [[f"p{i}", "application", None, None, "Acme", f"Process Excellence Lead {i}",
              REQ_JD + f"\n- Run operating reviews for region number {i} with finance partners", 1, 1.0, now]
             for i in range(6)]
-    rows += [[f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}", OFF_REQ_JD, 0, 1.0, now]
+    # unique per row like the positives above: identical negative text would collapse into a single CV group
+    # (features._text_group_ids) and starve some folds of a negative class.
+    rows += [[f"n{i}", "pseudo_neg", None, None, "Beta", f"Software Engineer {i}",
+              OFF_REQ_JD + f"\n- Ticket number {i} in the on-call rotation", 0, 1.0, now]
              for i in range(6)]
     con.executemany("INSERT INTO label_docs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), log=_quiet)
@@ -1195,6 +1515,16 @@ def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatc
     assert 0.05 <= ctx["partial"] < ctx["strong"] <= 0.95
     keys = dict(con.execute("SELECT model, count(DISTINCT posting_id) FROM requirement_units GROUP BY 1").fetchall())
     assert keys == {f"{m.embed_model}|ctx=title": 6}      # model is not in the cache's key: a switch replaces rows
+    # current_calibration only returns a row whose notes match the running config -- a threshold set tuned
+    # under the reranker/title-context experiment must never be handed to a plain-cosine run, or vice versa.
+    plain = coverage.current_calibration(con, encoder="fake", reranker=None, req_context=None, log=_quiet)
+    assert plain["version"] == result["version"]
+    with_ctx = coverage.current_calibration(con, encoder="fake", reranker="fake-reranker", req_context="title",
+                                            log=_quiet)
+    assert with_ctx["version"] == ctx["version"]
+    lines = []
+    unmatched = coverage.current_calibration(con, encoder="fake", reranker=None, req_context="title", log=lines.append)
+    assert unmatched is None and any("no calibration matches" in ln for ln in lines)
     con.close()
 
 

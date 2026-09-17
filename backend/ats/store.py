@@ -24,7 +24,8 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 8  # v8 (2026-09-16): screens.fit_process / fit_technical;
+SCHEMA_VERSION = 9  # v9 (2026-09-17): postings.detail_attempts;
+                    # v8 (2026-09-16): screens.fit_process / fit_technical;
                     # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
@@ -559,13 +560,17 @@ def connect(db_path=None):
 def _add_missing_columns(con):
     """Additive column migrations. v7: the two lens grades on llm_labels (old rows keep NULL, which reads as
     'graded before the lenses existed'). v8: the two lens fit probabilities on screens (NULL = screened before
-    the lens models existed; a rescreen fills them)."""
+    the lens models existed; a rescreen fills them). v9: postings.detail_attempts (old rows default 0, i.e.
+    'never tried'), so a posting whose fetch keeps coming back empty stops eating the detail budget forever."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("screens", "fit_process", "DOUBLE"),
-                                ("screens", "fit_technical", "DOUBLE")):
+                                ("screens", "fit_technical", "DOUBLE"),
+                                ("postings", "detail_attempts", "INTEGER DEFAULT 0")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            if table == "postings" and column == "detail_attempts":
+                con.execute("UPDATE postings SET detail_attempts = 0 WHERE detail_attempts IS NULL")
 
 
 def _columns(con, table):
@@ -745,12 +750,22 @@ def log_run(con, run_id, started_at, finished_at, attempted, succeeded, failed,
     )
 
 
-def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=None, since=None):
-    """Active postings still missing a JD, newest first. `title_pattern` (regex) is a
-    BUDGETING device — it decides which postings get a detail request first, not
-    which ones matter."""
+DETAIL_MAX_ATTEMPTS = 3  # a posting whose fetch keeps coming back empty/erroring stops being retried
+
+
+def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=None, since=None,
+                       retry_exhausted=False):
+    """Active postings still missing a JD, least-tried and newest first. `title_pattern` (regex) is a
+    BUDGETING device — it decides which postings get a detail request first, not which ones matter.
+
+    A posting whose detail fetch came back empty (or errored) is retried, but not forever: once
+    `detail_attempts` reaches DETAIL_MAX_ATTEMPTS it drops out of the pool so it stops eating the
+    budget every run. `retry_exhausted=True` lifts that floor for a deliberate re-check."""
     where = "status = 'active' AND description_text IS NULL AND platform IN (SELECT unnest(?::VARCHAR[]))"
     params = [list(platforms)]
+    if not retry_exhausted:
+        where += " AND detail_attempts < ?"
+        params.append(DETAIL_MAX_ATTEMPTS)
     if since is not None:
         where += " AND first_seen_at >= ?"
         params.append(since)
@@ -765,7 +780,7 @@ def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=N
         SELECT posting_id, employer, platform, req_id, url, location_primary, locations,
                workplace_type, job_level, posted_at, posting_end_at
         FROM postings WHERE {where}
-        ORDER BY coalesce(posted_at, first_seen_at::DATE) DESC, first_seen_at DESC
+        ORDER BY detail_attempts ASC, coalesce(posted_at, first_seen_at::DATE) DESC, first_seen_at DESC
         LIMIT ?""", params).fetchall()
 
 
@@ -775,7 +790,17 @@ def apply_detail(con, pid, fields, now):
         fields["description_hash"] = description_hash(fields["description_text"])
     fields["description_fetched_at"] = now
     sets = ", ".join(f"{k} = ?" for k in fields)
-    con.execute(f"UPDATE postings SET {sets} WHERE posting_id = ?", list(fields.values()) + [pid])
+    con.execute(f"UPDATE postings SET {sets}, detail_attempts = detail_attempts + 1 WHERE posting_id = ?",
+                list(fields.values()) + [pid])
+
+
+def record_detail_error(con, pid, now):
+    """Counts a failed detail fetch (network/parse error, not a 404) against the same
+    `detail_attempts` budget as an empty result, so a persistently erroring posting also
+    ages out of `detail_candidates` instead of being retried every run."""
+    con.execute(
+        "UPDATE postings SET detail_attempts = detail_attempts + 1, description_fetched_at = ? WHERE posting_id = ?",
+        [now, pid])
 
 
 def close_posting(con, pid, now):

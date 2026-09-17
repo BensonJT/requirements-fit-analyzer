@@ -12,3 +12,22 @@ DOMAIN_TENURE_TERMS = ["banking", "pharma"]
 CANDIDATE_TENURE_FIELDS = ["operations", "consulting", "process improvement", "transformation"]
 CORRIDOR_PLACES = ["springfield, il"]
 FAITH_COMP_FLOOR = 85_000
+
+# ---- Level fit (finder sec 20.2) -- mirrored here (not just in profile.py) so tests that monkeypatch this
+# example file always see a known value, regardless of what a real profile_local.py sets.
+LEVEL_MANAGERIAL_YEARS_MAX = 3     # tighten in your own profile_local.py, e.g. 2, if your bar is lower
+LEVEL_OUT_OF_REACH_TITLE_TERMS = [
+    "senior director", "sr. director", "sr director", "executive director", "vice president", "vp", "svp",
+    "evp", "avp", "assistant vice president", "head of", "chief", "cxo", "general manager", "managing director",
+]
+LEVEL_STRETCH_TITLE_TERMS = ["director", "chief of staff"]
+LEVEL_IN_RANGE_TITLE_TERMS = [
+    "principal", "senior", "sr.", "sr ", "lead", "staff", "manager", "consultant", "analyst", "specialist",
+    "architect", "engineer", "program manager", "project manager", "owner",
+]
+ORG_BUILDING_TERMS = [
+    "build and lead", "build and scale", "build the org", "build the organization", "build a team",
+    "build the team", "build out the team", "scale the organization", "global teams", "global organization",
+    "spans of control", "span of control", "executive leadership team", "member of the executive",
+    "leaders of leaders", "manager of managers", "managers of managers", "org design",
+]

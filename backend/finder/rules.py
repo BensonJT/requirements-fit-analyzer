@@ -141,26 +141,42 @@ def travel_rule(title: str, text: str) -> RuleResult:
 _REPORTS = re.compile(r"(?<!\d)(\d{1,3})\+?\s*(?:direct[- ]reports?|people managers?)"
                       r"|manage\s*(\d{1,3})\+?\s*(?:direct[- ])?reports?", re.I)
 _TEAM_SIZE = re.compile(r"(?:team|staff|organization|org)\s+of\s*(\d{1,3})(?!\d)", re.I)
+# Whether a "team of N" headcount is something the posting asks the candidate to LEAD, not merely
+# support -- CACI's "support a team of 250+ professionals" is headcount, never scope (level_fit_rule, A1).
+_TEAM_LED_RE = re.compile(r"\b(?:lead|leads|leading|manage|manages|managing|run|runs|running|"
+                          r"own|owns|owning|direct|directs|directing|build|builds|building)\b", re.I)
 
 
 def direct_reports_rule(title: str, text: str) -> RuleResult:
-    """Team size stated in the JD, plus markers of building or running a large org."""
+    """Team size stated in the JD, plus markers of building or running a large org.
+
+    `notes["reports"]` stays the combined max (existing tests and the card-level flag/reason logic rely
+    on it). `direct_reports` (explicit "N direct reports") and `team_headcount` (program/org "team of N")
+    split the two for level_fit_rule (A1), which treats them differently; `team_headcount_led` records
+    whether the headcount number sits within 30 characters of a lead/manage/run/own/direct/build verb, so
+    "support a team of 250" never reads as scope the way "lead a team of 12" does.
+    """
     limit = P.MAX_DIRECT_REPORTS
     if limit is None or not text:
         return [], [], {}
     reasons, flags, notes = [], [], {}
     counts = [int(a or b) for a, b in _REPORTS.findall(text)]
-    team_counts = [int(n) for n in _TEAM_SIZE.findall(text)]
+    team_matches = list(_TEAM_SIZE.finditer(text))
     if counts:
         n = max(counts)
         notes["reports"] = n
+        notes["direct_reports"] = n
         if n > 2 * limit:
             reasons.append(f"large team ({n} direct reports)")
         elif n > limit:
             flags.append(f"team of {n} (limit {limit})")
-    if team_counts:
-        n = max(team_counts)
+    if team_matches:
+        n = max(int(m.group(1)) for m in team_matches)
         notes["reports"] = max(notes.get("reports", 0), n)
+        notes["team_headcount"] = n
+        notes["team_headcount_led"] = any(
+            _TEAM_LED_RE.search(text[max(0, m.start() - 30):m.start()])
+            for m in team_matches if int(m.group(1)) == n)
         if n > limit:
             flags.append(f"team of {n} (limit {limit})")
     markers = find_terms(P.LARGE_TEAM_MARKERS, text)
@@ -343,6 +359,162 @@ def level_rule(title: str, text: str, annual_top: Optional[float] = None) -> Rul
     return reasons, flags, notes
 
 
+# "own the P&L" / "profit and loss responsibility": one scope hit for level_fit_rule when the mention
+# sits within 80 characters of an ownership/accountability word, so a P&L mentioned only as a reporting
+# artifact ("P&L review each quarter") does not count.
+_PNL_RE = re.compile(r"\bP\s*&\s*L\b|\bprofit\s+(?:and|&)\s+loss\b", re.I)
+_PNL_OWNERSHIP_RE = re.compile(r"own|ownership|responsib|accountab|manag|deliver", re.I)
+# "N years managerial / people leadership" -- the same number grammar as required_years, but only when
+# the sentence itself reads as people-management scope, not a generic years-of-experience line.
+# PEOPLE management only: "project management", "process management", "change management" and every other
+# "<noun> management" line is function, not scope, and the target lane is full of them. A bare "manag" here
+# would have made "10+ years of project management experience" a scope hit on most of the corpus.
+_MGR_SENTENCE_RE = re.compile(
+    r"people[- ](?:management|leadership)|managerial|supervis(?:or|ory|ing|ion)"
+    r"|(?:manag(?:e|ing|ed|ement)|lead(?:ing|ership)?|led)\s+(?:of\s+)?(?:an?\s+|the\s+)?"
+    r"(?:teams?|staff|people|direct reports|employees|analysts|managers|engineers|organi[sz]ations?|groups?)\b"
+    r"|team management|direct reports", re.I)
+# "Chief of Staff" is a director-band deputy seat (a stretch term), not a C-suite title: strip it before the
+# "chief" term is looked up so it never reads out_of_reach.
+_CHIEF_OF_STAFF_RE = re.compile(r"chief\s+of\s+staff", re.I)
+
+
+def _managerial_years(block: str) -> Optional[int]:
+    """The largest years-of-experience number whose sentence also reads as people-management scope."""
+    block = block or ""
+    best = None
+    for m in _YEAR_WORD.finditer(block):
+        before = block[max(0, m.start() - 40):m.start()]
+        lead = _LEAD.search(before)
+        if not lead:
+            continue
+        after = _SENTENCE_END.split(block[m.end():m.end() + 100], 1)[0]
+        prior = _SENTENCE_END.split(block[max(0, m.start() - 120):m.start()])[-1]
+        sentence = prior + " " + after
+        if not re.search(r"experien", after + " " + prior, re.I):
+            continue
+        if not _MGR_SENTENCE_RE.search(sentence):
+            continue
+        n = _number(lead.group(1))
+        if 0 < n <= P.LEVEL_YEARS_CAP:
+            best = n if best is None else max(best, n)
+    return best
+
+
+def level_fit_rule(title: str, text: str, annual_top: Optional[float] = None,
+                   reports_notes: Optional[dict] = None) -> RuleResult:
+    """Second, independent level signal (sprint plan sec 20.2): title and Required-block scope against the
+    author's target level, ordered too_low < in_range < stretch_up < out_of_reach < unknown (outside the
+    order). Never a reason or a flag -- level_rule above still decides verdict/rule_score; this rule only
+    writes notes["level_fit"] (and notes["level_fit_hits"], short strings the report shows) for the human
+    vs. rule agreement check in report_feedback. `reports_notes` is direct_reports_rule's notes dict (or
+    the screen_row-merged notes, a superset of it) so team size does not have to be recomputed here.
+
+    Decision order, first match wins: early-career title with no senior/in-range/stretch/out-of-reach
+    signal -> too_low; an out-of-reach title term -> out_of_reach; 2+ scope hits (a Director-type stretch
+    title term counts as one of them, so "Director" alone is one hit and "Director" + a P&L mention is
+    two) -> out_of_reach, exactly 1 -> stretch_up; a posted band top under COMP_FLOOR -> too_low; years
+    below LEVEL_YEARS_MID -> in_range when the band is at/above the floor or the title/years already read
+    senior (level_rule's own senior note), else too_low; otherwise in_range when an in-range title term,
+    level_rule's senior note, a band at/above the floor, or years at/above LEVEL_YEARS_MID fired; else
+    unknown.
+    """
+    title = title or ""
+    block = required_block(text)
+    reports_notes = reports_notes or {}
+    hits: list = []
+
+    out_terms = find_terms(P.LEVEL_OUT_OF_REACH_TITLE_TERMS, _CHIEF_OF_STAFF_RE.sub("", title))
+    stretch_terms = find_terms(P.LEVEL_STRETCH_TITLE_TERMS, title)
+    in_range_terms = find_terms(P.LEVEL_IN_RANGE_TITLE_TERMS, title)
+    early_terms = find_terms(P.EARLY_CAREER_TITLE_TERMS, title)
+    if out_terms:
+        hits.append(f"title: {out_terms[0]}")
+    elif stretch_terms:
+        hits.append(f"title: {stretch_terms[0]}")
+    if in_range_terms:
+        hits.append(f"title: {in_range_terms[0]}")
+    if early_terms:
+        hits.append(f"title: {early_terms[0]}")
+
+    # Scope: org-building phrases (capped at 2, each distinct term once), P&L ownership, managerial
+    # years over the profile limit, team size over the profile limit -- plus the stretch title term
+    # itself, so "Director" alone is one hit (stretch_up) and "Director" + one more scope signal is
+    # two (out_of_reach).
+    org_universe = list(P.ORG_BUILDING_TERMS) + list(P.LARGE_TEAM_MARKERS)
+    distinct_org = list(dict.fromkeys(find_terms(org_universe, block)))
+    org_scope = min(len(distinct_org), 2)
+    for t in distinct_org[:2]:
+        hits.append(f"scope: {t}")
+
+    pnl_scope = 0
+    for m in _PNL_RE.finditer(block):
+        window = block[max(0, m.start() - 80):m.start()]
+        if _PNL_OWNERSHIP_RE.search(window):
+            pnl_scope = 1
+            hits.append("p&l")
+            break
+
+    mgr_years = _managerial_years(block)
+    mgr_scope = 0
+    if mgr_years is not None and mgr_years > P.LEVEL_MANAGERIAL_YEARS_MAX:
+        mgr_scope = 1
+        hits.append(f"managerial years {mgr_years} > {P.LEVEL_MANAGERIAL_YEARS_MAX}")
+
+    reports_scope = 0
+    max_reports = reports_notes.get("direct_reports")
+    max_headcount = reports_notes.get("team_headcount")
+    headcount_led = reports_notes.get("team_headcount_led")
+    if P.MAX_DIRECT_REPORTS is not None:
+        limit = P.MAX_DIRECT_REPORTS
+        if max_reports is not None and max_reports > 2 * limit:
+            reports_scope += 2
+            hits.append(f"direct reports {max_reports}")
+        elif max_reports is not None and max_reports > limit:
+            reports_scope += 1
+            hits.append(f"direct reports {max_reports}")
+        if headcount_led and max_headcount is not None and max_headcount > 2 * limit:
+            reports_scope += 1
+            hits.append(f"team headcount {max_headcount}")
+
+    stretch_scope = 1 if stretch_terms else 0
+    scope_hits = org_scope + pnl_scope + mgr_scope + reports_scope + stretch_scope
+
+    years = required_years(block)
+    most_years = max(years) if years else None
+    _, _, level_notes = level_rule(title, text, annual_top)
+    senior_note = bool(level_notes.get("senior"))
+
+    pay_posted = annual_top is not None
+    pay_below_floor = pay_posted and bool(P.COMP_FLOOR) and annual_top < P.COMP_FLOOR
+    pay_at_floor = pay_posted and bool(P.COMP_FLOOR) and annual_top >= P.COMP_FLOOR
+    years_below_mid = most_years is not None and most_years < P.LEVEL_YEARS_MID
+    years_at_mid = most_years is not None and most_years >= P.LEVEL_YEARS_MID
+
+    if early_terms and not (senior_note or in_range_terms or stretch_terms or out_terms):
+        value = "too_low"
+    elif out_terms:
+        value = "out_of_reach"
+    elif scope_hits >= 2:
+        value = "out_of_reach"
+    elif scope_hits == 1:
+        value = "stretch_up"
+    elif pay_below_floor:
+        value = "too_low"
+    elif years_below_mid:
+        # Pay in range overrides low years (the user's rule); with no band posted, only a title/years
+        # that already reads senior (level_rule's own senior note) rescues it -- a bare IC title like
+        # "Analyst" or "Engineer" alone does not, or a 3-year Analyst JD with no band would always
+        # read in_range off its own title term.
+        value = "in_range" if (pay_at_floor or senior_note) else "too_low"
+    elif in_range_terms or senior_note or pay_at_floor or years_at_mid:
+        value = "in_range"
+    else:
+        value = "unknown"
+
+    return [], [], {"level_fit": value, "level_fit_hits": hits}
+
+
 _DAYS = r"(?:\d|one|two|three|four|five)(?:\s*(?:-|–|to|or)\s*(?:\d|one|two|three|four|five))?\s*(?:\(\d\)\s*)?days?"
 _WEEK = r"\s*(?:a|per|each|every|/)\s*week"
 _HYBRID_TEXT = re.compile(
@@ -503,6 +675,12 @@ def screen_row(row: dict) -> ScreenRecord:
         _merge(reasons, r)
         _merge(flags, f)
         notes.update(n)
+
+    # A second, independent level signal (sec 20.2): runs after the other rules so it can read
+    # notes["direct_reports"] / notes["team_headcount"] / notes["team_headcount_led"] from
+    # direct_reports_rule above. Never a reason or a flag -- verdict and rule_score are untouched.
+    _, _, level_fit_notes = level_fit_rule(title, text, listing.annual_top, notes)
+    notes.update(level_fit_notes)
 
     verdict = "reject" if reasons else ("review" if flags else "candidate")
     notes["components"] = {"level": level_points(notes), "location": location_points(listing),

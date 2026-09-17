@@ -426,7 +426,7 @@ Outcomes
 
 def _report_fixture(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
-    jobs = [N.base(req_id=f"S{i}", title=f"Senior Director, Lean Six Sigma Operational Excellence {i}",
+    jobs = [N.base(req_id=f"S{i}", title=f"Senior Manager, Lean Six Sigma Operational Excellence {i}",
                    url=f"https://x/S{i}", workplace_type="remote", pay_min=120000, pay_max=150000,
                    pay_interval="year", description_text=JD_WITH_HEADINGS) for i in range(2)]
     jobs.append(N.base(req_id="R1", title="Operational Excellence Engineer", url="https://x/R1",

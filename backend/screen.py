@@ -83,6 +83,11 @@ _REMOTE_DUTY_RE = re.compile(
 # "United States, Multiple Locations" onsite tag being the case that surfaced this).
 _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
 
+# "US Off-Site" is one employer's location-segment label for remote (sec 20.3), hyphen optional, any
+# case. It is checked separately from REMOTE_TERMS/_remote_in_context because it can appear in
+# job.locations (the plural list), which _remote_in_context never reads.
+_US_OFFSITE_RE = re.compile(r"\bus\s+off-?site\b", re.I)
+
 
 def _remote_in_context(text: str) -> bool:
     """A REMOTE_TERMS hit on a line/sentence that reads as a location or workplace statement --
@@ -100,8 +105,16 @@ def is_remote(job: Listing) -> bool:
     workplace = job.extra.get("workplace_type")
     if workplace == "remote":  # the ATS's own flag (finder rows)
         return True
+    # "US Off-Site" as a location segment always means remote, whichever field carries it (sec 20.3).
+    offsite_blob = "\n".join([job.location or "", *(job.locations or []), job.description or ""])
+    if _US_OFFSITE_RE.search(offsite_blob):
+        return True
     # The full JD, not just the first 600 characters -- Blue Yonder's "Location: US-REMOTE with the
-    # ability to travel up to 30%" line sits well past that cutoff.
+    # ability to travel up to 30%" line sits well past that cutoff. REMOTE_TERMS now also carries
+    # "#li-remote" / "#bi-remote", so a JD footer tag reads here too; when #LI-Hybrid and #LI-Remote
+    # both appear the ATS-flag branch below never returns False (jd_remote is already True), so the
+    # posting is remote -- the user's ruling. A lone #LI-Hybrid never matches REMOTE_TERMS, so it adds
+    # no signal either way, positive or negative.
     jd_remote = _remote_in_context(f"{job.title}\n{job.location}\n{job.description}")
     if workplace in ("hybrid", "onsite"):  # stated (or read from the JD) beats a guess...
         generic_location = bool(_GENERIC_LOCATION_RE.search(job.location or ""))

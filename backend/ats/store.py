@@ -24,9 +24,11 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 9  # v9 (2026-09-17): postings.detail_attempts;
-                    # v8 (2026-09-16): screens.fit_process / fit_technical;
-                    # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
+SCHEMA_VERSION = 10  # v10 (2026-09-17): screens.level_fit / fit_ai, llm_labels.grade_ai, report_feedback table
+                     #                  (sprint plan 20.2 / 21 — level rule + applied-AI lens);
+                     # v9 (2026-09-17): postings.detail_attempts;
+                     # v8 (2026-09-16): screens.fit_process / fit_technical;
+                     # v7 (2026-09-16): llm_labels two-lens grades; v6 (2026-09-15): training_exclusions; v5 (2026-09-15): llm_labels; v3 (2026-09-15): finder tables; v4 (2026-09-16): coverage tables; no postings changes
 
 # Columns the adapters supply, in the order the staging table and upsert use them.
 POSTING_COLUMNS = (
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS screens (
     fit_prob        DOUBLE,                    -- Phase 2
     fit_process     DOUBLE,                    -- per-lens fit (18.8): process excellence / operating model
     fit_technical   DOUBLE,                    -- per-lens fit (18.8): data, analytics, quantitative
+    fit_ai          DOUBLE,                    -- per-lens fit (21): applied-AI delivery / enablement
     embed_sim       DOUBLE,                    -- Phase 3 (raw cosine)
     llm_score       INTEGER,                   -- Phase 4
     final_score     INTEGER NOT NULL,          -- 0-100
@@ -132,6 +135,7 @@ CREATE TABLE IF NOT EXISTS screens (
     flags           JSON,
     top_terms       JSON,                      -- [["lean six sigma", 0.41], ...]
     llm_notes       VARCHAR,
+    level_fit       VARCHAR,                   -- too_low | in_range | stretch_up | out_of_reach | unknown (20.2)
     PRIMARY KEY (posting_id, rules_version, model_version)
 );
 
@@ -214,6 +218,8 @@ CREATE TABLE IF NOT EXISTS llm_labels (
     grade VARCHAR NOT NULL,                  -- bullseye | adjacent | stretch | wrong (overall = best lens)
     grade_process VARCHAR,                   -- process excellence / operating model / change management lens
     grade_technical VARCHAR,                 -- data, analytics, quantitative modelling and engineering lens
+    grade_ai VARCHAR,                        -- applied-AI delivery / enablement lens (21); reported beside the
+                                              -- other two, never folded into `grade`
     lane VARCHAR, confidence VARCHAR, blocker VARCHAR, rationale VARCHAR, batch VARCHAR,
     judged_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
@@ -244,6 +250,27 @@ CREATE TABLE IF NOT EXISTS board_scope (
 CREATE TABLE IF NOT EXISTS hard_negatives (
     posting_id VARCHAR NOT NULL, source VARCHAR NOT NULL, note VARCHAR, refreshed_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, source)
+);
+
+-- The golden source (sprint plan 20.2 / 20.5): the user's own reads of a JD, loaded from a vault CSV rather
+-- than typed here. One row per (posting, JD text, who assessed it) -- a `user`/`human-override` row always
+-- outranks a review row for the SAME text (vw_report_feedback_latest), and a row whose description_hash no
+-- longer matches the posting's current text is simply absent from that view: the JD changed under it, so the
+-- label is retired, not deleted (report_feedback itself keeps every row forever for the export/audit trail).
+CREATE TABLE IF NOT EXISTS report_feedback (
+    posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL,
+    report_files VARCHAR, snapshot_final_score INTEGER, snapshot_band VARCHAR,
+    snapshot_grade_process VARCHAR, snapshot_grade_technical VARCHAR,
+    human_grade VARCHAR,                 -- bullseye|adjacent|stretch|wrong; NULL = capability not assessed
+    level_fit VARCHAR,                   -- in_range|stretch_up|out_of_reach|too_low; NULL = not assessed
+    verdict VARCHAR NOT NULL,            -- build|consider|pass
+    reason_code VARCHAR, reason_detail VARCHAR, positioning VARCHAR, confidence VARCHAR,
+    basis VARCHAR NOT NULL,              -- jd_read|metadata|rule_screen
+    assessor VARCHAR NOT NULL,           -- 'user' / 'human-override' outrank 'claude-*-review'
+    confirmed_by_user BOOLEAN NOT NULL DEFAULT false,
+    note VARCHAR, grade_before_split VARCHAR, needs_confirm BOOLEAN, split_reason VARCHAR,
+    assessed_at TIMESTAMP NOT NULL, loaded_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, assessor)
 );
 """
 
@@ -348,13 +375,43 @@ CREATE OR REPLACE VIEW vw_llm_labels_latest AS
     QUALIFY row_number() OVER (PARTITION BY l.posting_id
                                ORDER BY (l.scorer = 'user-adjudicated') DESC, l.judged_at DESC) = 1;
 
+-- The user's own read (or override) of a posting always wins over a review row for the SAME text; otherwise
+-- the row confirmed by the user wins; otherwise the newest assessment. A row whose description_hash no longer
+-- matches the posting's CURRENT text is simply absent here -- the JD changed under it and the label expired.
+CREATE OR REPLACE VIEW vw_report_feedback_latest AS
+    SELECT f.* FROM report_feedback f JOIN postings p ON p.posting_id = f.posting_id
+      AND coalesce(p.description_hash, '') = f.description_hash
+    QUALIFY row_number() OVER (PARTITION BY f.posting_id
+        ORDER BY (f.assessor IN ('user', 'human-override')) DESC, f.confirmed_by_user DESC, f.assessed_at DESC) = 1;
+
+-- Ordinal rank for level_fit, low -> high; unknown/NULL has no rank (20.2's "one step" language needs a
+-- distance, not just equality).
+CREATE OR REPLACE MACRO level_fit_rank(v) AS
+    CASE v WHEN 'too_low' THEN 0 WHEN 'in_range' THEN 1 WHEN 'stretch_up' THEN 2 WHEN 'out_of_reach' THEN 3 END;
+
+-- Confirmed human level_fit vs. the rule's answer stored on the posting's latest screen. This view reads the
+-- STORED screens.level_fit (post-rescreen); backend/finder/feedback.py's `agreement()` computes the rule LIVE
+-- instead so the number does not wait on a rescreen -- see the sprint plan 20.2 note "this works before any
+-- rescreen, which is the point".
+CREATE OR REPLACE VIEW vw_level_agreement AS
+    SELECT f.posting_id, p.employer, p.title, f.level_fit AS human_level_fit, s.level_fit AS rule_level_fit,
+           f.level_fit = s.level_fit AS agree,
+           abs(level_fit_rank(f.level_fit) - level_fit_rank(s.level_fit)) AS steps_apart
+    FROM vw_report_feedback_latest f
+    JOIN postings p USING (posting_id)
+    LEFT JOIN vw_screen_latest s USING (posting_id)
+    WHERE f.level_fit IS NOT NULL AND f.confirmed_by_user;
+
 -- Every judged posting with both lens grades and which lens favoured it. Feeds the three report lists the
 -- user asked for: strong on process, strong on technical, and strong on BOTH (the least substitutable shape).
 CREATE OR REPLACE VIEW vw_lens_grades AS
-    SELECT l.posting_id, p.employer, p.title, p.url, l.grade, l.grade_process, l.grade_technical,
+    SELECT l.posting_id, p.employer, p.title, p.url, l.grade, l.grade_process, l.grade_technical, l.grade_ai,
            l.blocker, l.rationale, s.final_score, s.band, s.verdict,
            l.grade_process IN ('bullseye', 'adjacent') AS process_strong,
            l.grade_technical IN ('bullseye', 'adjacent') AS technical_strong,
+           -- Reported beside process/technical, never folded into `lens_bucket` (21: "ai is reported beside
+           -- the others, never folded in") -- the overall positioning call still comes from process/technical.
+           l.grade_ai IN ('bullseye', 'adjacent') AS ai_strong,
            -- `both` requires at least one bullseye. adjacent/adjacent is mediocre on both lenses, not the rare
            -- role that genuinely demands both, and letting it in fills the list the user most wants with
            -- lukewarm rows (9 of the 25 'both' rows on the 2026-09-16 pilot were adjacent/adjacent).
@@ -398,8 +455,9 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                p.pay_min, p.pay_max, p.pay_interval, p.first_seen_at,
                date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
                s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.fit_process, s.fit_technical,
+               s.fit_ai, s.level_fit,
                s.reasons, s.flags,
-               g.grade, g.grade_process, g.grade_technical, g.blocker, g.scorer,
+               g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer,
                d.posting_id IS NOT NULL AS decided,
                t.matched_posting_id IS NOT NULL AS in_tracker
         FROM postings p
@@ -421,6 +479,12 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                     ELSE fit_process >= lens_standout_p() END AS process_standout,
                CASE WHEN grade_technical IS NOT NULL THEN grade_technical = 'bullseye'
                     ELSE fit_technical >= lens_standout_p() END AS technical_standout,
+               -- Applied-AI lens (21): same strong/standout pattern, but never folds into lens_bucket or
+               -- lens_source below -- it is reported beside the other two, not merged with them.
+               CASE WHEN grade_ai IS NOT NULL THEN grade_ai IN ('bullseye', 'adjacent')
+                    ELSE fit_ai >= lens_strong_p() END AS ai_strong,
+               CASE WHEN grade_ai IS NOT NULL THEN grade_ai = 'bullseye'
+                    ELSE fit_ai >= lens_standout_p() END AS ai_standout,
                CASE WHEN scorer = 'user-adjudicated' THEN 'user'
                     WHEN grade_process IS NOT NULL AND grade_technical IS NOT NULL THEN 'judge'
                     WHEN grade_process IS NOT NULL OR grade_technical IS NOT NULL THEN 'judge+model'
@@ -453,7 +517,7 @@ CREATE OR REPLACE VIEW vw_shortlist AS
            p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
            date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
            s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob,
-           s.fit_process, s.fit_technical, s.embed_sim, s.llm_score,
+           s.fit_process, s.fit_technical, s.fit_ai, s.level_fit, s.embed_sim, s.llm_score,
            s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at,
            c.coverage_required, c.coverage_role
     FROM postings p
@@ -532,6 +596,28 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     WHERE length(p.description_text) >= 800 AND l.grade_technical IS NOT NULL;
 
+-- Applied-AI lens training set (21), same shape as vw_label_set_process / vw_label_set_technical, reading
+-- grade_ai. features.LENS_VIEWS["ai"] points here (Agent C wires the lens name in; this view can exist and
+-- be queried before that lands).
+CREATE OR REPLACE VIEW vw_label_set_ai AS
+    SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
+    FROM label_docs WHERE text IS NOT NULL
+    UNION ALL
+    SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
+    FROM vw_decisions d JOIN postings p USING (posting_id)
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    UNION ALL
+    SELECT 'llm:' || l.posting_id,
+           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN l.grade_ai IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE l.grade_ai WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+                           WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           l.grade_ai
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WHERE length(p.description_text) >= 800 AND l.grade_ai IS NOT NULL;
+
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS
     SELECT posting_id, employer, title, location_primary, status,
@@ -561,11 +647,16 @@ def _add_missing_columns(con):
     """Additive column migrations. v7: the two lens grades on llm_labels (old rows keep NULL, which reads as
     'graded before the lenses existed'). v8: the two lens fit probabilities on screens (NULL = screened before
     the lens models existed; a rescreen fills them). v9: postings.detail_attempts (old rows default 0, i.e.
-    'never tried'), so a posting whose fetch keeps coming back empty stops eating the detail budget forever."""
+    'never tried'), so a posting whose fetch keeps coming back empty stops eating the detail budget forever.
+    v10: screens.level_fit (NULL until the level rule runs / a rescreen fills it), screens.fit_ai and
+    llm_labels.grade_ai (NULL until the applied-AI lens model / judge exist)."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
+                                ("llm_labels", "grade_ai", "VARCHAR"),
                                 ("screens", "fit_process", "DOUBLE"),
                                 ("screens", "fit_technical", "DOUBLE"),
+                                ("screens", "fit_ai", "DOUBLE"),
+                                ("screens", "level_fit", "VARCHAR"),
                                 ("postings", "detail_attempts", "INTEGER DEFAULT 0")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")

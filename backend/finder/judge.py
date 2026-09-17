@@ -28,6 +28,15 @@ WAVE = {"high": 17, "low": 5, "reject": 3}     # per 25 exported postings
 DUP_COSINE = 0.995                             # a repost, not a sibling role: near-identical text AND a similar title
                                                # (0.97 collapsed genuinely different roles that share employer boilerplate)
 
+# §21's live-validation pool: postings whose TITLE alone signals applied AI, grade these first. Deliberately
+# title-only and narrower than a full-text sweep -- `ai_term_estimate` below measures the wider JD-text set
+# separately, before anyone commits to the cost of regrading it.
+AI_TITLE_RE = (r"\bAI\b|artificial intelligence|machine learning|\bML\b|\bLLM\b|GenAI|generative|agentic"
+              r"|copilot|intelligent automation")
+# The same signal plus a few JD-body-only phrases too generic to trust in a title (a "RAG" or "prompt
+# engineering" TITLE is vanishingly rare; in the body they are common and specific).
+_AI_TERM_TEXT_RE = AI_TITLE_RE + r"|prompt engineering|large language model|\bRAG\b|retrieval-augmented"
+
 
 def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -101,7 +110,12 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
             seen.add(pid)
             taken[kind] += 1
             rejects.append(pid)
-    result = {"high": high, "low": low, "reject": rejects}
+    ai_title = [r[0] for r in _rows(con, """
+        SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
+        WHERE p.status = 'active' AND coalesce(s.verdict, '') != 'reject'
+          AND regexp_matches(coalesce(p.title, ''), ?, 'i')
+        ORDER BY coalesce(p.posted_at, p.first_seen_at::DATE) DESC, p.posting_id""", [AI_TITLE_RE])]
+    result = {"high": high, "low": low, "reject": rejects, "ai_title": ai_title}
     if relabel is not None:
         # Postings whose newest label PREDATES the current rubric. Rows already re-graded under it drop out, so
         # `--relabel` is idempotent: re-running it after a part-finished run queues exactly what is left.
@@ -271,12 +285,14 @@ BATCH_HEADER = """# Labeling batch {n} — grade the WORK, not the candidate's o
 {rubric}
 {lens_process}
 {lens_technical}
+{lens_ai}
 {personal}
 {personal_process}
 {personal_technical}
+{personal_ai}
 ## How to answer
 Return ONE JSON object per posting below, as a JSON array, written to `{result}`. No prose, no markdown fence.
-Grade every posting in this file, on BOTH lenses. Use the posting_id exactly as given.
+Grade every posting in this file, on ALL THREE lenses. Use the posting_id exactly as given.
 
 ## Postings ({count})
 """
@@ -301,9 +317,11 @@ def write_batches(con, out_dir: str, queue: list, *, batch_size: int = BATCH_SIZ
         result = f"{name}.result.json"
         body = [BATCH_HEADER.format(
             n=n, rubric=rubric.RUBRIC_PUBLIC, lens_process=rubric.RUBRIC_LENS_PROCESS,
-            lens_technical=rubric.RUBRIC_LENS_TECHNICAL, personal=personal,
+            lens_technical=rubric.RUBRIC_LENS_TECHNICAL, lens_ai=getattr(rubric, "RUBRIC_LENS_AI", ""),
+            personal=personal,
             personal_process=getattr(rubric, "RUBRIC_PERSONAL_PROCESS", ""),
             personal_technical=getattr(rubric, "RUBRIC_PERSONAL_TECHNICAL", ""),
+            personal_ai=getattr(rubric, "RUBRIC_PERSONAL_AI", ""),
             result=result, count=len(chunk))]
         for p in chunk:
             body.append(f"\n### {p.posting_id}\n**{p.employer} — {p.title}**\n")
@@ -349,6 +367,12 @@ def _validate(obj: dict, allowed: dict) -> Optional[str]:
         return None                      # a single-lens result file from before the split; still importable
     if missing:
         return f"{pid}: {', '.join(missing)} not in {rubric.GRADES}"
+    # grade_ai is required only when the object actually names it: a two-lens result file from before the AI
+    # lens existed omits the key entirely (or sends it null), and that stays importable with grade_ai = NULL
+    # (load_results counts it as a warning). A PRESENT grade_ai that is not one of the four grades is refused.
+    ai = obj.get("grade_ai")
+    if ai is not None and ai not in rubric.GRADES:
+        return f"{pid}: grade_ai not in {rubric.GRADES}"
     return None
 
 
@@ -369,7 +393,7 @@ def status(out_dir: str, log=print) -> dict:
 def to_csv(con, path: str, log=print) -> str:
     """Every judged posting as a row to eyeball: grade, rationale, blocker, the score it had, and its URL."""
     con.execute("""COPY (
-        SELECT l.grade, l.grade_process, l.grade_technical,
+        SELECT l.grade, l.grade_process, l.grade_technical, l.grade_ai,
                CASE WHEN l.grade_process IS NULL THEN 'single-lens'
                     WHEN l.grade_process = l.grade_technical THEN 'equal'
                     WHEN list_position(['bullseye','adjacent','stretch','wrong'], l.grade_process)
@@ -392,6 +416,7 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     version = manifest["rubric_version"]
     rows, errors, seen = [], [], {}
+    ai_missing = 0
     for name, meta in manifest["batches"].items():
         path = out / meta["result"]
         if not path.exists():
@@ -410,12 +435,18 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
                 continue
             pid = obj["posting_id"].strip()
             gp, gt = obj.get("grade_process"), obj.get("grade_technical")
+            ga = obj.get("grade_ai")
+            if ga not in rubric.GRADES:
+                ga = None
+                if gp in rubric.GRADES and gt in rubric.GRADES:
+                    # a two-lens result file from before the AI lens existed -- back-compat, not an error.
+                    ai_missing += 1
             if gp in rubric.GRADES and gt in rubric.GRADES:
                 g = overall(gp, gt)
             else:                        # pre-split result file: one grade, no lens breakdown
                 g, gp, gt = obj["grade"], None, None
-            seen[pid] = (g, gp, gt)
-            rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, obj.get("lane"),
+            seen[pid] = (g, gp, gt, ga)
+            rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, ga, obj.get("lane"),
                          obj.get("confidence"), (obj.get("blocker") or "")[:400],
                          (obj.get("rationale") or "")[:600], name, _now()])
     hashes = dict(_rows(con, "SELECT posting_id, coalesce(description_hash, '') FROM postings"))
@@ -423,27 +454,31 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
     for dup_id, rep in manifest.get("duplicates", {}).items():
         if rep in seen and dup_id in hashes:
             src = next(r for r in rows if r[0] == rep)
-            rows.append([dup_id, hashes[dup_id], version, scorer, *src[4:11], f"dup:{rep}", _now()])
+            rows.append([dup_id, hashes[dup_id], version, scorer, *src[4:12], f"dup:{rep}", _now()])
             copied += 1
     if rows:
         con.executemany("INSERT OR REPLACE INTO llm_labels (posting_id, description_hash, rubric_version, "
-                        "scorer, grade, grade_process, grade_technical, lane, confidence, blocker, rationale, "
-                        "batch, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                        "scorer, grade, grade_process, grade_technical, grade_ai, lane, confidence, blocker, "
+                        "rationale, batch, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     counts = dict(_rows(con, "SELECT grade, count(*) FROM llm_labels WHERE rubric_version = ? GROUP BY 1", [version]))
-    lenses = _rows(con, """SELECT grade_process, grade_technical, count(*) FROM llm_labels
-                           WHERE rubric_version = ? AND grade_process IS NOT NULL GROUP BY 1, 2""", [version])
+    lenses = _rows(con, """SELECT grade_process, grade_technical, grade_ai, count(*) FROM llm_labels
+                           WHERE rubric_version = ? AND grade_process IS NOT NULL GROUP BY 1, 2, 3""", [version])
     log(f"Judge import: {len(rows)} labels written ({copied} copied to near-duplicates), {len(errors)} rejected; "
         f"overall grades so far {counts}")
     if lenses:
         good = {"bullseye", "adjacent"}
-        both = sum(c for gp, gt, c in lenses if gp in good and gt in good)
-        proc = sum(c for gp, gt, c in lenses if gp in good and gt not in good)
-        tech = sum(c for gp, gt, c in lenses if gt in good and gp not in good)
+        both = sum(c for gp, gt, _, c in lenses if gp in good and gt in good)
+        proc = sum(c for gp, gt, _, c in lenses if gp in good and gt not in good)
+        tech = sum(c for gp, gt, _, c in lenses if gt in good and gp not in good)
+        ai_strong = sum(c for _, _, ga, c in lenses if ga in good)
         log(f"  by lens: process-only {proc} · technical-only {tech} · BOTH {both} · neither "
-            f"{sum(c for _, _, c in lenses) - proc - tech - both}")
+            f"{sum(c for *_, c in lenses) - proc - tech - both} · ai-strong {ai_strong}")
+    if ai_missing:
+        log(f"  note: {ai_missing} two-lens result(s) had no grade_ai (from before the AI lens existed); "
+            f"loaded with grade_ai = NULL")
     for e in errors[:10]:
         log(f"  rejected: {e}")
-    return {"written": len(rows), "copied": copied, "errors": errors, "grades": counts}
+    return {"written": len(rows), "copied": copied, "errors": errors, "grades": counts, "ai_missing": ai_missing}
 
 
 THIN_TEXT = re.compile(r"too thin|no (actual |specific )?(requirements|role|duties|responsibilities)"
@@ -472,6 +507,17 @@ def exclude_thin(con, log=print) -> int:
     return n
 
 
+def ai_term_estimate(con) -> dict:
+    """How much of the active corpus even mentions applied AI, measured BEFORE committing to the cost of
+    regrading it (sprint plan §21: title-hit postings first, then this wider set, then the corpus decision)."""
+    title_n = _rows(con, "SELECT count(*) FROM postings WHERE status = 'active' "
+                         "AND regexp_matches(coalesce(title, ''), ?, 'i')", [AI_TITLE_RE])[0][0]
+    text_n = _rows(con, "SELECT count(*) FROM postings WHERE status = 'active' AND description_text IS NOT NULL "
+                        "AND regexp_matches(coalesce(title, '') || chr(10) || description_text, ?, 'i')",
+                   [_AI_TERM_TEXT_RE])[0][0]
+    return {"ai_title": title_n, "ai_term_text": text_n}
+
+
 def agreement(con, log=print) -> dict:
     """Checks the judge against the user's own behaviour: postings they applied to or marked build should not be
     graded `wrong`; postings they passed on for function reasons should not be graded `bullseye`."""
@@ -488,4 +534,21 @@ def agreement(con, log=print) -> dict:
     log(f"Grades over all judged postings: {total}")
     log(f"  on postings the user pursued: {dict(applied)}   (a `wrong` here is a disagreement worth reading)")
     log(f"  on postings the user passed for function: {dict(passed)}")
-    return {"total": total, "pursued": dict(applied), "passed_function": dict(passed)}
+
+    # AI-lens independence (§18.7's bar, applied to the third lens): a lens that just echoes the other two
+    # would show near-total agreement, which is exactly the anchoring failure mode the pilot was built to catch.
+    ai_rows = _rows(con, """SELECT grade_ai, grade_process, grade_technical FROM vw_llm_labels_latest
+                            WHERE grade_ai IS NOT NULL""")
+    ai_independence = None
+    if ai_rows:
+        differs = sum(1 for ga, gp, gt in ai_rows if ga != gp and ga != gt)
+        ai_independence = round(100 * differs / len(ai_rows), 1)
+        log(f"  AI-lens independence: {ai_independence}% of {len(ai_rows)} graded rows have grade_ai different "
+            f"from BOTH grade_process and grade_technical")
+
+    terms = ai_term_estimate(con)
+    log(f"  AI-term corpus estimate: {terms['ai_title']} active postings with AI in the TITLE, "
+        f"{terms['ai_term_text']} with an AI term anywhere in the JD")
+
+    return {"total": total, "pursued": dict(applied), "passed_function": dict(passed),
+            "ai_independence_pct": ai_independence, "ai_term_estimate": terms}

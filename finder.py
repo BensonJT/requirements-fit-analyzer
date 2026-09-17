@@ -18,6 +18,8 @@ Usage:
     .venv/bin/python finder.py evidence --rebuild             # embed new evidence units
     .venv/bin/python finder.py coverage [--all] [--limit N]   # requirement coverage for survivors
     .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
+    .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
+    .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -137,6 +139,10 @@ def cmd_lenses(con, a):
         n = con.execute("SELECT count(*) FROM vw_lens_fit WHERE lens_bucket = ? AND verdict != 'reject' "
                         "AND NOT decided AND NOT in_tracker", [bucket]).fetchone()[0]
         print(f"{heading:<26} {n:>6} actionable")
+    # Applied-AI lens (21): reported beside the three buckets, never folded into lens_bucket.
+    ai_n = con.execute("SELECT count(*) FROM vw_lens_fit WHERE ai_strong AND verdict != 'reject' "
+                       "AND NOT decided AND NOT in_tracker").fetchone()[0]
+    print(f"{'Strong on APPLIED AI':<26} {ai_n:>6} actionable")
     for src, n in con.execute("SELECT lens_source, count(*) FROM vw_lens_fit GROUP BY 1 ORDER BY 2 DESC").fetchall():
         print(f"  placed by {src:<12} {n:>6}")
     print(f"Wrote {path}")
@@ -193,7 +199,7 @@ def cmd_labels(con, a):
 
 
 def cmd_train(con, a):
-    result = features.train(con, C=a.C, cv=a.cv)
+    result = features.train(con, C=a.C, cv=a.cv, lens=a.lens)
     for side in ("positive", "negative"):
         print(f"Most {side} terms: " + ", ".join(f"{t} {c:+.2f}" for t, c in result["coefficients"][side]))
     print("Highest held-out fit among the negatives (the rows the model still reads as fits — since the "
@@ -267,6 +273,18 @@ def cmd_judge(con, a):
             judge.to_csv(con, a.csv)
 
 
+def cmd_feedback(con, a):
+    """Load the golden-source CSV, check the level rule against confirmed human rows, and/or re-export
+    (any combination of --load/--agreement/--export, always in that order)."""
+    from backend.finder import feedback
+    if a.load:
+        feedback.load_csv(con, a.load)
+    if a.agreement:
+        feedback.agreement(con)
+    if a.export:
+        print(feedback.export(con, a.export))
+
+
 def cmd_setup_check(con, a):
     from backend.finder import setup_check
     sys.exit(0 if setup_check.run(con, manifest=a.manifest) else 1)
@@ -336,6 +354,8 @@ def main():
     s.add_argument("--cv", type=int, default=5)
     s.add_argument("--C", type=float, default=4.0)
     s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
+    s.add_argument("--lens", choices=["process", "technical", "ai"],
+                   help="train one lens's model instead of the overall one")
     s.set_defaults(func=cmd_train)
 
     s = sub.add_parser("evidence", parents=[common], help="check / embed the evidence manifest")
@@ -373,6 +393,14 @@ def main():
     s.add_argument("--pools", help="comma-separated subset of high,low,reject")
     s.add_argument("--platform", help="export every active posting from one ATS platform (after an ingest fix)")
     s.set_defaults(func=cmd_judge)
+
+    s = sub.add_parser("feedback", parents=[common],
+                       help="load the report_feedback golden-source CSV, check level agreement, re-export")
+    s.add_argument("--load", help="CSV path to upsert into report_feedback")
+    s.add_argument("--agreement", action="store_true",
+                   help="print the rule's level_fit vs confirmed human rows")
+    s.add_argument("--export", help="re-export every report_feedback row with the rule's answer and needs_you")
+    s.set_defaults(func=cmd_feedback)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

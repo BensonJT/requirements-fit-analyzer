@@ -33,14 +33,17 @@ RULES
 - If the supplied text is too thin to judge, grade `stretch` and set confidence "low".
 - Be decisive. A corpus where everything is `adjacent` is useless.
 
-TWO LENSES. Grade each posting TWICE, independently, against the two lens descriptions below:
+THREE LENSES. Grade each posting on all three, independently, against the lens descriptions below:
 - grade_process   : how well the role matches the PROCESS / OPERATING-MODEL / CHANGE-MANAGEMENT lens
 - grade_technical : how well it matches the TECHNICAL / DATA / ANALYTICAL lens
+- grade_ai        : how well it matches the APPLIED-AI lens
 
-Use the same four grades for both. MOST ROLES ARE STRONG ON AT MOST ONE LENS, and a low score on the other lens
-is the normal, correct answer -- it is a statement about the ROLE, not a criticism of the candidate. Do not
-inflate the weaker lens to be generous, and do not deflate it because the role is strong on the other. A role
-that genuinely demands both is rare and valuable, so record it honestly when you see it.
+Use the same four grades for all three. MOST ROLES ARE STRONG ON AT MOST ONE LENS, and a low score on the
+other lenses is the normal, correct answer -- it is a statement about the ROLE, not a criticism of the
+candidate. Do not inflate a weaker lens to be generous, and do not deflate one because the role is strong on
+another. A role that genuinely demands more than one lens is rare and valuable, so record it honestly when you
+see it. The overall positioning decision still comes from the process and technical lenses; `grade_ai` is
+reported beside them, never folded into that decision.
 
 A LENS WITH NO RELEVANT CONTENT IN THE POSTING IS `wrong` ON THAT LENS, NOT `stretch`. `stretch` requires
 genuine partial overlap that you can NAME in your rationale. If you cannot point to the overlapping work, the
@@ -51,8 +54,9 @@ is the difference between "this role needs both capabilities" and "I was unsure"
 
 OUTPUT: one JSON object per posting, nothing else:
 {"posting_id": "<id>", "grade_process": "bullseye|adjacent|stretch|wrong",
- "grade_technical": "bullseye|adjacent|stretch|wrong", "lane": "primary|secondary|wrong",
- "confidence": "high|medium|low", "blocker": "<the single biggest gap, or empty>",
+ "grade_technical": "bullseye|adjacent|stretch|wrong", "grade_ai": "bullseye|adjacent|stretch|wrong",
+ "lane": "primary|secondary|wrong", "confidence": "high|medium|low",
+ "blocker": "<the single biggest gap, or empty>",
  "rationale": "<one sentence naming the actual work, and which lens it lands on>"}
 """
 
@@ -83,13 +87,32 @@ LENS 2 — TECHNICAL / DATA / ANALYTICAL (grade_technical)
 - Judge the STACK and the expectations named in the JD, never the job title.
 """
 
+RUBRIC_LENS_AI = """
+LENS 3 — APPLIED AI (grade_ai)
+- `bullseye`: applied-AI delivery and enablement -- designing and shipping agentic workflows around a model
+  (skills / procedures, memory, deterministic tool calls for the non-judgement steps), evaluation and
+  regression discipline for knowledge work (reference sets, LLM-as-judge with calibration against humans,
+  acceptance thresholds), human-in-the-loop grounding and review gates, model routing and token/cost judgement
+  (tiering, fallback, graceful degradation), and driving adoption -- teaching teams to build and use AI
+  assistants inside an approved platform.
+- `adjacent`: AI programme / transformation / governance leadership where the work above is directed rather
+  than done; analytics or process roles where AI-assisted delivery is one named expectation among several.
+- `stretch`: named overlap only (e.g. prompt design or RAG configuration as a minor duty inside a role that is
+  otherwise something else).
+- `wrong`: building models (ML / NLP / RAG engineering, fine-tuning, model research), AI platform or
+  infrastructure engineering, distributed services in Python as the job, AI security threat modelling as a
+  primary duty, and "AI" as marketing vocabulary with no AI work in the duties.
+- Judge the duties, not the title; "AI" in a title is not evidence.
+"""
+
 def rubric_version(extra: str = "") -> str:
     """Changes when any prompt text changes, so relabelled rows are distinguishable."""
     from . import requirements
     personal = "".join(globals().get(k, "") for k in
-                       ("RUBRIC_PERSONAL", "RUBRIC_PERSONAL_PROCESS", "RUBRIC_PERSONAL_TECHNICAL"))
-    payload = (RUBRIC_PUBLIC + RUBRIC_LENS_PROCESS + RUBRIC_LENS_TECHNICAL + personal + "|".join(GRADES)
-               + requirements.splitter_fingerprint() + extra)
+                       ("RUBRIC_PERSONAL", "RUBRIC_PERSONAL_PROCESS", "RUBRIC_PERSONAL_TECHNICAL",
+                        "RUBRIC_PERSONAL_AI"))
+    payload = (RUBRIC_PUBLIC + RUBRIC_LENS_PROCESS + RUBRIC_LENS_TECHNICAL + RUBRIC_LENS_AI + personal
+               + "|".join(GRADES) + requirements.splitter_fingerprint() + extra)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 

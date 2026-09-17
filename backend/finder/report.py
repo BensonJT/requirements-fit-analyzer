@@ -82,6 +82,14 @@ def _allowed_bands(min_band: str) -> list:
     return names[: names.index(min_band) + 1] if min_band in names else names[:2]
 
 
+# Level ordering for the report (sprint plan sec 20.2): in_range first, then stretch_up, then unknown/NULL,
+# then out_of_reach / too_low last (those two never take a block or a top-table row -- write_jobs_found
+# routes them to the collapsed tail instead; here they simply sort after everything scored).
+def _level_order_sql(col: str) -> str:
+    return (f"CASE WHEN {col} = 'in_range' THEN 0 WHEN {col} = 'stretch_up' THEN 1 "
+            f"WHEN {col} IS NULL OR {col} = 'unknown' THEN 2 ELSE 3 END")
+
+
 def _coverage_rows(con, meta: dict) -> list:
     rows = []
     for platform, ok, failed in con.execute("""
@@ -140,23 +148,39 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
     path.parent.mkdir(parents=True, exist_ok=True)
 
     bands = _allowed_bands(block_min_band)
+    # out_of_reach / too_low never take a block (sprint plan sec 20.2: "listed in a collapsed tail, never
+    # in the top blocks"); the collapsed query below picks them back up.
     blocks = con.execute(f"""
-        SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier, v.rule_score,
-               v.fit_prob, v.embed_sim, v.top_terms, v.flags, p.description_text,
+        SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier, v.level_fit,
+               v.rule_score, v.fit_prob, v.embed_sim, v.top_terms, v.flags, p.description_text,
                c.coverage_required, c.coverage_role, c.n_required, c.n_required_strong, c.n_required_partial,
                c.n_role, c.n_role_strong, c.n_role_partial, c.gaps, c.matches
         FROM vw_shortlist v JOIN postings p USING (posting_id) LEFT JOIN vw_coverage_latest c USING (posting_id)
         WHERE v.band IN (SELECT unnest(?::VARCHAR[]))
+          AND (v.level_fit IS NULL OR v.level_fit NOT IN ('out_of_reach', 'too_low'))
           AND v.posting_id NOT IN (SELECT posting_id FROM surfaced
                                    WHERE surfaced_at >= now() - INTERVAL {SURFACED_DAYS} DAY)
-        ORDER BY v.final_score DESC, v.first_seen_at DESC LIMIT ?""", [bands, max_blocks]).fetchall()
+        ORDER BY {_level_order_sql('v.level_fit')}, v.final_score DESC, v.first_seen_at DESC
+        LIMIT ?""", [bands, max_blocks]).fetchall()
     block_ids = [b[0] for b in blocks]
-    table = con.execute("""
-        SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier,
+    table = con.execute(f"""
+        SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier, v.level_fit,
                (SELECT max(surfaced_at) FROM surfaced s WHERE s.posting_id = v.posting_id) AS shown
         FROM vw_shortlist v
-        WHERE v.final_score >= ? OR v.posting_id IN (SELECT unnest(?::VARCHAR[]))
-        ORDER BY v.final_score DESC, v.first_seen_at DESC LIMIT ?""", [table_min, block_ids, table_cap]).fetchall()
+        WHERE (v.final_score >= ? OR v.posting_id IN (SELECT unnest(?::VARCHAR[])))
+          AND (v.level_fit IS NULL OR v.level_fit NOT IN ('out_of_reach', 'too_low'))
+        ORDER BY {_level_order_sql('v.level_fit')}, v.final_score DESC, v.first_seen_at DESC
+        LIMIT ?""", [table_min, block_ids, table_cap]).fetchall()
+    # Collapsed tail (20.2): the same candidacy test as the table above (score at/over table_min), but only
+    # the two levels the table just excluded. Never promoted to a block regardless of score or band.
+    collapsed = con.execute(f"""
+        SELECT v.posting_id, v.employer, v.title, v.url, v.final_score, v.band, v.tier, v.level_fit,
+               (SELECT max(surfaced_at) FROM surfaced s WHERE s.posting_id = v.posting_id) AS shown
+        FROM vw_shortlist v
+        WHERE v.level_fit IN ('out_of_reach', 'too_low')
+          AND (v.final_score >= ? OR v.posting_id IN (SELECT unnest(?::VARCHAR[])))
+        ORDER BY v.final_score DESC, v.first_seen_at DESC LIMIT ?""",
+        [table_min, block_ids, table_cap]).fetchall()
     s = run_meta.get("screen")
     passed = []
     if s:
@@ -204,18 +228,18 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
     w.append("## Coverage Log\n\n| Source / step | Status | Notes |\n|---|---|---|")
     w.extend(f"| {_cell(a)} | {b} | {_cell(c)} |" for a, b, c in _coverage_rows(con, run_meta))
     w.append("")
-    w.append(f"{SUMMARY_HEADING}\n\n| Posting ID | Company | Title | Score | Band | Tier | Decision | Reason |\n"
-             "|---|---|---|---|---|---|---|---|")
-    for pid, employer, title, url, score, band, tier, shown in table:
+    w.append(f"{SUMMARY_HEADING}\n\n| Posting ID | Company | Title | Score | Band | Tier | Level | Decision | "
+             "Reason |\n|---|---|---|---|---|---|---|---|---|")
+    for pid, employer, title, url, score, band, tier, level_fit, shown in table:
         note = f" (shown {shown:%Y-%m-%d})" if shown else ""
         w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)}{note} | {score} | {band} | "
-                 f"{tier if tier is not None else ''} |  |  |")
+                 f"{tier if tier is not None else ''} | {level_fit or '—'} |  |  |")
     w.append("")
     w.append("## Escalated Roles (pipeline-scored)\n")
     if not blocks:
         w.append(f"_No row reached the block bar ({' / '.join(bands)}) this run._\n")
-    for (pid, employer, title, url, score, band, tier, rule_score, fit_prob, embed_sim, top_terms, flags,
-         text, *cov) in blocks:
+    for (pid, employer, title, url, score, band, tier, level_fit, rule_score, fit_prob, embed_sim, top_terms,
+         flags, text, *cov) in blocks:
         parts = [f"profile {rule_score}"]
         parts.extend(coverage_parts(*cov))
         if fit_prob is not None:
@@ -237,6 +261,15 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
         w.append(f"**Fit: ~{score}%.** " + " · ".join(parts) + "\n")
     if blocks:
         w.append("---\n")
+    if collapsed:
+        w.append(f"<details><summary>Out of level range ({len(collapsed)})</summary>\n")
+        w.append("| Posting ID | Company | Title | Score | Band | Tier | Level | Decision | Reason |\n"
+                 "|---|---|---|---|---|---|---|---|---|")
+        for pid, employer, title, url, score, band, tier, level_fit, shown in collapsed:
+            note = f" (shown {shown:%Y-%m-%d})" if shown else ""
+            w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)}{note} | {score} | {band} | "
+                     f"{tier if tier is not None else ''} | {level_fit or '—'} |  |  |")
+        w.append("\n</details>\n")
     w.append("## Passed / Filtered Out\n\n| Company | Role | Reason |\n|---|---|---|")
     for employer, title, url, reasons, pid in passed:
         w.append(f"| {_cell(employer)} | {_link(title, url)} | {_cell('; '.join(_as_list(reasons)))} `pid:{pid}` |")
@@ -259,6 +292,12 @@ LENS_LISTS = (
     ("technical", "Strong on TECHNICAL", "data, analytics, quantitative modelling and engineering"),
 )
 
+# Applied-AI lens (sprint plan sec 21): a fourth list reported beside the three lens_bucket ones above, read
+# from `ai_strong` rather than `lens_bucket` (which stays untouched, per the sprint plan: "never folded in").
+# A row can appear here and in one of the three lists above -- that is intended.
+AI_LIST = ("ai", "Strong on APPLIED AI",
+          "agentic workflow delivery, evals, enablement — reported beside the other lenses, never folded in")
+
 
 def _lens_cell(grade: Optional[str], prob: Optional[float]) -> str:
     """The judge's word where there is one, the model's probability where there is not."""
@@ -280,13 +319,30 @@ def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bo
     return con.execute(f"""
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_process, fit_process, grade_technical, fit_technical, lens_source,
-               days_since_first_seen, blocker
+               days_since_first_seen, blocker, level_fit
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
-        ORDER BY final_score DESC,
+        ORDER BY {_level_order_sql('level_fit')}, final_score DESC,
                  CASE lens_source WHEN 'user' THEN 0 WHEN 'judge' THEN 1 WHEN 'judge+model' THEN 2 ELSE 3 END,
                  lens_max_p DESC, first_seen_at DESC
         LIMIT ?""", [bucket, cap]).fetchall()
+
+
+def ai_lens_rows(con, *, cap: int = LENS_LIST_CAP, include_decided: bool = False) -> list:
+    """Rows strong on the applied-AI lens (sec 21) -- `ai_strong`, never `lens_bucket`, so a row here can
+    also appear in one of the three `lens_rows` lists above."""
+    where = ["ai_strong", "verdict != 'reject'"]
+    if not include_decided:
+        where += ["NOT decided", "NOT in_tracker"]
+    return con.execute(f"""
+        SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
+               final_score, band, grade_ai, fit_ai, lens_source, days_since_first_seen, blocker, level_fit
+        FROM vw_lens_fit
+        WHERE {' AND '.join(where)}
+        ORDER BY {_level_order_sql('level_fit')}, final_score DESC,
+                 CASE lens_source WHEN 'user' THEN 0 WHEN 'judge' THEN 1 WHEN 'judge+model' THEN 2 ELSE 3 END,
+                 lens_max_p DESC, first_seen_at DESC
+        LIMIT ?""", [cap]).fetchall()
 
 
 def _pay(lo, hi, interval) -> str:
@@ -342,12 +398,28 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
         if not rows:
             w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
             continue
-        w.append("| Posting ID | Company | Title | Score | Band | Process | Technical | Placed by | Pay | Location "
-                 "| Age |\n|---|---|---|---|---|---|---|---|---|---|---|")
+        w.append("| Posting ID | Company | Title | Score | Band | Level | Process | Technical | Placed by | Pay "
+                 "| Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, gp, fp, gt, ft, src, age,
-             blocker) in rows:
+             blocker, level_fit) in rows:
             w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)} | {score} | {band} | "
-                     f"{_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {src} | {_pay(lo, hi, interval)} | "
+                     f"{level_fit or '—'} | {_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {src} | "
+                     f"{_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
+        w.append("")
+
+    _ai_bucket, ai_heading, ai_subtitle = AI_LIST
+    ai_rows = ai_lens_rows(con, cap=cap)
+    ai_total = con.execute("SELECT count(*) FROM vw_lens_fit WHERE ai_strong AND verdict != 'reject'").fetchone()[0]
+    w.append(f"## {ai_heading} ({len(ai_rows)} shown of {ai_total})\n\n_{ai_subtitle}_\n")
+    if not ai_rows:
+        w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
+    else:
+        w.append("| Posting ID | Company | Title | Score | Band | Level | AI | Placed by | Pay | Location "
+                 "| Age |\n|---|---|---|---|---|---|---|---|---|---|---|")
+        for (pid, employer, title, url, loc, lo, hi, interval, score, band, ga, fa, src, age, blocker,
+             level_fit) in ai_rows:
+            w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)} | {score} | {band} | "
+                     f"{level_fit or '—'} | {_lens_cell(ga, fa)} | {src} | {_pay(lo, hi, interval)} | "
                      f"{_cell(loc)[:34]} | {age}d |")
         w.append("")
     path.write_text("\n".join(w) + "\n", encoding="utf-8")

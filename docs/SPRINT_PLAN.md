@@ -715,11 +715,26 @@ The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixe
 
 **Acceptance:** agreement with the confirmed human rows reported (target ≥ 80% exact on `in_range` / `out_of_reach`, disagreements listed); the 232 feedback rows re-exported with the rule's answer beside the human column so the user grades only disagreements.
 
+**Acceptance checklist (2026-09-17):**
+- [x] `level_fit_rule` built in `rules.py`, wired into `screen_row`; never touches `verdict` / `rule_score` (Agent A).
+- [x] Schema v10 (`screens.level_fit`, `report_feedback`, `vw_level_agreement`) and the write path in `pipeline.screen` (Agent B).
+- [x] `backend/finder/feedback.py` (`load_csv`, `rule_level_fit`, `agreement`, `export`) and `finder.py feedback` (Agent B).
+- [x] `report.write_jobs_found` / `write_lens_lists` order `in_range` → `stretch_up` → `unknown`/NULL → score; `out_of_reach` / `too_low` routed to a collapsed tail, never a block or the top table; a `Level` column added (Agent D).
+- [x] Agreement run on the live DB (2026-09-17): 20/22 exact, 12/13 on `in_range`/`out_of_reach` (92%, target ≥ 80%); the two disagreements are listed in `docs/STATUS.md`.
+- [x] 232 feedback rows re-exported with the rule's answer, the judge's three grades and `needs_you` (73 flagged) — vault `Tools/Report_Feedback_20260917_rule.csv`.
+- [x] Full suite green (197).
+- [ ] `rescreen-all` fills `level_fit` on the whole corpus (per §20.4's ordering, after the fresh ingest).
+
 ### 20.3 Remote signals that are evidence only when present (user, 2026-09-17)
 Boards tag remote roles inconsistently. Two more positive-only signals join `REMOTE_TERMS`: the location segment
 `US Off-Site` (an employer label meaning remote) and LinkedIn breadcrumb tags `#LI-Remote` (also `#BI-REMOTE`). When
 `#LI-Hybrid` and `#LI-Remote` both appear, the posting is **remote** (the user's ruling). Absence of a tag says nothing:
 a posting is never made non-remote by a missing tag. Add the CACI / Blue Yonder / TrendAI / breadcrumb shapes as tests.
+
+**Acceptance checklist (2026-09-17):**
+- [x] `REMOTE_TERMS` gains `us off-site`, `#li-remote`, `#bi-remote`; `#li-hybrid` + `#li-remote` together reads remote; a lone `#li-hybrid` adds nothing (Agent A).
+- [x] Tests: CACI, Blue Yonder, TrendAI, and a bare breadcrumb-tag shape, in `tests/test_level_fit.py` (Agent A; not re-verified by Agent D).
+- [ ] Live-DB spot check that `US Off-Site` and `#LI-Remote` postings flip to `is_remote` after the next `rescreen-all` (§20.4 order — not yet run).
 
 ### 20.4 Order of operations before the next rescreen (user, 2026-09-17)
 1. Build §20.2 (level rule + `report_feedback` load) and §21 (AI lens) — the new dimensions are retrofitted first.
@@ -754,3 +769,15 @@ together and adjust the rubric prose until both are satisfied it grades as well 
 (§18.7's bar: lens independence measured, rationales name actual duties, no rubric pattern-matching). Only then the
 AI-term subset, then the corpus decision.
 **Order and cost:** build only after §20.2 lands and the retrain numbers are recorded. Regrade in two steps: first the postings whose JD hits an AI-term list (estimate before running; expected several hundred) plus a stratified control sample of 100, measure lens independence as in §18.7, then decide whether the corpus regrade (~3,000 postings, ~5M Sonnet tokens) is worth it.
+
+**Acceptance checklist (2026-09-17):**
+- [x] `RUBRIC_LENS_AI` (public) and `RUBRIC_PERSONAL_AI` (personal, gitignored) written from the coaching brief; `rubric_version()` changed (Agent C).
+- [x] `judge.py` batch header, `_validate`, `load_results`, `to_csv`, `agreement()` carry `grade_ai`; back-compat for older batch files with no `grade_ai` (Agent C).
+- [x] `AI_TITLE_RE` and `pools(only=["ai_title"])`; `features.LENSES` gains `"ai"` → `vw_label_set_ai` (Agent C).
+- [x] Schema (`llm_labels.grade_ai`, `vw_label_set_ai`), `vw_lens_fit` / `vw_shortlist` gain `grade_ai`, `fit_ai`, `ai_strong`, `ai_standout`; `lens_bucket` / `lens_source` unchanged (Agent B).
+- [x] `finder.py lenses` prints the applied-AI count beside the three bucket counts (Agent B).
+- [x] Report: a fourth lens list, "Strong on APPLIED AI", reading `ai_strong`, never folded into the other three; a `Level` column added to all lens lists (Agent D).
+- [x] First live-validation batch exported and graded (2026-09-17, 40 AI-titled postings, `db/batches_ai_pilot`, imported): bullseye 3 · adjacent 17 · stretch 3 · wrong 17; the boundary held. Two rubric questions for the user are in `docs/STATUS.md`.
+- [x] Lens independence on the pilot: 28/40 (70%) differ from both other lenses (§18.7 bar 67%).
+- [x] AI-term corpus estimate: 1,704 active postings with AI in the title (118 not rejected), 11,929 with an AI term in the JD.
+- [ ] Rubric prose adjusted with the user; then the AI-term subset (+100 control), then the corpus decision, then `train --lens ai`.

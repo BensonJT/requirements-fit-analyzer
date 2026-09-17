@@ -77,7 +77,8 @@ def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] =
     return strip_employer(f"{title}\n{title}\n{strip_boilerplate(text or '')}", company)
 
 
-LENS_VIEWS = {None: "vw_label_set", "process": "vw_label_set_process", "technical": "vw_label_set_technical"}
+LENS_VIEWS = {None: "vw_label_set", "process": "vw_label_set_process", "technical": "vw_label_set_technical",
+             "ai": "vw_label_set_ai"}
 
 
 def training_set(con, lens=None) -> list:
@@ -405,7 +406,7 @@ def load_latest(con, lens=None, log=print, model_dir: Optional[str] = None) -> O
     return model
 
 
-LENSES = ("process", "technical")
+LENSES = ("process", "technical", "ai")
 # The probability thresholds that turn these scores into buckets live in SQL, as the `lens_strong_p()` /
 # `lens_standout_p()` macros next to the view that reads them (backend/ats/store.py).
 

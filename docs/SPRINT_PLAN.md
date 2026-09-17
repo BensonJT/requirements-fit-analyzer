@@ -705,7 +705,7 @@ The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixe
 ### 20.2 Level fit — a deterministic rule with its own column (PROPOSED)
 **Why.** Reviewing the surfaced rows, the user's `wrong` calls were mostly about level and scope, not function; grading them `wrong` would teach the model that work he does well is work he cannot do. Level is written in the JD, so it gets a rule, not a model, and human `level_fit` labels in `report_feedback` are the rule's test set.
 
-**Values, in priority order for the report:** `in_range` (senior IC, or manager / senior manager of a small team) → `stretch_up` (Director-type promotion) → `out_of_reach` (Senior Director, VP, AVP, Head of, Chief; org-building scope; P&L ownership; team above `MAX_DIRECT_REPORTS`) → `too_low` (junior / early-career signals, required years under the floor in `profile_local`, or band top under the pay floor). `unknown` when nothing is stated.
+**Values, in priority order for the report:** `in_range` (senior IC, or manager of a small team, assume small team if team size is not specified) → `stretch_up` (manager of managers or Director-type promotion) → `out_of_reach` (Senior Director, VP, AVP, Head of, Chief; org-building scope; P&L ownership; team above `MAX_DIRECT_REPORTS`) → `too_low` (junior / early-career signals, required years under the floor in `profile_local`, or band top under the pay floor, however, if pay band is within range and required years is low, keep it in_range). `unknown` when nothing is stated.
 
 **Signals (title and Required block only):** title tier; "N years managerial / people leadership"; org-building phrases ("build and lead a … organization", "global teams", "spans of control", "executive"); P&L; team size (from the fixed `_TEAM_SIZE` / `_REPORTS` split); the written minimums are scored separately from scope, so "Master's + 10 yrs" met with an org-building mandate is `out_of_reach` for scope, not for years. Two or more scope hits → `out_of_reach`; one → `stretch_up`; none with a senior title → `in_range`.
 
@@ -714,6 +714,28 @@ The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixe
 **Report:** `Jobs_Found` and the lens lists sort `in_range` first, then `stretch_up`; `out_of_reach` and `too_low` are listed in a collapsed tail, never in the top blocks. Score is untouched until agreement is measured.
 
 **Acceptance:** agreement with the confirmed human rows reported (target ≥ 80% exact on `in_range` / `out_of_reach`, disagreements listed); the 232 feedback rows re-exported with the rule's answer beside the human column so the user grades only disagreements.
+
+### 20.3 Remote signals that are evidence only when present (user, 2026-09-17)
+Boards tag remote roles inconsistently. Two more positive-only signals join `REMOTE_TERMS`: the location segment
+`US Off-Site` (an employer label meaning remote) and LinkedIn breadcrumb tags `#LI-Remote` (also `#BI-REMOTE`). When
+`#LI-Hybrid` and `#LI-Remote` both appear, the posting is **remote** (the user's ruling). Absence of a tag says nothing:
+a posting is never made non-remote by a missing tag. Add the CACI / Blue Yonder / TrendAI / breadcrumb shapes as tests.
+
+### 20.4 Order of operations before the next rescreen (user, 2026-09-17)
+1. Build §20.2 (level rule + `report_feedback` load) and §21 (AI lens) — the new dimensions are retrofitted first.
+2. **Fresh ingestion** (`sweep_ats.py`): the three partitioned boards' ~760 unreachable reqs, the Workday clamp fix and
+   the `detail_attempts` budget all land here. Non-US rows are already hard-rejected by rules and the country /
+   partition scopes keep them out of the pull; scored foreign rows already in the corpus stay for their labels.
+3. `rescreen-all`, then the coverage re-baseline on the fixed splitter.
+4. Only then Phase 4: Gemma sees a capped daily subset (in_range rows clearing a lens standout bar), and the Keystone
+   job application skill sees the top five to ten by Gemma's read plus the user's hand picks. Both caps live in
+   `profile_local` next to the pay floor, not in code.
+
+### 20.5 The golden source (`Report_Feedback_20260916.xlsx`) — help wanted (user, 2026-09-17)
+The user has confirmed 41 of 232 rows and cannot read 200 JDs by hand. After the level rule exists: re-export the sheet
+with the rule's `level_fit`, the judge's two lens grades and the AI lens grade beside the human columns, and a
+`needs_you` flag on rows where any two of {rule, Opus review, judge, user} disagree by more than one step or where
+confidence is low. The user grades only the flagged rows. Rows the user never grades stay unconfirmed and never train.
 
 ## 21. Amendment — a third lens for applied AI (2026-09-17, Fable; PROPOSED, design with the user before building)
 **What it grades.** `grade_ai`: applied-AI capability as the user actually has it — agentic workflow design and delivery, context engineering (skills, memory, deterministic tools around a model), evals and regression discipline for knowledge work, human-in-the-loop grounding, model routing and token-cost judgment, adoption and teaching. The lens source is the coaching brief's decomposition (vault `Professional/Resources/AI_Experience_Coaching_Brief_20260916.md` §5.1–5.8), rewritten into rubric prose from the evidence sources, not paraphrased.

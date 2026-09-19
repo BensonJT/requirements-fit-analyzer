@@ -1763,6 +1763,127 @@ def test_judge_export_import_round_trip_and_bad_results(tmp_path):
     con.close()
 
 
+def test_judge_import_required_fit_round_trips_including_duplicate(tmp_path):
+    """required_fit/required_unmet import onto the representative AND get copied onto its near-duplicate,
+    same as the lens grades do. required_unmet may arrive as a list (some result files send it that way) and
+    must be ' ; '-joined; required_fit is normalized to lowercase."""
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    queue = [(by_req[r], "high") for r in ("A1", "A2", "A3")] + [(by_req["B1"], "reject")]
+    out = tmp_path / "batches"
+    judge.write_batches(con, str(out), queue, batch_size=2, log=_quiet)
+    manifest = json.loads((out / "manifest.json").read_text())
+    dup_id, rep_id = next(iter(manifest["duplicates"].items()))
+    results = [{"posting_id": rep_id, "grade": "bullseye", "grade_process": "bullseye",
+                "grade_technical": "adjacent", "lane": "primary", "confidence": "high", "blocker": "",
+                "required_fit": "Meets", "required_unmet": ["needs SAP", "needs CPA"],
+                "rationale": "process ownership work"}]
+    for name, meta in manifest["batches"].items():
+        for pid in meta["postings"]:
+            if pid != rep_id:
+                results.append({"posting_id": pid, "grade": "wrong", "lane": "wrong", "confidence": "high",
+                                 "blocker": "", "rationale": "n/a"})
+    for name, meta in manifest["batches"].items():
+        subset = [r for r in results if r["posting_id"] in meta["postings"]]
+        (out / meta["result"]).write_text(json.dumps(subset))
+    result = judge.load_results(con, str(out), scorer="test-scorer", log=_quiet)
+    assert result["errors"] == []
+    rows = dict((pid, (rf, ru)) for pid, rf, ru in
+                con.execute("SELECT posting_id, required_fit, required_unmet FROM llm_labels").fetchall())
+    assert rows[rep_id] == ("meets", "needs SAP ; needs CPA")
+    assert rows[dup_id] == ("meets", "needs SAP ; needs CPA")   # near-duplicate copies it too
+    con.close()
+
+
+def test_judge_import_missing_required_fit_loads_as_null(tmp_path):
+    """A result file predating the Required-block question omits required_fit/required_unmet entirely --
+    still importable, with NULLs (same back-compat policy as grade_ai)."""
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    queue = [(by_req["A1"], "high")]
+    out = tmp_path / "batches"
+    judge.write_batches(con, str(out), queue, batch_size=2, log=_quiet)
+    manifest = json.loads((out / "manifest.json").read_text())
+    only = next(iter(manifest["batches"].values()))
+    (out / only["result"]).write_text(json.dumps(
+        [{"posting_id": by_req["A1"], "grade": "bullseye", "lane": "primary", "confidence": "high",
+          "blocker": "", "rationale": "process ownership work"}]))
+    result = judge.load_results(con, str(out), scorer="test-scorer", log=_quiet)
+    assert result["errors"] == []
+    rf, ru = con.execute("SELECT required_fit, required_unmet FROM llm_labels WHERE posting_id = ?",
+                         [by_req["A1"]]).fetchone()
+    assert rf is None and ru is None
+    con.close()
+
+
+def test_judge_import_rejects_invalid_required_fit(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    queue = [(by_req["A1"], "high")]
+    out = tmp_path / "batches"
+    judge.write_batches(con, str(out), queue, batch_size=2, log=_quiet)
+    manifest = json.loads((out / "manifest.json").read_text())
+    only = next(iter(manifest["batches"].values()))
+    (out / only["result"]).write_text(json.dumps(
+        [{"posting_id": by_req["A1"], "grade": "bullseye", "grade_process": "bullseye",
+          "grade_technical": "adjacent", "lane": "primary", "confidence": "high",
+          "blocker": "", "rationale": "process ownership work", "required_fit": "maybe"}]))
+    result = judge.load_results(con, str(out), scorer="test-scorer", log=_quiet)
+    assert len(result["errors"]) == 1 and "required_fit" in result["errors"][0]
+    assert con.execute("SELECT count(*) FROM llm_labels").fetchone()[0] == 0
+    con.close()
+
+
+def test_vw_selection_tiers_apply_review_hidden_and_no_lens(tmp_path):
+    """apply: at least one strong lens + required_fit meets. review: same but arguable. hidden: fails, or a
+    row with no lens hit at all (even when required_fit meets). Level/location gating stays out of this view."""
+    pytest.importorskip("numpy")
+    con, by_req = _judge_corpus(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    rows = [
+        # (posting_id, description_hash, grade_process, grade_technical, grade_ai, required_fit)
+        [by_req["A1"], "h1", "bullseye", "wrong", "wrong", "meets"],       # apply
+        [by_req["A2"], "h2", "wrong", "adjacent", "wrong", "arguable"],    # review
+        [by_req["B1"], "h3", "bullseye", "wrong", "wrong", "fails"],       # hidden: fails
+        [by_req["A3"], "h1", "wrong", "wrong", "wrong", "meets"],          # hidden: no lens hit
+    ]
+    con.executemany(
+        "INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, grade_process, "
+        "grade_technical, grade_ai, lane, confidence, blocker, rationale, required_fit, required_unmet, batch, "
+        "judged_at) VALUES (?, ?, 'rv', 'test', 'bullseye', ?, ?, ?, NULL, NULL, '', '', ?, '', 'b', ?)",
+        [[pid, dhash, gp, gt, ga, rf, now] for pid, dhash, gp, gt, ga, rf in rows])
+    tiers = dict(con.execute("SELECT posting_id, tier FROM vw_selection").fetchall())
+    assert tiers[by_req["A1"]] == "apply"
+    assert tiers[by_req["A2"]] == "review"
+    assert tiers[by_req["B1"]] == "hidden"
+    assert tiers[by_req["A3"]] == "hidden"
+    # His own adjudication wins the latest-label view and carries no required_fit: it tiers on his grade alone
+    # rather than dropping out of the view.
+    con.execute(
+        "INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, batch, judged_at) "
+        "VALUES (?, 'h3', 'rv', 'user-adjudicated', 'adjacent', 'b', ?)", [by_req["B1"], now])
+    assert con.execute("SELECT tier, adjudicated FROM vw_selection WHERE posting_id = ?",
+                       [by_req["B1"]]).fetchone() == ("apply", True)
+    con.close()
+
+
+def test_llm_labels_required_fit_columns_present_fresh_and_upgraded(tmp_path):
+    """A fresh DB gets required_fit/required_unmet from the CREATE TABLE. An older DB (schema_info stuck below
+    v12) picks them up through _add_missing_columns on the next connect(), same as grade_ai did at v10."""
+    fresh = store.connect(str(tmp_path / "fresh.duckdb"))
+    assert {"required_fit", "required_unmet"} <= store._columns(fresh, "llm_labels")
+    fresh.close()
+
+    old = store.connect(str(tmp_path / "old.duckdb"))
+    old.execute("ALTER TABLE llm_labels DROP COLUMN required_fit")
+    old.execute("ALTER TABLE llm_labels DROP COLUMN required_unmet")
+    old.execute("UPDATE schema_info SET version = 11")
+    old.close()
+    upgraded = store.connect(str(tmp_path / "old.duckdb"))
+    assert {"required_fit", "required_unmet"} <= store._columns(upgraded, "llm_labels")
+    upgraded.close()
+
+
 def test_judge_agreement_reads_the_users_own_decisions(tmp_path):
     pytest.importorskip("numpy")
     con, by_req = _judge_corpus(tmp_path)
@@ -1965,4 +2086,110 @@ def test_screen_without_lens_models_leaves_the_columns_null(tmp_path):
                                                           url="https://x/L1", location="Remote - USA")], now)
     pipeline.screen(con, model=None, log=_quiet)
     assert con.execute("SELECT fit_process, fit_technical FROM vw_screen_latest").fetchone() == (None, None)
+    con.close()
+
+
+# ---- finder.py top / report.top_rows / report.write_top_jobs (§22, end-of-pipeline list) ----
+
+def _top_posting(con, pid, *, employer="Acme", title="Director, Ops", screened=True, level_fit="in_range",
+                 verdict="review", score=80, first_seen=None, location="Remote - USA", pay_min=None,
+                 pay_max=None, grade_process="bullseye", grade_technical="bullseye", grade_ai="bullseye",
+                 required_fit="meets", scorer="claude-sonnet-batch", status="active"):
+    """A judged posting with independently controllable status / screen / level / gates, for testing
+    report.top_rows and the vw_selection <-> vw_lens_fit join directly (no pipeline.screen call)."""
+    first_seen = first_seen or datetime(2026, 9, 16)
+    con.execute(
+        "INSERT OR REPLACE INTO postings (posting_id, employer, platform, req_id, title, url, "
+        "location_primary, pay_min, pay_max, pay_interval, status, description_hash, first_seen_at, "
+        "last_seen_at) VALUES (?, ?, 'greenhouse', ?, ?, ?, ?, ?, ?, 'year', ?, 'h', ?, ?)",
+        [pid, employer, pid, title, f"https://x/{pid}", location, pay_min, pay_max, status, first_seen,
+         first_seen])
+    if screened:
+        con.execute(
+            "INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, "
+            "rule_score, final_score, band, level_fit) VALUES (?, 'rv', 'mv', ?, ?, 70, ?, 'strong', ?)",
+            [pid, first_seen, verdict, score, level_fit])
+    con.execute(
+        "INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, grade_process, "
+        "grade_technical, grade_ai, required_fit, judged_at) VALUES (?, 'h', 'rv1', ?, 'bullseye', ?, ?, ?, ?, ?)",
+        [pid, scorer, grade_process, grade_technical, grade_ai, required_fit, first_seen])
+
+
+def test_top_rows_orders_three_lens_above_bullseye_above_adjacent(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "x" * 20, grade_process="bullseye", grade_technical="bullseye", grade_ai="bullseye")
+    _top_posting(con, "y" * 20, grade_process="bullseye", grade_technical="wrong", grade_ai="wrong")
+    _top_posting(con, "z" * 20, grade_process="adjacent", grade_technical="wrong", grade_ai="wrong")
+    rows = report.top_rows(con, "apply")
+    order = [r[0] for r in rows]
+    assert order == ["x" * 20, "y" * 20, "z" * 20]
+    con.close()
+
+
+def test_top_rows_gates_and_footer_counts(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "1" * 20)                                                  # baseline: passes every gate
+    _top_posting(con, "2" * 20, status="closed")                                 # inactive
+    _top_posting(con, "3" * 20, verdict="reject")                                # verdict reject
+    _top_posting(con, "4" * 20, level_fit="too_low")                             # level out of range
+    _top_posting(con, "5" * 20, screened=False)                                  # judged, no screen row
+    _top_posting(con, "6" * 20)                                                  # decided
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", ["6" * 20, datetime(2026, 9, 16)])
+    _top_posting(con, "7" * 20)                                                  # in tracker
+    con.execute("INSERT INTO tracker VALUES ('search', NULL, 'Acme', 'Director, Ops', NULL, NULL, ?, 'exact', ?)",
+               ["7" * 20, datetime(2026, 9, 16)])
+
+    rows = report.top_rows(con, "apply")
+    assert [r[0] for r in rows] == ["1" * 20]
+
+    gates = report._gate_counts(con, "apply")
+    assert gates["total"] == 7
+    assert gates["inactive"] == 1
+    assert gates["verdict_reject"] == 1
+    # Gates are independent, not a sequential funnel: the unscreened posting (#5) has a NULL level_fit too
+    # (it comes from the same missing screen row), so it is counted under BOTH "no screen row" and "level
+    # out of range" -- that is deliberate, per report._gate_counts's docstring.
+    assert gates["level_out_of_range"] == 2         # "4" (too_low) and "5" (no screen -> NULL level_fit)
+    assert gates["no_screen_row"] == 1
+    assert gates["decided_or_in_tracker"] == 2      # "6" (decided) and "7" (in tracker)
+    con.close()
+
+
+def test_top_rows_no_screen_row_is_counted_not_crashed(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "n" * 20, screened=False)
+    rows = report.top_rows(con, "apply")     # must not raise
+    assert rows == []
+    assert report._gate_counts(con, "apply")["no_screen_row"] == 1
+    con.close()
+
+
+def test_top_rows_hides_decided_and_in_tracker_unless_included(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "d" * 20)
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", ["d" * 20, datetime(2026, 9, 16)])
+    _top_posting(con, "t" * 20)
+    con.execute("INSERT INTO tracker VALUES ('search', NULL, 'Acme', 'Director, Ops', NULL, NULL, ?, 'exact', ?)",
+               ["t" * 20, datetime(2026, 9, 16)])
+    assert report.top_rows(con, "apply") == []
+    included = {r[0] for r in report.top_rows(con, "apply", include_decided=True)}
+    assert included == {"d" * 20, "t" * 20}
+    con.close()
+
+
+def test_write_top_jobs_no_hard_wrap_and_unique_path(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "a" * 20, grade_process="bullseye", grade_technical="bullseye", grade_ai="bullseye")
+    _top_posting(con, "b" * 20, required_fit="arguable", verdict="review")
+    path1 = report.write_top_jobs(con, None, out_path=str(tmp_path))
+    text = path1.read_text(encoding="utf-8")
+    funnel_lines = [ln for ln in text.splitlines() if "**Funnel:**" in ln]
+    assert len(funnel_lines) == 1
+    assert "apply" in funnel_lines[0] and "review" in funnel_lines[0]
+    assert "★" in text                                      # the three-lens row is starred
+    apply_gate_lines = [ln for ln in text.splitlines() if "Gate detail — Apply" in ln]
+    assert len(apply_gate_lines) == 1 and "level out of range" in apply_gate_lines[0]
+
+    path2 = report.write_top_jobs(con, None, out_path=str(tmp_path))
+    assert path1 != path2 and path2.exists()
     con.close()

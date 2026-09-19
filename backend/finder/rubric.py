@@ -9,6 +9,10 @@ import hashlib
 
 GRADES = ("bullseye", "adjacent", "stretch", "wrong")
 
+# The judge's Required-block call (a SECOND, separate question from the three lens grades -- see
+# REQUIRED-BLOCK FIT below). Not part of rubric_version(): it names an output shape, not prompt text.
+REQUIRED_FITS = ("meets", "arguable", "fails")
+
 RUBRIC_PUBLIC = """
 You grade one question only: IS THIS THE SAME KIND OF WORK THE CANDIDATE HAS DONE?
 

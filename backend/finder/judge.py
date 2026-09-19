@@ -432,6 +432,13 @@ def _validate(obj: dict, allowed: dict) -> Optional[str]:
     ai = obj.get("grade_ai")
     if ai is not None and ai not in rubric.GRADES:
         return f"{pid}: grade_ai not in {rubric.GRADES}"
+    # required_fit follows the same policy as grade_ai: absent/None is fine (a result file from before the
+    # Required-block question existed stays importable, loaded with required_fit = NULL); a PRESENT value that
+    # is not one of the three is refused. Normalize case/whitespace before checking -- the judge sometimes
+    # varies capitalization.
+    rf = obj.get("required_fit")
+    if rf is not None and str(rf).strip().lower() not in rubric.REQUIRED_FITS:
+        return f"{pid}: required_fit not in {rubric.REQUIRED_FITS}"
     return None
 
 
@@ -459,7 +466,7 @@ def to_csv(con, path: str, log=print) -> str:
                        < list_position(['bullseye','adjacent','stretch','wrong'], l.grade_technical)
                     THEN 'process' ELSE 'technical' END AS favoured_lens,
                l.lane, l.confidence, s.final_score, s.band, p.employer, p.title, l.blocker, l.rationale,
-               p.url, l.posting_id
+               l.required_fit, l.required_unmet, p.url, l.posting_id
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         LEFT JOIN vw_screen_latest s USING (posting_id)
         ORDER BY CASE l.grade WHEN 'bullseye' THEN 0 WHEN 'adjacent' THEN 1 WHEN 'stretch' THEN 2 ELSE 3 END,
@@ -504,26 +511,37 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
                 g = overall(gp, gt)
             else:                        # pre-split result file: one grade, no lens breakdown
                 g, gp, gt = obj["grade"], None, None
+            rf = obj.get("required_fit")
+            rf = str(rf).strip().lower() if rf is not None else None   # _validate already refused a bad value
+            ru = obj.get("required_unmet")
+            if isinstance(ru, list):                # some result files send the unmet lines as a list
+                ru = " ; ".join(str(x) for x in ru)
+            ru = ru[:800] if ru is not None else None
             seen[pid] = (g, gp, gt, ga)
             rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, ga, obj.get("lane"),
                          obj.get("confidence"), (obj.get("blocker") or "")[:400],
-                         (obj.get("rationale") or "")[:600], name, _now()])
+                         (obj.get("rationale") or "")[:600], rf, ru, name, _now()])
     hashes = dict(_rows(con, "SELECT posting_id, coalesce(description_hash, '') FROM postings"))
     copied = 0
     for dup_id, rep in manifest.get("duplicates", {}).items():
         if rep in seen and dup_id in hashes:
             src = next(r for r in rows if r[0] == rep)
-            rows.append([dup_id, hashes[dup_id], version, scorer, *src[4:12], f"dup:{rep}", _now()])
+            rows.append([dup_id, hashes[dup_id], version, scorer, *src[4:14], f"dup:{rep}", _now()])
             copied += 1
     if rows:
         con.executemany("INSERT OR REPLACE INTO llm_labels (posting_id, description_hash, rubric_version, "
                         "scorer, grade, grade_process, grade_technical, grade_ai, lane, confidence, blocker, "
-                        "rationale, batch, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                        "rationale, required_fit, required_unmet, batch, judged_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     counts = dict(_rows(con, "SELECT grade, count(*) FROM llm_labels WHERE rubric_version = ? GROUP BY 1", [version]))
     lenses = _rows(con, """SELECT grade_process, grade_technical, grade_ai, count(*) FROM llm_labels
                            WHERE rubric_version = ? AND grade_process IS NOT NULL GROUP BY 1, 2, 3""", [version])
     log(f"Judge import: {len(rows)} labels written ({copied} copied to near-duplicates), {len(errors)} rejected; "
         f"overall grades so far {counts}")
+    req_counts = dict(_rows(con, "SELECT required_fit, count(*) FROM llm_labels WHERE rubric_version = ? "
+                                 "GROUP BY 1", [version]))
+    log(f"  required_fit: meets {req_counts.get('meets', 0)} · arguable {req_counts.get('arguable', 0)} · "
+        f"fails {req_counts.get('fails', 0)} · NULL {req_counts.get(None, 0)}")
     if lenses:
         good = {"bullseye", "adjacent"}
         both = sum(c for gp, gt, _, c in lenses if gp in good and gt in good)

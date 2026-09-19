@@ -26,7 +26,10 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 11  # v11 (2026-09-18): description_hash normalized before hashing (whitespace/NBSP/zero-width/
+SCHEMA_VERSION = 12  # v12 (2026-09-18): llm_labels.required_fit / required_unmet (the judge's Required-block
+                     #                  call, a SECOND question from the three lens grades -- see the column
+                     #                  comments below);
+                     # v11 (2026-09-18): description_hash normalized before hashing (whitespace/NBSP/zero-width/
                      #                  case/NFKC no longer orphan llm_labels / report_feedback / coverage /
                      #                  requirement_units / embeddings on a trivial re-fetch) — see
                      #                  normalize_for_hash and _migrate_v11_hash_normalization;
@@ -226,7 +229,14 @@ CREATE TABLE IF NOT EXISTS llm_labels (
     grade_technical VARCHAR,                 -- data, analytics, quantitative modelling and engineering lens
     grade_ai VARCHAR,                        -- applied-AI delivery / enablement lens (21); reported beside the
                                               -- other two, never folded into `grade`
-    lane VARCHAR, confidence VARCHAR, blocker VARCHAR, rationale VARCHAR, batch VARCHAR,
+    lane VARCHAR, confidence VARCHAR, blocker VARCHAR, rationale VARCHAR,
+    required_fit VARCHAR,                    -- meets | arguable | fails; a SECOND, SEPARATE question from the
+                                              -- three lens grades above -- those say what KIND of work the
+                                              -- posting is and train the classifier, this says whether the
+                                              -- candidate clears the posting's own Required block. NULL = judged
+                                              -- before the field existed.
+    required_unmet VARCHAR,                  -- the unmet qualification lines, ' ; '-joined, or empty
+    batch VARCHAR,
     judged_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
 );
@@ -430,6 +440,36 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     LEFT JOIN vw_screen_latest s USING (posting_id);
 
+-- Apply/review/hidden tiers, computed from STORED fields only so the formula is tunable without re-judging.
+-- Tiers were set against 61 blind gold rows on 2026-09-18: lens+meets matched the user's own adjacent/bullseye
+-- call 9 of 14 (18 of 20 same-side on the held-out sheet); lens+arguable 3 of 20 (but holds one of his
+-- bullseyes, so it is a review queue, not hidden); lens+fails 1 of 12; no-lens 1 of 15. All five lens+meets
+-- misses are one pattern: a years-in-a-named-function line the judge read as generic. Level and location
+-- gating stay with the screen (level_fit), not this view -- required_fit answers a different question (does
+-- the candidate clear the posting's own Required block) than level_fit (does the seniority/comp band fit).
+-- A user-adjudicated row carries no required_fit and needs none: his own grade IS the answer, so it tiers
+-- on `grade` alone instead of dropping out of the view.
+CREATE OR REPLACE VIEW vw_selection AS
+    WITH base AS (
+        SELECT l.posting_id, p.employer, p.title, p.url, p.status,
+               l.grade_process, l.grade_technical, l.grade_ai,
+               (l.grade_process IN ('bullseye', 'adjacent'))::INTEGER
+             + (l.grade_technical IN ('bullseye', 'adjacent'))::INTEGER
+             + (l.grade_ai IN ('bullseye', 'adjacent'))::INTEGER AS n_lenses_good,
+               'bullseye' IN (l.grade_process, l.grade_technical, l.grade_ai) AS any_bullseye,
+               l.required_fit, l.required_unmet, s.level_fit,
+               l.scorer = 'user-adjudicated' AS adjudicated, l.grade
+        FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+        LEFT JOIN vw_screen_latest s USING (posting_id)
+        WHERE l.required_fit IS NOT NULL OR l.scorer = 'user-adjudicated'
+    )
+    SELECT * EXCLUDE (grade),
+           CASE WHEN adjudicated THEN CASE WHEN grade IN ('bullseye', 'adjacent') THEN 'apply' ELSE 'hidden' END
+                WHEN n_lenses_good >= 1 AND required_fit = 'meets' THEN 'apply'
+                WHEN n_lenses_good >= 1 AND required_fit = 'arguable' THEN 'review'
+                ELSE 'hidden' END AS tier
+    FROM base;
+
 -- Where the line falls between a lens model's probability and the judge's words. Macros rather than Python
 -- constants so the views and the CLI read one source.
 --
@@ -605,14 +645,17 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
 -- Applied-AI lens training set (21), same shape as vw_label_set_process / vw_label_set_technical, reading
 -- grade_ai. features.LENS_VIEWS["ai"] points here (Agent C wires the lens name in; this view can exist and
 -- be queried before that lands).
+--
+-- Unlike the other two lenses it takes NO positives from the shared sources (vault documents, decisions), only
+-- their negatives. "They describe the candidate, not a lens" holds for process and technical work, which is
+-- what he applied to; it is false here. Measured 2026-09-18: with them in, 365 of the 475 positives were his
+-- application history, the top terms were lean / sigma / change management, and the worst false positives
+-- were process jobs graded AI-`wrong` -- a process model with "ai" on top. Out: graded-positives AUC vs
+-- `wrong` 0.878 -> 0.920, vs `stretch` 0.734 -> 0.775. That leaves ~110 positives, under LOW_DATA_MIN, so
+-- the blend down-weights this model on its own until more AI grades exist -- which is the honest setting.
 CREATE OR REPLACE VIEW vw_label_set_ai AS
     SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
-    FROM label_docs WHERE text IS NOT NULL
-    UNION ALL
-    SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
-           CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
-    FROM vw_decisions d JOIN postings p USING (posting_id)
-    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    FROM label_docs WHERE text IS NOT NULL AND label = 0
     UNION ALL
     SELECT 'llm:' || l.posting_id,
            CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
@@ -659,10 +702,13 @@ def _add_missing_columns(con):
     the lens models existed; a rescreen fills them). v9: postings.detail_attempts (old rows default 0, i.e.
     'never tried'), so a posting whose fetch keeps coming back empty stops eating the detail budget forever.
     v10: screens.level_fit (NULL until the level rule runs / a rescreen fills it), screens.fit_ai and
-    llm_labels.grade_ai (NULL until the applied-AI lens model / judge exist)."""
+    llm_labels.grade_ai (NULL until the applied-AI lens model / judge exist). v12: llm_labels.required_fit /
+    required_unmet (NULL = judged before the Required-block question joined the rubric)."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("llm_labels", "grade_ai", "VARCHAR"),
+                                ("llm_labels", "required_fit", "VARCHAR"),
+                                ("llm_labels", "required_unmet", "VARCHAR"),
                                 ("screens", "fit_process", "DOUBLE"),
                                 ("screens", "fit_technical", "DOUBLE"),
                                 ("screens", "fit_ai", "DOUBLE"),

@@ -426,6 +426,157 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
     return path
 
 
+TOP_APPLY_CAP = 100
+TOP_REVIEW_CAP = 40
+TOP_LEVELS = ("in_range", "stretch_up")
+
+_GRADE_ABBR = {"bullseye": "bull", "adjacent": "adj", "stretch": "stretch", "wrong": "wrong"}
+
+
+def _grade_compact(grade: Optional[str]) -> str:
+    return _GRADE_ABBR.get(grade, "—")
+
+
+def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS) -> list:
+    """Judged rows in one selection tier (apply / review / hidden), best first (§ 22).
+
+    `vw_selection` is LEFT JOINed to `vw_screen_latest`, so a judged posting can carry a NULL
+    `level_fit` and no location/pay/verdict at all -- that happens when the posting has never
+    been screened. `vw_lens_fit`, by contrast, INNER JOINs the screen, so such a row is simply
+    absent from it. This function LEFT JOINs to `vw_lens_fit` on purpose so that absence shows
+    up as a NULL `verdict` here (and is excluded by the verdict gate below, deliberately) rather
+    than silently vanishing before the query even runs -- `_gate_counts` below counts it
+    separately as "no screen row" so it is never confused with an actual rejection.
+    """
+    where = ["v.tier = ?", "v.status = 'active'", "f.verdict IS NOT NULL", "f.verdict != 'reject'",
+             "v.level_fit IN (SELECT unnest(?::VARCHAR[]))"]
+    if not include_decided:
+        where += ["NOT coalesce(f.decided, FALSE)", "NOT coalesce(f.in_tracker, FALSE)"]
+    return con.execute(f"""
+        SELECT v.posting_id, v.employer, v.title, v.url, v.grade_process, v.grade_technical, v.grade_ai,
+               v.n_lenses_good, v.any_bullseye, v.required_fit, v.required_unmet, v.level_fit,
+               f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
+               f.days_since_first_seen
+        FROM vw_selection v
+        LEFT JOIN vw_lens_fit f USING (posting_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY v.n_lenses_good = 3 DESC, v.any_bullseye DESC, v.n_lenses_good DESC,
+                 {_level_order_sql('v.level_fit')}, f.final_score DESC, f.first_seen_at DESC
+        """, [tier, list(levels)]).fetchall()
+
+
+def _gate_counts(con, tier: str, levels=TOP_LEVELS) -> dict:
+    """How many of this tier's rows each individual gate would exclude, independently of the
+    others -- not a sequential funnel -- so a row lost to more than one gate is never hidden
+    behind whichever gate happened to run first."""
+    total = con.execute("SELECT count(*) FROM vw_selection WHERE tier = ?", [tier]).fetchone()[0]
+    inactive = con.execute("SELECT count(*) FROM vw_selection WHERE tier = ? AND status != 'active'",
+                           [tier]).fetchone()[0]
+    # vw_lens_fit itself filters to active postings, so a missing row can mean either "inactive" (already
+    # counted above) or "never screened" -- only the latter belongs in this gate, or an inactive posting
+    # would be double-counted as though it also lacked a screen.
+    no_screen = con.execute("""
+        SELECT count(*) FROM vw_selection v LEFT JOIN vw_lens_fit f USING (posting_id)
+        WHERE v.tier = ? AND v.status = 'active' AND f.posting_id IS NULL""", [tier]).fetchone()[0]
+    reject = con.execute("""
+        SELECT count(*) FROM vw_selection v JOIN vw_lens_fit f USING (posting_id)
+        WHERE v.tier = ? AND f.verdict = 'reject'""", [tier]).fetchone()[0]
+    out_of_level = con.execute("""
+        SELECT count(*) FROM vw_selection v
+        WHERE v.tier = ? AND (v.level_fit IS NULL OR v.level_fit NOT IN (SELECT unnest(?::VARCHAR[])))""",
+        [tier, list(levels)]).fetchone()[0]
+    decided_tracker = con.execute("""
+        SELECT count(*) FROM vw_selection v JOIN vw_lens_fit f USING (posting_id)
+        WHERE v.tier = ? AND (f.decided OR f.in_tracker)""", [tier]).fetchone()[0]
+    return {"total": total, "inactive": inactive, "no_screen_row": no_screen, "verdict_reject": reject,
+            "level_out_of_range": out_of_level, "decided_or_in_tracker": decided_tracker}
+
+
+def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
+                   review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS) -> Path:
+    """Writes Top_Jobs_YYYYMMDD.md: the END-of-pipeline list, run by hand after a judge import
+    (`finder.py judge import`) -- never from the automated sweep, which always runs `--no-report`.
+
+    Ranked apply / review lists off `vw_selection`, gated on posting status, the screen's own
+    verdict (where location and pay rejections live), level fit, and -- unless `include_decided`
+    -- whether the posting is already decided or already in the tracker. Every gate's exclusion
+    count is reported in the footer, including postings judged before they were ever screened,
+    so a row can never simply disappear from the list without a paper trail.
+    """
+    now_local = datetime.now()
+    stamp = now_local.strftime("%Y%m%d")
+    name = f"Top_Jobs_{stamp}.md"
+    if out_path:
+        out = Path(out_path)
+        path = out / name if (out.is_dir() or not out.suffix) else out
+    else:
+        path = job_search_dir(vault_dir) / "Search_Results" / name
+    path = _unique_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tiers = dict(con.execute("SELECT tier, count(*) FROM vw_selection GROUP BY 1").fetchall())
+    judged = sum(tiers.values())
+    rubric_versions = [r[0] for r in con.execute("""
+        SELECT DISTINCT l.rubric_version FROM vw_llm_labels_latest l JOIN vw_selection v USING (posting_id)
+        WHERE v.tier IN ('apply', 'review') ORDER BY 1""").fetchall()]
+
+    apply_rows = top_rows(con, "apply", include_decided=include_decided, levels=levels)
+    review_rows = top_rows(con, "review", include_decided=include_decided, levels=levels)
+    apply_gates = _gate_counts(con, "apply", levels)
+    review_gates = _gate_counts(con, "review", levels)
+
+    w = [f"---\nnode_id: JOBS:top-{stamp}\nnode_type: search_results\ntags: [#job-search #pipeline #top]\n---\n",
+         f"# Top Jobs — end of pipeline, after judge import, {now_local:%Y-%m-%d %H:%M}\n",
+         f"**Rubric version(s):** {', '.join(rubric_versions) or 'none'}. "
+         f"**Funnel:** {judged} judged → {tiers.get('apply', 0)} apply / {tiers.get('review', 0)} review / "
+         f"{tiers.get('hidden', 0)} hidden → after active + verdict + level" +
+         (" + undecided" if not include_decided else "") +
+         f" gates: {len(apply_rows)} apply, {len(review_rows)} review. "
+         f"**Levels shown:** {', '.join(levels)}. **Decided/in-tracker rows:** "
+         f"{'included' if include_decided else 'hidden'}.\n"]
+
+    def gate_line(gates: dict, label: str) -> str:
+        return (f"of {gates['total']} {label}-tier rows: "
+                f"{gates['inactive']} inactive, {gates['verdict_reject']} verdict reject, "
+                f"{gates['level_out_of_range']} level out of range, "
+                f"{gates['decided_or_in_tracker']} already decided/in tracker, "
+                f"{gates['no_screen_row']} judged with no screen row")
+
+    w.append("## Apply\n")
+    if not apply_rows:
+        w.append("_Nothing clears the apply gates this run._\n")
+    else:
+        w.append("| Company | Title | Location | Pay | Level | Process / Technical / AI | Age |\n"
+                 "|---|---|---|---|---|---|---|")
+        for row in apply_rows[:apply_cap]:
+            (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
+             interval, score, first_seen, age) = row
+            star = "★ " if n_good == 3 else ""
+            grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
+            w.append(f"| {star}{_cell(employer)} | {_link(title, url)} | {_cell(loc)[:34]} | "
+                     f"{_pay(lo, hi, interval)} | {level_fit or '—'} | {grades} | {age if age is not None else '—'}d |")
+    w.append("")
+    w.append("## Review (requirement arguable — read the unmet lines)\n")
+    if not review_rows:
+        w.append("_Nothing clears the review gates this run._\n")
+    else:
+        w.append("| Company | Title | Location | Pay | Level | Process / Technical / AI | Unmet | Age |\n"
+                 "|---|---|---|---|---|---|---|---|")
+        for row in review_rows[:review_cap]:
+            (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
+             interval, score, first_seen, age) = row
+            star = "★ " if n_good == 3 else ""
+            grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
+            w.append(f"| {star}{_cell(employer)} | {_link(title, url)} | {_cell(loc)[:34]} | "
+                     f"{_pay(lo, hi, interval)} | {level_fit or '—'} | {grades} | {_cell(req_unmet)[:160]} | "
+                     f"{age if age is not None else '—'}d |")
+    w.append("")
+    w.append(f"**Gate detail — Apply:** {gate_line(apply_gates, 'apply')}.\n")
+    w.append(f"**Gate detail — Review:** {gate_line(review_gates, 'review')}.\n")
+    path.write_text("\n".join(w) + "\n", encoding="utf-8")
+    return path
+
+
 def snapshots(con, out_dir: Optional[str] = None) -> list:
     """Parquet exports of the shortlist, latest screens, decisions and tracker, plus shortlist CSVs."""
     out = Path(out_dir or SNAPSHOT_DIR)

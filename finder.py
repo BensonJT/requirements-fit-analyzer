@@ -8,6 +8,7 @@ Usage:
     .venv/bin/python finder.py facets [--discover]        # each board's filter scope (country / partition)
     .venv/bin/python finder.py report --out /tmp/x.md     # Jobs_Found file (+ snapshots)
     .venv/bin/python finder.py lenses --out /tmp/l.md     # strong on process / technical / both
+    .venv/bin/python finder.py top --out /tmp/t.md        # END-of-pipeline list: run after judge import
     .venv/bin/python finder.py sync --verbose             # mirror Application_Tracker.md
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
     .venv/bin/python finder.py shortlist --days 7 --n 30
@@ -148,6 +149,22 @@ def cmd_lenses(con, a):
     for src, n in con.execute("SELECT lens_source, count(*) FROM vw_lens_fit GROUP BY 1 ORDER BY 2 DESC").fetchall():
         print(f"  placed by {src:<12} {n:>6}")
     print(f"Wrote {path}")
+
+
+def cmd_top(con, a):
+    """END-of-pipeline apply/review list, read off vw_selection -- run by hand after a judge import."""
+    if not a.out and not a.vault and not a.stdout:
+        sys.exit("top: set JOBSEARCH_VAULT_DIR, or pass --out or --stdout")
+    if a.stdout:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = report.write_top_jobs(con, a.vault, out_path=tmp, apply_cap=a.apply_cap,
+                                         review_cap=a.review_cap, include_decided=a.include_decided)
+            print(path.read_text(encoding="utf-8"))
+        return
+    path = report.write_top_jobs(con, a.vault, out_path=a.out, apply_cap=a.apply_cap, review_cap=a.review_cap,
+                                 include_decided=a.include_decided)
+    print(path)
 
 
 def cmd_mark(con, a):
@@ -335,6 +352,15 @@ def main():
     s.add_argument("--cap", type=int, default=report.LENS_LIST_CAP, help="rows per list (default 60)")
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
     s.set_defaults(func=cmd_lenses)
+
+    s = sub.add_parser("top", parents=[common],
+                       help="END-of-pipeline apply/review list; run after `judge import`")
+    s.add_argument("--apply-cap", type=int, default=report.TOP_APPLY_CAP)
+    s.add_argument("--review-cap", type=int, default=report.TOP_REVIEW_CAP)
+    s.add_argument("--include-decided", action="store_true", help="also show already-decided / in-tracker rows")
+    s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
+    s.add_argument("--stdout", action="store_true", help="print the markdown instead of writing a file")
+    s.set_defaults(func=cmd_top)
 
     s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")
     s.add_argument("target", help='posting_id, posting URL, or "employer|title"')

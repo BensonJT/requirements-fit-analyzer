@@ -309,7 +309,8 @@ def _lens_cell(grade: Optional[str], prob: Optional[float]) -> str:
 def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bool = False) -> list:
     """Actionable rows in one lens bucket, best first.
 
-    Ranked on `final_score`, not on `lens_source`: sorting by evidence weight would bury a model row at 92
+    Ordered by the ONE rank (`vw_lens_fit.rank_score`), which already prices the level call, so level is no
+    longer a separate sort key. Never on `lens_source`: sorting by evidence weight would bury a model row at 92
     under a judged row at 55, and the point of scoring the whole corpus was to stop the judged 3k being the
     only thing visible. Source breaks a tie, and is a column the reader can see on every row.
     """
@@ -319,10 +320,10 @@ def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bo
     return con.execute(f"""
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_process, fit_process, grade_technical, fit_technical, lens_source,
-               days_since_first_seen, blocker, level_fit
+               days_since_first_seen, blocker, level_fit, required_fit, fit_required, rank_score, rank_why
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
-        ORDER BY {_level_order_sql('level_fit')}, final_score DESC,
+        ORDER BY rank_score DESC, final_score DESC,
                  CASE lens_source WHEN 'user' THEN 0 WHEN 'judge' THEN 1 WHEN 'judge+model' THEN 2 ELSE 3 END,
                  lens_max_p DESC, first_seen_at DESC
         LIMIT ?""", [bucket, cap]).fetchall()
@@ -336,10 +337,11 @@ def ai_lens_rows(con, *, cap: int = LENS_LIST_CAP, include_decided: bool = False
         where += ["NOT decided", "NOT in_tracker"]
     return con.execute(f"""
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
-               final_score, band, grade_ai, fit_ai, lens_source, days_since_first_seen, blocker, level_fit
+               final_score, band, grade_ai, fit_ai, lens_source, days_since_first_seen, blocker, level_fit,
+               required_fit, fit_required, rank_score, rank_why
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
-        ORDER BY {_level_order_sql('level_fit')}, final_score DESC,
+        ORDER BY rank_score DESC, final_score DESC,
                  CASE lens_source WHEN 'user' THEN 0 WHEN 'judge' THEN 1 WHEN 'judge+model' THEN 2 ELSE 3 END,
                  lens_max_p DESC, first_seen_at DESC
         LIMIT ?""", [cap]).fetchall()
@@ -398,13 +400,13 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
         if not rows:
             w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
             continue
-        w.append("| Posting ID | Company | Title | Score | Band | Level | Process | Technical | Placed by | Pay "
-                 "| Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
+        w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | Process | Technical | Required | "
+                 "Placed by | Pay | Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, gp, fp, gt, ft, src, age,
-             blocker, level_fit) in rows:
-            w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)} | {score} | {band} | "
-                     f"{level_fit or '—'} | {_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {src} | "
-                     f"{_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
+             blocker, level_fit, rf, freq, rank, why) in rows:
+            w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
+                     f"{level_fit or '—'} | {_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {_lens_cell(rf, freq)} | "
+                     f"{src} | {_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
 
     _ai_bucket, ai_heading, ai_subtitle = AI_LIST
@@ -414,13 +416,13 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
     if not ai_rows:
         w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
     else:
-        w.append("| Posting ID | Company | Title | Score | Band | Level | AI | Placed by | Pay | Location "
-                 "| Age |\n|---|---|---|---|---|---|---|---|---|---|---|")
+        w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | AI | Required | Placed by | Pay | "
+                 "Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, ga, fa, src, age, blocker,
-             level_fit) in ai_rows:
-            w.append(f"| {pid} | {_cell(employer)} | {_link(title, url)} | {score} | {band} | "
-                     f"{level_fit or '—'} | {_lens_cell(ga, fa)} | {src} | {_pay(lo, hi, interval)} | "
-                     f"{_cell(loc)[:34]} | {age}d |")
+             level_fit, rf, freq, rank, why) in ai_rows:
+            w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
+                     f"{level_fit or '—'} | {_lens_cell(ga, fa)} | {_lens_cell(rf, freq)} | {src} | "
+                     f"{_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
     path.write_text("\n".join(w) + "\n", encoding="utf-8")
     return path
@@ -438,7 +440,7 @@ def _grade_compact(grade: Optional[str]) -> str:
 
 
 def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS) -> list:
-    """Judged rows in one selection tier (apply / review / hidden), best first (§ 22).
+    """Judged rows in one selection tier (apply / review / hidden), ordered by the ONE rank (`vw_lens_fit.rank_score`).
 
     `vw_selection` is LEFT JOINed to `vw_screen_latest`, so a judged posting can carry a NULL
     `level_fit` and no location/pay/verdict at all -- that happens when the posting has never
@@ -456,12 +458,11 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
         SELECT v.posting_id, v.employer, v.title, v.url, v.grade_process, v.grade_technical, v.grade_ai,
                v.n_lenses_good, v.any_bullseye, v.required_fit, v.required_unmet, v.level_fit,
                f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
-               f.days_since_first_seen
+               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why
         FROM vw_selection v
         LEFT JOIN vw_lens_fit f USING (posting_id)
         WHERE {' AND '.join(where)}
-        ORDER BY v.n_lenses_good = 3 DESC, v.any_bullseye DESC, v.n_lenses_good DESC,
-                 {_level_order_sql('v.level_fit')}, f.final_score DESC, f.first_seen_at DESC
+        ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC
         """, [tier, list(levels)]).fetchall()
 
 
@@ -546,30 +547,31 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
     if not apply_rows:
         w.append("_Nothing clears the apply gates this run._\n")
     else:
-        w.append("| Company | Title | Location | Pay | Level | Process / Technical / AI | Age |\n"
-                 "|---|---|---|---|---|---|---|")
+        w.append("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|")
         for row in apply_rows[:apply_cap]:
             (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
-             interval, score, first_seen, age) = row
+             interval, score, first_seen, age, breadth, rank, why) = row
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {star}{_cell(employer)} | {_link(title, url)} | {_cell(loc)[:34]} | "
-                     f"{_pay(lo, hi, interval)} | {level_fit or '—'} | {grades} | {age if age is not None else '—'}d |")
+            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
+                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_cell(loc)[:34]} | "
+                     f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")
     w.append("## Review (requirement arguable — read the unmet lines)\n")
     if not review_rows:
         w.append("_Nothing clears the review gates this run._\n")
     else:
-        w.append("| Company | Title | Location | Pay | Level | Process / Technical / AI | Unmet | Age |\n"
-                 "|---|---|---|---|---|---|---|---|")
+        w.append("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|")
         for row in review_rows[:review_cap]:
             (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
-             interval, score, first_seen, age) = row
+             interval, score, first_seen, age, breadth, rank, why) = row
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {star}{_cell(employer)} | {_link(title, url)} | {_cell(loc)[:34]} | "
-                     f"{_pay(lo, hi, interval)} | {level_fit or '—'} | {grades} | {_cell(req_unmet)[:160]} | "
-                     f"{age if age is not None else '—'}d |")
+            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
+                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_cell(loc)[:34]} | "
+                     f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")
     w.append(f"**Gate detail — Apply:** {gate_line(apply_gates, 'apply')}.\n")
     w.append(f"**Gate detail — Review:** {gate_line(review_gates, 'review')}.\n")

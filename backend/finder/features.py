@@ -78,14 +78,16 @@ def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] =
 
 
 LENS_VIEWS = {None: "vw_label_set", "process": "vw_label_set_process", "technical": "vw_label_set_technical",
-             "ai": "vw_label_set_ai"}
+             "ai": "vw_label_set_ai", "required": "vw_label_set_required"}
 
 
 def training_set(con, lens=None) -> list:
     """vw_label_set rows as dicts, one per job: postings in `training_exclusions` dropped outright, then
     deduped on posting_id and on company + similar title (FUZZY_DEDUPED_SOURCES), by SOURCE_PRIORITY.
 
-    `lens` selects the per-lens view (sprint plan 18.8); None keeps the averaged-grade set."""
+    `lens` selects the per-lens view (sprint plan 18.8); None keeps the averaged-grade set. `lens="required"`
+    is NOT a lens -- see REQUIRED_MODEL -- but reads through this same generic view-lookup mechanism, since it
+    is just another named training set."""
     if lens not in LENS_VIEWS:
         raise ValueError(f"unknown lens {lens!r}; expected one of {sorted(k for k in LENS_VIEWS if k)}")
     cols = ("label_id", "source", "posting_id", "company", "title", "text", "label", "weight", "grade")
@@ -176,8 +178,14 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
           seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, lens=None, log=print) -> dict:
     """Cross-validates, fits on all labels, saves db/models/<version>.joblib and inserts a `models` row.
 
-    `lens` ('process' | 'technical') trains that lens's model and stores it under its own `kind`, so the
-    three coexist and `latest_model` can ask for one by name."""
+    `lens` ('process' | 'technical' | 'ai') trains that lens's model and stores it under its own `kind`, so the
+    three coexist and `latest_model` can ask for one by name. `lens="required"` (REQUIRED_MODEL) runs through
+    this exact same path and storage shape (kind `tfidf_lr_required`) but is NOT a lens -- it trains on
+    vw_label_set_required (judge required_fit calls only, no vault/decision rows), and its score is a ranking
+    signal that must never reach `pipeline.content_fit` or any lens list/count. Career-site-copy augmentation
+    below is a no-op for it: vw_label_set_required's text already IS the posting's own current description_text,
+    so the "copy differs from the row" check that triggers augmentation is never true unless the JD was
+    re-fetched with different text since judging -- and even then it is ordinary signal, not vault leakage."""
     import joblib
     import numpy as np
     rows = training_set(con, lens=lens)
@@ -265,10 +273,14 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     if g["by_grade"]:
         log("Held-out fit by judge grade: "
             + " · ".join(f"{k} {v['mean']:.2f} (n={v['n']})" for k, v in g["by_grade"].items()))
-        log(f"AUC positives vs graded `wrong` {_fmt(g.get('auc_vs_wrong'))} · vs `stretch` "
-            f"{_fmt(g.get('auc_vs_stretch'))}  (graded positives only: "
-            f"{_fmt(result['grades_graded_only'].get('auc_vs_wrong'))} / "
-            f"{_fmt(result['grades_graded_only'].get('auc_vs_stretch'))})")
+        # Whichever negative grades this run actually has (wrong/stretch for a lens, fails/arguable for
+        # `required` -- NEGATIVE_GRADES_TO_REPORT covers both vocabularies and grade_report only populates the
+        # ones present), so the line reads correctly for either without a lens-specific branch here.
+        present = [gr for gr in NEGATIVE_GRADES_TO_REPORT if f"auc_vs_{gr}" in g]
+        if present:
+            log("AUC positives vs graded " + " · ".join(
+                f"`{gr}` {_fmt(g.get(f'auc_vs_{gr}'))} (graded positives only: "
+                f"{_fmt(result['grades_graded_only'].get(f'auc_vs_{gr}'))})" for gr in present))
     return result
 
 
@@ -316,23 +328,38 @@ def _source_gap(con, rows: list, oof, pairs: Optional[dict] = None) -> dict:
     return {k: {"n": len(v), "mean": float(sum(v) / len(v))} for k, v in groups.items() if v}
 
 
-def grade_report(rows: list, oof, positives_from: str = "any") -> dict:
-    """Held-out fit by judge grade, and the AUC that matters after the labeling run: positives against the
-    postings graded `wrong` (and, separately, `stretch`). Before the run those negatives did not exist, so the
-    only measurable AUC was against random postings, which any vocabulary model wins.
+# Grade values that mark a row a POSITIVE under either vocabulary this function sees: the four-way lens grade
+# (bullseye/adjacent/stretch/wrong) and the Required-block grade (meets/arguable/fails, stored in the `grade`
+# column by vw_label_set_required). The two vocabularies never share a value, so one set is safe for both.
+POSITIVE_GRADES = ("bullseye", "adjacent", "meets")
+# Grade values worth an AUC-against-positives line when they have rows: the lens "hard negative" grades plus
+# the Required-block's two non-meets answers. A grade absent from the data (e.g. `wrong`/`stretch` on a
+# required-model run, or `fails`/`arguable` on a lens run) simply has no rows, so its line is skipped, not
+# crashed on -- the `if positives and neg` guard below already handles that.
+NEGATIVE_GRADES_TO_REPORT = ("wrong", "stretch", "fails", "arguable")
 
-    `positives_from` = 'any' scores every label-1 row; 'graded' uses only the bullseye / adjacent rows, which
-    is the harder and more honest comparison (both sides then come from the same corpus and the same judge)."""
+
+def grade_report(rows: list, oof, positives_from: str = "any") -> dict:
+    """Held-out fit by judge grade (bullseye/adjacent/stretch/wrong for a lens, meets/arguable/fails for the
+    Required-block model -- `grade` carries whichever vocabulary the training view used), and the AUCs that
+    matter after the labeling run: positives against each populated negative grade (`wrong` and `stretch` for a
+    lens, `fails` and `arguable` for `required`). Before the run those negatives did not exist, so the only
+    measurable AUC was against random postings, which any vocabulary model wins.
+
+    `positives_from` = 'any' scores every label-1 row; 'graded' uses only the rows graded a positive value
+    (POSITIVE_GRADES), which is the harder and more honest comparison (both sides then come from the same
+    corpus and the same judge) -- for `required`, every positive is already a graded row, so this mode changes
+    nothing there."""
     by_grade, positives = defaultdict(list), []
     for r, p in zip(rows, oof):
         p = float(p)
         if r.get("grade"):
             by_grade[r["grade"]].append(p)
-        if r["label"] == 1 and (positives_from == "any" or r.get("grade") in ("bullseye", "adjacent")):
+        if r["label"] == 1 and (positives_from == "any" or r.get("grade") in POSITIVE_GRADES):
             positives.append(p)
     out = {"by_grade": {g: {"n": len(v), "mean": sum(v) / len(v)} for g, v in sorted(by_grade.items())},
            "positives": {"n": len(positives), "mean": sum(positives) / len(positives) if positives else None}}
-    for grade in ("wrong", "stretch"):
+    for grade in NEGATIVE_GRADES_TO_REPORT:
         neg = by_grade.get(grade, [])
         if positives and neg:
             y = [1] * len(positives) + [0] * len(neg)
@@ -410,16 +437,34 @@ LENSES = ("process", "technical", "ai")
 # The probability thresholds that turn these scores into buckets live in SQL, as the `lens_strong_p()` /
 # `lens_standout_p()` macros next to the view that reads them (backend/ats/store.py).
 
+# The Required-block ranking model's name. Deliberately kept OUT of LENSES and out of load_lens_models's
+# result, in its own constant rather than a fourth entry in that tuple, so every site that iterates LENSES (or
+# treats load_lens_models's dict as "the lenses") can never pick it up by accident: it answers a different
+# question (does the candidate clear THIS posting's Required block) than the three lenses (what kind of work
+# is this), and it is a ranking signal only -- it must never enter content_fit, lens_best, lens_breadth,
+# n_lenses_good, lens_bucket or any "lenses" report/count.
+REQUIRED_MODEL = "required"
+
 
 def load_lens_models(con, log=print, model_dir: Optional[str] = None) -> dict:
     """{lens: model} for every lens that has a trained model on disk. Missing lenses are simply absent, so
-    the screen runs unchanged on a database that never trained them."""
+    the screen runs unchanged on a database that never trained them.
+
+    Never includes REQUIRED_MODEL -- callers that want the Required-block ranking model ask for it by name
+    with `load_required_model`, kept as a separate call precisely so it cannot leak into this dict."""
     out = {}
     for lens in LENSES:
         model = load_latest(con, lens=lens, log=log, model_dir=model_dir)
         if model is not None:
             out[lens] = model
     return out
+
+
+def load_required_model(con, log=print, model_dir: Optional[str] = None) -> Optional[dict]:
+    """The Required-block ranking model (features.train(lens=REQUIRED_MODEL)), or None when it has not been
+    trained. NOT a lens (see REQUIRED_MODEL) -- a separate function, not a LENSES entry, so it can only ever
+    be loaded by a caller that explicitly asks for it."""
+    return load_latest(con, lens=REQUIRED_MODEL, log=log, model_dir=model_dir)
 
 
 def predict(model: dict, texts: list) -> list:

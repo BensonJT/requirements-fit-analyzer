@@ -23,6 +23,7 @@ Usage:
     .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
+    .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -57,13 +58,16 @@ def cmd_screen(con, a):
     since = _utcnow() - timedelta(hours=a.since_hours) if a.since_hours else None
     model = None if a.no_model else features.load_latest(con)
     lens_models = {} if a.no_model else features.load_lens_models(con)
-    pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model, lens_models=lens_models)
+    required_model = None if a.no_model else features.load_required_model(con)
+    pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model, lens_models=lens_models,
+                    required_model=required_model)
 
 
 def cmd_rescreen_all(con, a):
     before = _latest_counts(con)
     pipeline.screen(con, full=True, model=None if a.no_model else features.load_latest(con),
-                    lens_models={} if a.no_model else features.load_lens_models(con))
+                    lens_models={} if a.no_model else features.load_lens_models(con),
+                    required_model=None if a.no_model else features.load_required_model(con))
     after = _latest_counts(con)
     print(f"{'verdict':<10} {'before':>8} {'after':>8} {'diff':>8}")
     for v in sorted(set(before) | set(after)):
@@ -394,8 +398,9 @@ def main():
     s.add_argument("--cv", type=int, default=5)
     s.add_argument("--C", type=float, default=4.0)
     s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
-    s.add_argument("--lens", choices=["process", "technical", "ai"],
-                   help="train one lens's model instead of the overall one")
+    s.add_argument("--lens", choices=["process", "technical", "ai", "required"],
+                   help="train one lens's model instead of the overall one; 'required' is NOT a lens -- it is "
+                        "the Required-block ranking model (features.REQUIRED_MODEL), a ranking signal only")
     s.set_defaults(func=cmd_train)
 
     s = sub.add_parser("evidence", parents=[common], help="check / embed the evidence manifest")

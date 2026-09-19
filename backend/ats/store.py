@@ -26,7 +26,10 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 12  # v12 (2026-09-18): llm_labels.required_fit / required_unmet (the judge's Required-block
+SCHEMA_VERSION = 13  # v13 (2026-09-19): screens.fit_required -- the Required-block ranking model's probability
+                     #                  (features.train(lens="required")). NOT a lens: ranking signal only,
+                     #                  never read by pipeline.content_fit / combine;
+                     # v12 (2026-09-18): llm_labels.required_fit / required_unmet (the judge's Required-block
                      #                  call, a SECOND question from the three lens grades -- see the column
                      #                  comments below);
                      # v11 (2026-09-18): description_hash normalized before hashing (whitespace/NBSP/zero-width/
@@ -136,6 +139,9 @@ CREATE TABLE IF NOT EXISTS screens (
     fit_process     DOUBLE,                    -- per-lens fit (18.8): process excellence / operating model
     fit_technical   DOUBLE,                    -- per-lens fit (18.8): data, analytics, quantitative
     fit_ai          DOUBLE,                    -- per-lens fit (21): applied-AI delivery / enablement
+    fit_required    DOUBLE,                    -- Required-block ranking model (features.train(lens="required"));
+                                                -- NOT a lens -- never read by pipeline.content_fit / combine,
+                                                -- ranking only. NULL until the model exists / a rescreen fills it.
     embed_sim       DOUBLE,                    -- Phase 3 (raw cosine)
     llm_score       INTEGER,                   -- Phase 4
     final_score     INTEGER NOT NULL,          -- 0-100
@@ -491,6 +497,36 @@ CREATE OR REPLACE MACRO lens_strong_p() AS 0.70;
 -- models can support, and the bar is understood to be soft.
 CREATE OR REPLACE MACRO lens_standout_p() AS 0.80;
 
+-- One number per lens whoever placed it, so the three can be compared and added: the judge's word where there
+-- is one (a grade wins over a prediction, as everywhere in vw_lens_fit), the lens model's probability where
+-- there is not. `adjacent` sits just above lens_strong_p() and `bullseye` above lens_standout_p() on purpose,
+-- so a graded lens and a predicted lens cross the same lines.
+CREATE OR REPLACE MACRO lens_value(grade, prob) AS
+    CASE grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.75 WHEN 'stretch' THEN 0.35 WHEN 'wrong' THEN 0.0
+               ELSE coalesce(prob, 0.0) END;
+
+-- Same "a grade wins over a prediction" pattern as lens_value, for the Required-block question: the judge's
+-- own call where there is one (meets/arguable/fails answer whether the candidate clears the posting's Required
+-- block), the ranking model's probability where there is not, and 0.5 -- unknown, neither rewarded nor zeroed
+-- -- when neither exists. NOT a lens: this only ever multiplies lens_breadth (breadth_x_required below) and
+-- orders the judge queue; it never enters lens_value, lens_best, lens_bucket or content_fit.
+CREATE OR REPLACE MACRO required_value(required_fit, prob) AS
+    CASE required_fit WHEN 'meets' THEN 1.0 WHEN 'arguable' THEN 0.5 WHEN 'fails' THEN 0.0
+                       ELSE coalesce(prob, 0.5) END;
+
+-- How much a level call discounts the ONE rank (rank_score below). The screen never rejects on level, so this
+-- is where "a VP seat is not worth the read" is priced. Provisional v1 constants, like the rank itself.
+CREATE OR REPLACE MACRO level_value(level_fit) AS
+    CASE level_fit WHEN 'in_range' THEN 1.0 WHEN 'stretch_up' THEN 0.85 WHEN 'too_low' THEN 0.3
+                   WHEN 'out_of_reach' THEN 0.2 ELSE 0.7 END;
+
+-- One lens, in words, for rank_why: the judge's grade, or the model's probability marked as a guess; NULL when
+-- the lens is not strong, so concat_ws drops it.
+CREATE OR REPLACE MACRO lens_phrase(name, grade, prob) AS
+    CASE WHEN grade IN ('bullseye', 'adjacent') THEN name || ' ' || grade
+         WHEN grade IS NULL AND prob >= lens_strong_p() THEN name || ' ~' || printf('%.2f', prob) || ' (model)'
+         ELSE NULL END;
+
 -- One row per active screened posting saying how each lens places it, and WHO placed it. The judge has
 -- graded ~3k rows; the lens models cover the other 60k. Reading them from one view is what lets the three
 -- report lists be the whole corpus instead of only the judged slice -- with `lens_source` on every row, so a
@@ -501,9 +537,9 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                p.pay_min, p.pay_max, p.pay_interval, p.first_seen_at,
                date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
                s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.fit_process, s.fit_technical,
-               s.fit_ai, s.level_fit,
+               s.fit_ai, s.fit_required, s.level_fit,
                s.reasons, s.flags,
-               g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer,
+               g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit, g.required_unmet,
                d.posting_id IS NOT NULL AS decided,
                t.matched_posting_id IS NOT NULL AS in_tracker
         FROM postings p
@@ -547,7 +583,53 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                 ELSE 'neither' END AS lens_bucket,
            -- A single per-row lens strength, used to break ties inside a list. A row with no JD scores
            -- NULL on both lenses and lands in `neither`, which is correct: nothing placed it.
-           greatest(coalesce(fit_process, 0), coalesce(fit_technical, 0)) AS lens_max_p
+           greatest(coalesce(fit_process, 0), coalesce(fit_technical, 0)) AS lens_max_p,
+           -- The BEST lens decides whether a row is worth showing (pipeline.content_fit gates on the same idea);
+           -- an applied-AI fit alone is enough.
+           greatest(lens_value(grade_process, fit_process), lens_value(grade_technical, fit_technical),
+                    lens_value(grade_ai, fit_ai)) AS lens_best,
+           -- BREADTH: the three lenses ADDED (0-3), so a high number means two or three lenses scored well --
+           -- the role that needs more than one of his skill sets. It is a SECOND field and only ever a
+           -- tie-breaker among rows already worth showing, so it is multiplied by zero whenever the row is not:
+           -- the best lens is not strong, the judge says he fails the Required block, or the screen rejected
+           -- it (that is where "not remote and outside the commute area" and the pay floor live). The lens
+           -- models share vocabulary, so the sum partly double-counts; it ranks, it does not measure.
+           CASE WHEN verdict = 'reject' OR coalesce(required_fit, '') = 'fails'
+                     OR greatest(lens_value(grade_process, fit_process), lens_value(grade_technical, fit_technical),
+                                 lens_value(grade_ai, fit_ai)) < lens_strong_p() THEN 0.0
+                ELSE lens_value(grade_process, fit_process) + lens_value(grade_technical, fit_technical)
+                     + lens_value(grade_ai, fit_ai) END AS lens_breadth,
+           -- The soft version of "multiply by zero if I don't meet the requirements": a judged row gets the
+           -- hard 0 / 0.5 / 1 the judge assigned (required_value), an unjudged row gets the ranking model's
+           -- probability. fit_required is NOT a lens and never touches lens_breadth itself -- only this
+           -- product, which exists for ranking (the judge queue, ad hoc reads), never for content_fit.
+           lens_breadth * required_value(required_fit, fit_required) AS breadth_x_required,
+           -- THE rank: the one number a list is ordered by (0-100). Every component stays visible beside it;
+           -- this is only their combination. Best lens carries it (0.8), breadth beyond the best lens adds to
+           -- it (0.2 x the other two lenses' share). The best-lens weight must stay ABOVE 0.75: three adjacents
+           -- score 0.75 whatever the split, one bullseye scores exactly this weight, and the user ruled that one
+           -- bullseye outranks three adjacents (lukewarm on every lens is a generalist seat, not a fit), and then it is MULTIPLIED by whether he clears the Required
+           -- block, by the level call, and by zero when the screen rejected the row (commute / remote / pay
+           -- floor) or no lens is strong. Anything holding a bullseye comes first, more lenses beside it ranking higher
+           -- (three bullseyes > bullseye + adjacent > one bullseye), then breadth among adjacent-only rows (three > two > one). PROVISIONAL v1 weights, chosen to reproduce the user's stated
+           -- ordering; to be re-fit to his gold grades and build / pass decisions once there are enough.
+           round(100.0 * (0.8 * lens_best + 0.2 * greatest(0.0, lens_breadth - lens_best) / 2.0)
+                 * required_value(required_fit, fit_required) * level_value(level_fit)
+                 * CASE WHEN verdict = 'reject' OR lens_best < lens_strong_p() THEN 0.0 ELSE 1.0 END, 1) AS rank_score,
+           -- WHY it sits there, in words: the deciding facts, not the numbers again.
+           concat_ws('; ',
+               CASE WHEN process_strong AND technical_strong AND ai_strong THEN '★ three-lens' END,
+               coalesce(nullif(concat_ws(' + ', lens_phrase('process', grade_process, fit_process),
+                                                lens_phrase('technical', grade_technical, fit_technical),
+                                                lens_phrase('AI', grade_ai, fit_ai)), ''), 'no strong lens'),
+               CASE required_fit
+                    WHEN 'meets' THEN 'Required: meets'
+                    WHEN 'arguable' THEN 'Required arguable: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
+                    WHEN 'fails' THEN 'Required FAILS: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
+                    ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)' END,
+               CASE WHEN coalesce(level_fit, 'unknown') != 'in_range' THEN 'level ' || coalesce(level_fit, 'unknown') END,
+               CASE WHEN verdict = 'reject' THEN 'SCREEN REJECT: ' || coalesce(reasons ->> 0, 'see reasons') END
+           ) AS rank_why
     FROM placed;
 
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
@@ -563,7 +645,7 @@ CREATE OR REPLACE VIEW vw_shortlist AS
            p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
            date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
            s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob,
-           s.fit_process, s.fit_technical, s.fit_ai, s.level_fit, s.embed_sim, s.llm_score,
+           s.fit_process, s.fit_technical, s.fit_ai, s.fit_required, s.level_fit, s.embed_sim, s.llm_score,
            s.reasons, s.flags, s.top_terms, s.rules_version, s.model_version, s.screened_at,
            c.coverage_required, c.coverage_role
     FROM postings p
@@ -667,6 +749,26 @@ CREATE OR REPLACE VIEW vw_label_set_ai AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     WHERE length(p.description_text) >= 800 AND l.grade_ai IS NOT NULL;
 
+-- The Required-block ranking model's training set (features.LENS_VIEWS["required"]). NOT a lens -- it answers
+-- a different question than process/technical/ai (does the candidate clear THIS posting's own Required block,
+-- not what kind of work it is), so it is trained on ONLY the judge's required_fit call: no vault documents, no
+-- decisions, no pseudo-negatives. Those shared sources describe the candidate's own history, which is exactly
+-- "kind of work", already answered by the three lenses -- folding them in here would just re-teach that and
+-- dilute the one signal this model exists to carry. label = 1 for `meets`, 0 for `arguable` and `fails`
+-- (arguable is a real gap, not a fit); weight 1.0 for every row, matching what was measured (§ hard rule 2 --
+-- do not invent a weighting). `grade` carries required_fit itself (meets/arguable/fails) rather than NULL, so
+-- features.grade_report's held-out-fit-by-grade and AUC breakdown still print something meaningful for this
+-- lens's training run.
+CREATE OR REPLACE VIEW vw_label_set_required AS
+    SELECT 'llm:' || l.posting_id AS label_id,
+           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END AS source,
+           p.posting_id, p.employer AS company, p.title, p.description_text AS text,
+           CASE WHEN l.required_fit = 'meets' THEN 1 ELSE 0 END AS label,
+           1.0 AS weight,
+           l.required_fit AS grade
+    FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WHERE length(p.description_text) >= 800 AND l.required_fit IS NOT NULL;
+
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS
     SELECT posting_id, employer, title, location_primary, status,
@@ -703,7 +805,9 @@ def _add_missing_columns(con):
     'never tried'), so a posting whose fetch keeps coming back empty stops eating the detail budget forever.
     v10: screens.level_fit (NULL until the level rule runs / a rescreen fills it), screens.fit_ai and
     llm_labels.grade_ai (NULL until the applied-AI lens model / judge exist). v12: llm_labels.required_fit /
-    required_unmet (NULL = judged before the Required-block question joined the rubric)."""
+    required_unmet (NULL = judged before the Required-block question joined the rubric). v13: screens.fit_required
+    (NULL until the Required-block ranking model exists / a rescreen fills it) -- NOT a lens, see the column
+    comment on `screens` above."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("llm_labels", "grade_ai", "VARCHAR"),
@@ -712,6 +816,7 @@ def _add_missing_columns(con):
                                 ("screens", "fit_process", "DOUBLE"),
                                 ("screens", "fit_technical", "DOUBLE"),
                                 ("screens", "fit_ai", "DOUBLE"),
+                                ("screens", "fit_required", "DOUBLE"),
                                 ("screens", "level_fit", "VARCHAR"),
                                 ("postings", "detail_attempts", "INTEGER DEFAULT 0")):
         if column not in _columns(con, table):

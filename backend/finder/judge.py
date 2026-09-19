@@ -17,9 +17,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+from backend import profile as P
+from backend import screen as S
 from backend.screen import similar_title
 
 from . import rubric
+from .rules import find_terms, _US_TEXT
 
 BATCH_SIZE = 20
 UNITS_PER_POSTING = 18
@@ -57,6 +60,21 @@ def _rows(con, sql: str, params=None) -> list:
     return con.execute(sql, params or []).fetchall()
 
 
+def non_us_primary(location_primary: Optional[str]) -> bool:
+    """True when the ATS's primary-location text names a non-US place and does not also name the US --
+    reuses the rule engine's own term lists (`P.NON_US_TERMS`, `rules._US_TEXT`) rather than copying them,
+    so this stays in sync with `rules.non_us_rule`. Queue filter only: it never touches a screen verdict.
+    "Remote - US & Canada" -> False (a US segment is present); "Spain - Remote" -> True;
+    None / "" / "Remote" -> False (no place named at all)."""
+    segments = [seg.strip() for seg in re.split(r"[;|]", str(location_primary or "")) if seg.strip()]
+    if not segments:
+        return False
+    if any(S.states_in(seg) or _US_TEXT.search(seg) for seg in segments):
+        return False
+    named = [find_terms(P.NON_US_TERMS, seg) for seg in segments]
+    return bool(segments) and all(named)
+
+
 def exported_ids(dirs) -> set:
     """Every posting already queued in another batch directory (judged rows and their duplicates), so a second
     export never pays to grade the same posting twice."""
@@ -71,7 +89,7 @@ def exported_ids(dirs) -> set:
 
 def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_reject_random: int = 50,
           seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None,
-          platform: Optional[str] = None, relabel: Optional[int] = None) -> dict:
+          platform: Optional[str] = None, relabel: Optional[int] = None, log=print) -> dict:
     """The three source pools: the confusable band, the tail, and a deliberate reject sample.
     `exclude` drops postings already queued elsewhere; `only` keeps just the named pools.
     `relabel` re-grades postings that ALREADY carry a label, for when the rubric changed rather than the JD:
@@ -147,6 +165,18 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
             WHERE p.status = 'active' AND p.platform = ? AND p.description_text IS NOT NULL
             ORDER BY coalesce(s.final_score, 0) DESC, p.posting_id""", [platform])]}
 
+    # A non-US primary location skips the exported queue -- the posting stays in the DB, unjudged, so a later
+    # sweep (or a fixed location field) can still surface it; this never touches a screen verdict or rules.py.
+    all_ids = sorted({pid for ids in result.values() for pid in ids})
+    if all_ids:
+        ids_json = json.dumps(all_ids)
+        loc_rows = _rows(con, """SELECT posting_id, location_primary FROM postings
+            WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json])
+        skip = {pid for pid, loc in loc_rows if non_us_primary(loc)}
+        if skip:
+            result = {k: [p for p in v if p not in skip] for k, v in result.items()}
+            log(f"judge pools: skipped {len(skip)} posting(s) with a non-US primary location")
+
     if exclude:
         result = {k: [p for p in v if p not in exclude] for k, v in result.items()}
     if only:
@@ -188,18 +218,19 @@ def interleave(pool: dict, limit: Optional[int] = None) -> list:
 
 
 def duplicate_map(con, ids: list) -> dict:
-    """posting_id -> the id whose label it copies: the same employer with identical JD text, or near-identical
-    text AND a similar title. Employer boilerplate alone makes sibling roles look alike, so text similarity by
-    itself is not enough."""
+    """posting_id -> the id whose label it copies: the same employer with either identical JD text, or the
+    same normalized title, AND near-identical text. Employer boilerplate alone makes sibling roles look
+    alike, so text similarity by itself is never enough -- one of the two pairing conditions must also hold."""
     import numpy as np
     from .embed import stack
     if not ids:
         return {}
     ids_json = json.dumps(sorted(set(ids)))
-    titles = dict(_rows(con, """SELECT posting_id, coalesce(title, '') FROM postings
-        WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]))
-    meta = dict(_rows(con, """SELECT posting_id, employer || '|' || coalesce(description_hash, '') FROM postings
-        WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]))
+    meta = {}
+    for pid, employer, dhash, title in _rows(con, """
+            SELECT posting_id, employer, coalesce(description_hash, ''), coalesce(title, '') FROM postings
+            WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]):
+        meta[pid] = (employer, dhash, _title_key(title))
     cur = con.execute("""SELECT posting_id, weight, spec, vector FROM requirement_units
         WHERE klass = 'work' AND posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
         ORDER BY posting_id, ord""", [ids_json]).fetchnumpy()
@@ -224,7 +255,7 @@ def duplicate_map(con, ids: list) -> dict:
     rank = {pid: i for i, pid in enumerate(ids)}          # queue order: the earlier row is the representative
     by_employer = {}
     for i, pid in enumerate(doc_ids):
-        by_employer.setdefault(meta.get(pid, "?").split("|")[0], []).append(i)
+        by_employer.setdefault(meta.get(pid, ("?", "", ""))[0], []).append(i)
     dup = {}
     for rows in by_employer.values():
         rows.sort(key=lambda i: rank.get(doc_ids[i], 10**9))
@@ -234,11 +265,39 @@ def duplicate_map(con, ids: list) -> dict:
             sims = M[rows[a_i + 1:]] @ M[i] if rows[a_i + 1:] else []
             for j, sim in zip(rows[a_i + 1:], sims):
                 # Text similarity alone is not evidence of a repost: an employer's boilerplate makes unrelated
-                # roles look alike (0.97 collapsed Analytics Engineer with BI Manager; even 0.995 plus a loose
-                # title match collapsed Enterprise Transformation with Software Engineer). Identical text only.
-                if doc_ids[j] not in dup and meta.get(doc_ids[i]) == meta.get(doc_ids[j]) and sim >= DUP_COSINE:
+                # roles look alike (0.97 collapsed Analytics Engineer with BI Manager; a raw, un-normalized
+                # title match at 0.995 collapsed Enterprise Transformation with Software Engineer). The fix
+                # is not "text only" -- the same posting re-listed per country ("Role | Spain | Remote" vs
+                # "Role | India | Remote") never has identical description_hash, so that alone missed real
+                # reposts. Pairing now needs the same employer AND (identical description_hash OR the same
+                # NORMALIZED title -- location/workplace suffix stripped, level and seniority words left
+                # alone) -- the cosine gate still has to pass either way.
+                mi, mj = meta.get(doc_ids[i]), meta.get(doc_ids[j])
+                if doc_ids[j] in dup or mi is None or mj is None or sim < DUP_COSINE:
+                    continue
+                same_text = mi[1] == mj[1]
+                same_title = bool(mi[2]) and mi[2] == mj[2]
+                if same_text or same_title:
                     dup[doc_ids[j]] = doc_ids[i]
     return dup
+
+
+_TITLE_PAREN_SUFFIX_RE = re.compile(r"\s*\((?:remote|hybrid|onsite|on-site)(?:\s*-\s*[^)]*)?\)\s*$", re.I)
+_TITLE_DASH_WORKPLACE_RE = re.compile(r"\s*-\s*(?:remote|hybrid|onsite|on-site)\s*$", re.I)
+
+
+def _title_key(title: Optional[str]) -> str:
+    """Normalized title for duplicate pairing: lower-cased, whitespace-collapsed, with a trailing
+    location/workplace suffix stripped -- "Role | Spain | Remote" -> "role", "Role (Remote - US)" -> "role",
+    "Role - Remote" -> "role" -- so the same role posted per-country doesn't read as a different title.
+    Nothing else is touched: "Analyst II" stays distinct from "Analyst III", "Senior Role" from "Role", and
+    "Role - Team Name" from "Role" (the word after the dash is not a workplace word)."""
+    t = re.sub(r"\s+", " ", (title or "").strip().lower())
+    if "|" in t:
+        t = t.split("|", 1)[0].strip()
+    t = _TITLE_PAREN_SUFFIX_RE.sub("", t)
+    t = _TITLE_DASH_WORKPLACE_RE.sub("", t)
+    return t.strip()
 
 
 def fetch_postings(con, ids: list, tiers: dict) -> list:

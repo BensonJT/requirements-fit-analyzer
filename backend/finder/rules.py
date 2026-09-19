@@ -341,6 +341,10 @@ def level_rule(title: str, text: str, annual_top: Optional[float] = None) -> Rul
     most = max(years) if years else None
     senior_title = find_terms(P.SENIOR_LEVEL_TITLE_TERMS, title)
     early = find_terms(P.EARLY_CAREER_TITLE_TERMS, title)
+    if not early:
+        year_hit = _EARLY_CAREER_YEAR_RE.search(title or "")
+        if year_hit:
+            early = [year_hit.group(0).lower()]
     pay_floor = annual_top is not None and bool(P.COMP_FLOOR) and annual_top >= P.COMP_FLOOR
     pay_ask = annual_top is not None and bool(P.COMP_ASK) and annual_top >= P.COMP_ASK
     level = None if most is None else ("senior" if most >= P.LEVEL_YEARS_SENIOR
@@ -377,6 +381,10 @@ _MGR_SENTENCE_RE = re.compile(
 # "Chief of Staff" is a director-band deputy seat (a stretch term), not a C-suite title: strip it before the
 # "chief" term is looked up so it never reads out_of_reach.
 _CHIEF_OF_STAFF_RE = re.compile(r"chief\s+of\s+staff", re.I)
+# EARLY_CAREER_TITLE_TERMS is a literal-word list (see find_terms/_terms_re) and can't express "any year" --
+# a seasonal-intern title names the specific summer ("Summer 2027"), so that one case is a regex here instead.
+# "Summer" alone (a concert series, a sale) must not match; the four-digit year is what makes it early-career.
+_EARLY_CAREER_YEAR_RE = re.compile(r"\bsummer\s+20\d{2}\b", re.I)
 
 
 def _managerial_years(block: str) -> Optional[int]:

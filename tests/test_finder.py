@@ -178,6 +178,18 @@ def test_sales_ops_rule_reason_in_required_flag_elsewhere():
     assert rules.sales_ops_rule("", "Required Qualifications\n- Build data pipelines\n") == ([], [], {})
 
 
+def test_sales_ops_rule_one_passing_mention_is_a_flag():
+    tools = "Required Qualifications\n- Familiarity with CRM, ERP, PSA, CPQ and workflow platforms\n"
+    assert rules.sales_ops_rule("Six Sigma Black Belt", tools)[:2] == ([], ["sales/revenue ops vocabulary (CPQ)"])
+    same = "Required Qualifications\n- Partner with GTM leaders on go-to-market planning\n"
+    assert rules.sales_ops_rule("Program Manager", same)[0] == []          # one idea spelled two ways
+    two = "Required Qualifications\n- Own CPQ and the revenue operations roadmap\n"
+    assert rules.sales_ops_rule("Program Manager", two)[0] == ["sales/revenue ops scope (CPQ)"]
+    assert rules.sales_ops_rule("Senior Manager, Sales Operations", tools)[0] == ["sales/revenue ops scope (Sales Operations)"]
+    no_heading = "You will work with GTM teams.\nYou know CPQ."
+    assert rules.sales_ops_rule("Analyst", no_heading)[0] == []             # no heading: three distinct terms needed
+
+
 def test_required_block_slices_and_falls_back():
     jd = "Intro text here.\nRequired Qualifications\nA\nB\nPreferred Qualifications\nC\n"
     assert rules.required_block(jd) == "A\nB\n"

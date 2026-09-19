@@ -273,14 +273,25 @@ def hours_cap_rule(title: str, text: str, employment_type: Optional[str] = None)
 
 
 def sales_ops_rule(title: str, text: str) -> RuleResult:
-    """Sales / revenue operations scope: a reason in the Required block, a flag anywhere else."""
+    """Sales / revenue operations scope. A reason only when the ROLE is sales ops: the title says so, the
+    Required block carries a strong term (a quota) or two distinct terms, or a JD with no Required heading
+    carries three. One passing mention ("partner with Finance and GTM", "familiarity with CRM, ERP, CPQ")
+    is a flag: blind grading on 2026-09-19 found a process-excellence role rejected on a tool list."""
     if not text:
         return [], [], {}
     rx = re.compile(P.SALES_OPS_PATTERN)
+    same = getattr(P, "SALES_OPS_SYNONYMS", {})
+    strong = set(getattr(P, "SALES_OPS_STRONG_TERMS", []))
+    tm = rx.search(title or "") or re.search(getattr(P, "SALES_OPS_TITLE_PATTERN", r"(?!x)x"), title or "")
+    if tm:
+        return [f"sales/revenue ops scope ({tm.group(0)})"], [], {}
     block = find_required_block(text)
-    m = rx.search(text if block is None else block)
-    if m:  # no Required heading: the whole JD stands in for the block
-        return [f"sales/revenue ops scope ({m.group(0)})"], [], {}
+    hits = [m.group(0) for m in rx.finditer(text if block is None else block)]
+    terms = {same.get(h.lower(), h.lower()) for h in hits}
+    need = 3 if block is None else 2   # no Required heading: the whole JD stands in, so ask for more
+    if terms & strong or len(terms) >= need:
+        first = next((h for h in hits if h.lower() in strong), hits[0])
+        return [f"sales/revenue ops scope ({first})"], [], {}
     m = rx.search(text)
     return ([], [f"sales/revenue ops vocabulary ({m.group(0)})"], {}) if m else ([], [], {})
 

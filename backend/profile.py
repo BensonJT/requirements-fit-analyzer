@@ -218,6 +218,12 @@ ASSESSMENT_GATE_TERMS = ["ccat", "cognitive aptitude", "criteria corp", "aptitud
 # sales sense, so data pipelines and talent pipelines do not trip it.
 SALES_OPS_PATTERN = (r"(?i:\b(?:gtm|go-to-market|quota|cpq|sales enablement|revenue operations|chief revenue officer"
                      r"|(?:sales|revenue|deal|opportunity) pipeline|pipeline (?:management|generation|coverage))\b)|\bCRO\b")
+# One of these in the Required block is enough on its own; any other single term is only a flag.
+SALES_OPS_STRONG_TERMS = ["quota"]
+# Spellings of one idea count once toward the two-distinct-terms test.
+SALES_OPS_SYNONYMS = {"gtm": "go-to-market"}
+# Titles that are sales / revenue operations even when SALES_OPS_PATTERN does not match them.
+SALES_OPS_TITLE_PATTERN = r"(?i)\b(?:sales (?:operations|ops|strategy|compensation|incentive)|revenue (?:operations|ops|strategy)|deal desk)\b"
 LARGE_TEAM_MARKERS = ["performance reviews", "headcount growth", "build the org", "scale the team", "build and scale",
                       "hiring plan", "build the practice", "grow the team"]
 BOILERPLATE_PATTERNS = [r"equal opportunity employer.*", r"eeo statement.*", r"benefits?:.*", r"about (us|the company).*",

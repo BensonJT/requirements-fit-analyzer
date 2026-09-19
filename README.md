@@ -31,7 +31,7 @@ flowchart LR
 2. **Upsert.** Every posting has a stable ID made from employer, platform, and the ATS's own req ID. A posting already in the database is updated in place. A new one is inserted with `first_seen_at` set. A board's writes go through a staging table in a single transaction.
 3. **Close.** Any active posting that didn't appear in this pull is marked `status = 'closed'` with a `closed_at` timestamp. This only happens when the board was pulled cleanly and completely. A failed or truncated pull closes nothing. A closed posting that reappears is reopened.
 4. **New-posting details.** Some platforms' list endpoints return only a title and a location. For those, every posting that is new this run gets its detail page fetched automatically: full description, every location, exact dates, and pay when the text states it. A safety cap (`--new-detail-cap`, default 5,000) matters only on a board's first-ever sweep, when every posting counts as new. The overflow goes to the backlog.
-5. **Backlog details.** A small budget (`--detail-budget`, default 300) works through older postings still missing a description, newest first. It is prioritized by a title regex in `backend/ats/prefilter.py`. That regex decides what gets fetched *first*, never what gets stored.
+5. **Backlog details.** A budget (`--detail-budget`, default 2,000) works through older postings still missing a description, newest first. It is prioritized by a title regex in `backend/ats/prefilter.py`. That regex decides what gets fetched *first*, never what gets stored.
 
 A detail request that returns 404 closes the posting, so the detail stage doubles as a liveness check.
 

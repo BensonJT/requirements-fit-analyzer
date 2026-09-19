@@ -15,5 +15,6 @@ DETAIL_TITLE_PATTERN = (
     r"data (engineer|analy|scien)|analytics|business intelligence|insights|reporting|"
     r"service delivery|service management|quality (manager|lead|director|assurance)|"
     r"strategy|planning|governance|workforce|productivity|efficiency|automation|"
+    r"\bai\b|agentic|adoption|enablement|\basset|lifecycle|life cycle|capacity|improvement|knowledge management|"
     r"director|principal|senior manager|sr\.? manager"
 )

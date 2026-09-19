@@ -496,7 +496,10 @@ _RESIDENCE_CONDITIONAL_RE = re.compile(
 _RESIDENCE_PREFERENCE_RE = re.compile(
     r"preference\s+(?:will\s+be|is)\s+given|\bpreferred\b|\bideally\b|\ba\s+plus\b", re.I)
 _RESIDENCE_REGISTERED_ENTITY_RE = re.compile(
-    r"state\s+where\b.{0,80}?\b(?:has|is)\b.{0,30}?\b(?:registered|legal)\s+entity\b", re.I)
+    r"state\s+where\b.{0,80}?\b(?:has|is)\b.{0,30}?\b(?:registered|legal)\s+entity\b"
+    # the sentence splitter cuts "...a state where Acme, Inc. has a registered entity" at "Inc.", so the
+    # opening alone has to be enough: an employer-defined set of states names no place to check
+    r"|\b(?:live|reside|be\s+located|be\s+based)\s+in\s+a\s+(?:state|location)\s+where\b", re.I)
 _RESIDENCE_EXCLUSION_RES = (_RESIDENCE_PAY_TRANSPARENCY_RE, _RESIDENCE_CANNOT_HIRE_RE, _RESIDENCE_OPTION_RE,
                             _RESIDENCE_TIMEZONE_PREFERRED_RE, _RESIDENCE_CONDITIONAL_RE, _RESIDENCE_PREFERENCE_RE,
                             _RESIDENCE_REGISTERED_ENTITY_RE, *_REMOTE_BOILERPLATE_RES)
@@ -655,8 +658,8 @@ def residence_restriction(text: str) -> tuple:
         places = [c for c in candidates if _validate_place(c)]
         if places:
             return "places", places, line[:200]
-        if saw_country and not candidates:
-            return "none", [], None   # a bare country mention names no place at all
+        if saw_country:
+            return "none", [], None   # a country and no validated place: "must reside in the United States, and ..."
         return "unclear", [], line[:200]
     return "none", [], None
 

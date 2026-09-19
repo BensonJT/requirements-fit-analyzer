@@ -193,7 +193,10 @@ UNPENALIZED_FLAG_PATTERNS = [r"^\$[\d,.]+K ask sits above", r"^local/hybrid", r"
                              # "will/may be considered", a genuine possible-remote fact worth surfacing, not a
                              # defect to price -- pricing it would double-count against LOCATION_POINTS, which
                              # already scored the row as remote.
-                             r"^remote is conditional"]
+                             r"^remote is conditional",
+                             # a residence sentence the rule could not resolve to named places: something to
+                             # verify, not a defect -- the row was already scored as remote
+                             r"^remote-residence-check"]
 FIT_REJECT = 0.35          # content gate: a scored JD below this is rejected, whatever the title says
 FIT_REVIEW = 0.50          # a scored JD below this is flagged for review
 NO_CONTENT_CAP = 60        # no JD or no model: the profile alone cannot make a posting strong

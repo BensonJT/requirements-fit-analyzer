@@ -26,7 +26,12 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 17  # v17 (2026-09-19): model_runs table -- the `finder.py retrain` ledger (sprint plan §24).
+SCHEMA_VERSION = 18  # v18 (2026-09-19): judge2_reviews / judge2_evals tables -- the LLM "second judge" on the
+                     #                  Required block (sprint plan §25). Additive only (CREATE TABLE IF NOT
+                     #                  EXISTS below is enough, same as v17); NOTHING in this section may be
+                     #                  run against a live API without the user's explicit go -- the schema
+                     #                  and rank wiring may ship ahead of that, the calls themselves may not.
+                     # v17 (2026-09-19): model_runs table -- the `finder.py retrain` ledger (sprint plan §24).
                      #                  Additive only (new table, CREATE IF NOT EXISTS below is enough, no
                      #                  migration function needed, same as the v2 -> v3 note below);
                      # v16 (2026-09-19): report_feedback.required_fit / required_unmet -- `finder.py mark`'s
@@ -226,6 +231,47 @@ CREATE TABLE IF NOT EXISTS model_runs (
     run_id VARCHAR PRIMARY KEY, model VARCHAR NOT NULL, trained_at TIMESTAMP NOT NULL,
     n_pos INTEGER, n_neg INTEGER, auc DOUBLE, shuffle_auc DOUBLE,
     promoted BOOLEAN NOT NULL, reason VARCHAR, model_version VARCHAR
+);
+
+-- The LLM "second judge" (backend/finder/judge2.py, sprint plan §25): one narrow, strict call on the
+-- Required block only, independent of the first judge (never sees its output). Keyed like `required_embed`
+-- (posting_id, description_hash, ...) so a changed JD makes the old review stale rather than silently stale-
+-- correct; `prompt_version` also keys the PK because a rubric/background edit must not collide with an older
+-- review of the SAME text under the OLD prompt. NEVER written to `screens` -- see required_embed's table
+-- comment for why. `unmet` holds only quotes that survived the verbatim-substring hallucination guard;
+-- `unmet_discarded` counts the ones that did not. `downgraded` = a `fails` call with zero surviving quotes,
+-- downgraded to `partial` (§25's hallucination guard). `raw_response` is kept for audit even on a downgrade.
+CREATE TABLE IF NOT EXISTS judge2_reviews (
+    posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
+    provider          VARCHAR NOT NULL,          -- 'gemini'
+    model             VARCHAR NOT NULL,          -- the model that actually answered (fallback-aware)
+    required_fit      VARCHAR NOT NULL,          -- meets | partial | fails (only two human values exist --
+                                                  -- meets | fails -- but the second judge, like the first, is
+                                                  -- allowed the middle ground)
+    unmet             JSON,                      -- verbatim-quoted unmet lines that survived validation
+    unmet_discarded   INTEGER NOT NULL DEFAULT 0, -- non-verbatim quotes the model returned, discarded
+    downgraded        BOOLEAN NOT NULL DEFAULT FALSE,
+    held_clearance    BOOLEAN,
+    years_gap         JSON,                      -- {"function": str, "years": number} or NULL
+    confidence        VARCHAR,                   -- low | medium | high
+    raw_response      VARCHAR,
+    prompt_chars      INTEGER,
+    reviewed_at       TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, prompt_version)
+);
+
+-- One row per `judge2.evaluate()` run against `vw_report_feedback_blind` (sprint plan §25's acceptance bar).
+-- Does NOT fit `model_runs`: that ledger's auc/shuffle_auc columns are AUC-shaped and this bar is a pair of
+-- catch/agreement RATES over small hand-counted sets, not an AUC -- forcing them into `model_runs` would
+-- either lose the rates or overload columns that mean something specific elsewhere. `passed` is what the rank
+-- (vw_lens_fit) actually reads, via `vw_judge2_eval_latest` (newest eval per prompt_version).
+CREATE TABLE IF NOT EXISTS judge2_evals (
+    run_id                  VARCHAR PRIMARY KEY, prompt_version VARCHAR NOT NULL, evaluated_at TIMESTAMP NOT NULL,
+    n_catch                 INTEGER, n_catch_hits INTEGER, catch_rate DOUBLE,               -- fails-or-partial
+    n_catch_strict_hits     INTEGER, catch_rate_strict DOUBLE,                              -- fails-only, informational
+    n_all_fails             INTEGER, n_all_fails_hits INTEGER, catch_rate_all_fails DOUBLE, -- informational (§25 correction 2)
+    n_agree                 INTEGER, n_agree_hits INTEGER, agree_rate DOUBLE,               -- meets-only agreement
+    passed                  BOOLEAN NOT NULL, reason VARCHAR
 );
 
 -- Jobs_Found files already read back for decisions (re-read only when mtime changes).
@@ -480,6 +526,29 @@ CREATE OR REPLACE VIEW vw_required_embed_latest AS
       ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
     QUALIFY row_number() OVER (PARTITION BY r.posting_id ORDER BY r.model_version DESC, r.scored_at DESC) = 1;
 
+-- Newest second-judge review (backend/finder/judge2.py) for the posting's CURRENT description_hash -- same
+-- two-part "latest" as vw_required_embed_latest. Absent for a posting never reviewed, or reviewed only under
+-- a hash the JD has since moved past (a changed JD makes the old review stale and invisible, per sprint plan
+-- §25's schema note).
+CREATE OR REPLACE VIEW vw_judge2_latest AS
+    SELECT r.* FROM judge2_reviews r JOIN postings p
+      ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
+    QUALIFY row_number() OVER (PARTITION BY r.posting_id ORDER BY r.reviewed_at DESC) = 1;
+
+-- Newest evaluation per prompt_version -- what the rank actually reads to decide whether a prompt_version's
+-- second-judge calls are trusted to move anything (sprint plan §25's acceptance bar).
+CREATE OR REPLACE VIEW vw_judge2_eval_latest AS
+    SELECT * FROM judge2_evals QUALIFY row_number() OVER (PARTITION BY prompt_version ORDER BY evaluated_at DESC) = 1;
+
+-- Same "a grade wins over a prediction" pattern as required_value, for the second judge's own three-way call.
+-- Deliberately NOT folded into required_value's own CASE -- required_value's ELSE branch is "no judge call at
+-- all, fall back to a model probability", which has no meaning for the second judge (it never has a bare
+-- probability, only meets/partial/fails or nothing). A NULL input (no review, or a review whose prompt_version
+-- never passed the bar) returns NULL here on purpose, so a caller must explicitly coalesce it into whatever it
+-- is standing in for, rather than this macro silently inventing a 0.5.
+CREATE OR REPLACE MACRO judge2_value(required_fit) AS
+    CASE required_fit WHEN 'meets' THEN 1.0 WHEN 'partial' THEN 0.5 WHEN 'fails' THEN 0.0 ELSE NULL END;
+
 -- The user's own adjudication always wins over a judge grade for the same posting, whenever it was written;
 -- otherwise the newest grade for the posting's current text.
 CREATE OR REPLACE VIEW vw_llm_labels_latest AS
@@ -674,16 +743,42 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                -- The "second layer" (backend/finder/required_embed.py): NOT a lens, never read here except
                -- through the coalesce(embed_required, fit_required) calls below, which only ever stand in for
                -- fit_required -- the judge's own required_fit call still wins over both.
-               re.embed_required, re.worst_line AS embed_worst_line, re.worst_line_p AS embed_worst_line_p
+               re.embed_required, re.worst_line AS embed_worst_line, re.worst_line_p AS embed_worst_line_p,
+               -- The second judge (backend/finder/judge2.py, sprint plan §25): its own call, never read for
+               -- rank purposes except through `effective_required_*` below (computed in `placed`), and only
+               -- when `judge2_bar_passed` -- the latest STORED evaluation for j2.prompt_version passed the bar.
+               j2.required_fit AS judge2_required, j2.unmet AS judge2_unmet, j2.held_clearance AS judge2_held_clearance,
+               j2.prompt_version AS judge2_prompt_version,
+               je.passed AS judge2_bar_passed
         FROM postings p
         JOIN vw_screen_latest s USING (posting_id)
         LEFT JOIN vw_llm_labels_latest g USING (posting_id)
         LEFT JOIN vw_decisions d USING (posting_id)
         LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
         LEFT JOIN vw_required_embed_latest re USING (posting_id)
+        LEFT JOIN vw_judge2_latest j2 USING (posting_id)
+        LEFT JOIN vw_judge2_eval_latest je ON je.prompt_version = j2.prompt_version
         WHERE p.status = 'active'
     ), placed AS (
         SELECT *,
+               -- ONE source of truth for the Required question, in authority order human > second judge
+               -- (only when its prompt_version's stored evaluation passed the bar) > first judge > models.
+               -- `required_fit` here already IS "human, else the judge's own call" (vw_llm_labels_latest's own
+               -- precedence -- see store.py's comment on that view), so "human" is exactly the rows where
+               -- `scorer = 'user-adjudicated'`; every other non-NULL `required_fit` is the FIRST judge's own,
+               -- independent call. A second judge only ever gets a say when there is no human call, which is
+               -- also why it is safe to test purely on `scorer` here rather than re-deriving "is this human".
+               scorer = 'user-adjudicated' AND required_fit IS NOT NULL AS is_human_required,
+               coalesce(judge2_bar_passed, FALSE) AND judge2_required IS NOT NULL
+                    AND NOT (scorer = 'user-adjudicated' AND required_fit IS NOT NULL) AS judge2_moves_rank,
+               CASE WHEN scorer = 'user-adjudicated' AND required_fit IS NOT NULL THEN required_value(required_fit, NULL)
+                    WHEN coalesce(judge2_bar_passed, FALSE) AND judge2_required IS NOT NULL THEN judge2_value(judge2_required)
+                    ELSE required_value(required_fit, coalesce(embed_required, fit_required)) END AS effective_required_value,
+               CASE WHEN scorer = 'user-adjudicated' AND required_fit IS NOT NULL THEN 'human'
+                    WHEN coalesce(judge2_bar_passed, FALSE) AND judge2_required IS NOT NULL THEN 'judge2'
+                    WHEN required_fit IS NOT NULL THEN 'judge'
+                    ELSE 'model' END AS effective_required_source,
+               judge2_unmet ->> 0 AS judge2_unmet_first,
                -- Per lens: a grade wins over a prediction, and a row graded before the lenses existed falls
                -- back to the model for that lens rather than dropping out of the lists entirely.
                CASE WHEN grade_process IS NOT NULL THEN grade_process IN ('bullseye', 'adjacent')
@@ -728,7 +823,13 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- the best lens is not strong, the judge says he fails the Required block, or the screen rejected
            -- it (that is where "not remote and outside the commute area" and the pay floor live). The lens
            -- models share vocabulary, so the sum partly double-counts; it ranks, it does not measure.
-           CASE WHEN verdict = 'reject' OR coalesce(required_fit, '') = 'fails'
+           -- The zero gate reads `effective_required_value` (human > second judge above the bar > first judge >
+           -- models), not the bare judge call, so a second judge that has cleared its evaluation bar can zero
+           -- this out even where the FIRST judge said `meets` -- the entire point of §25 (the first judge is
+           -- lenient). `= 0.0` is exactly equivalent to the old `required_fit = 'fails'` test in every case that
+           -- reaches a categorical call (required_value maps 'fails' to exactly 0.0), so a row with no second
+           -- judge and no bar passed behaves identically to before.
+           CASE WHEN verdict = 'reject' OR effective_required_value = 0.0
                      OR greatest(lens_value(grade_process, fit_process), lens_value(grade_technical, fit_technical),
                                  lens_value(grade_ai, fit_ai)) < lens_strong_p() THEN 0.0
                 ELSE lens_value(grade_process, fit_process) + lens_value(grade_technical, fit_technical)
@@ -736,9 +837,11 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- The soft version of "multiply by zero if I don't meet the requirements": a judged row gets the
            -- hard 0 / 0.5 / 1 the judge assigned (required_value), an unjudged row gets the second-layer stack's
            -- probability where it exists, else the first-layer (TF-IDF) probability -- coalesce(embed_required,
-           -- fit_required). Neither is a lens and neither ever touches lens_breadth itself -- only this
-           -- product, which exists for ranking (the judge queue, ad hoc reads), never for content_fit.
-           lens_breadth * required_value(required_fit, coalesce(embed_required, fit_required)) AS breadth_x_required,
+           -- fit_required); a row where the second judge outranks both (bar passed, no human call) gets ITS
+           -- 0/0.5/1 instead, via effective_required_value. Neither is a lens and neither ever touches
+           -- lens_breadth itself -- only this product, which exists for ranking (the judge queue, ad hoc
+           -- reads), never for content_fit.
+           lens_breadth * effective_required_value AS breadth_x_required,
            -- The `bullseye` model's stand-in for lens_best, used ONLY inside rank_score's 0.8x term, and ONLY
            -- when nobody has judged this lane at all (all three lens grades NULL) and the lane is already
            -- strong (lens_best >= lens_strong_p()) and the model has an opinion (fit_bullseye IS NOT NULL). A
@@ -762,7 +865,7 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- (three bullseyes > bullseye + adjacent > one bullseye), then breadth among adjacent-only rows (three > two > one). PROVISIONAL v1 weights, chosen to reproduce the user's stated
            -- ordering; to be re-fit to his gold grades and build / pass decisions once there are enough.
            round(100.0 * (0.8 * rank_lens_best + 0.2 * greatest(0.0, lens_breadth - lens_best) / 2.0)
-                 * required_value(required_fit, coalesce(embed_required, fit_required)) * level_value(level_fit)
+                 * effective_required_value * level_value(level_fit)
                  * CASE WHEN verdict = 'reject' OR lens_best < lens_strong_p() THEN 0.0 ELSE 1.0 END, 1) AS rank_score,
            -- WHY it sits there, in words: the deciding facts, not the numbers again.
            concat_ws('; ',
@@ -770,16 +873,24 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                coalesce(nullif(concat_ws(' + ', lens_phrase('process', grade_process, fit_process),
                                                 lens_phrase('technical', grade_technical, fit_technical),
                                                 lens_phrase('AI', grade_ai, fit_ai)), ''), 'no strong lens'),
-               CASE required_fit
-                    WHEN 'meets' THEN 'Required: meets'
-                    WHEN 'arguable' THEN 'Required arguable: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
-                    WHEN 'fails' THEN 'Required FAILS: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
-                    ELSE CASE WHEN embed_required IS NOT NULL
-                              THEN 'Required ~' || printf('%.2f', embed_required) || ' (embed model, not judged)'
-                                   || CASE WHEN embed_worst_line_p >= 0.5
-                                           THEN '; likeliest gap: ' || left(embed_worst_line, 110) ELSE '' END
-                              ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)'
-                         END END,
+               CASE WHEN effective_required_source = 'judge2' THEN
+                        CASE judge2_required
+                             WHEN 'meets' THEN 'Required: meets (2nd judge)'
+                             WHEN 'partial' THEN 'Required partial (2nd judge): '
+                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''), 'see posting')
+                             WHEN 'fails' THEN 'Required FAILS (2nd judge): '
+                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''), 'see posting')
+                        END
+                    ELSE CASE required_fit
+                        WHEN 'meets' THEN 'Required: meets'
+                        WHEN 'arguable' THEN 'Required arguable: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
+                        WHEN 'fails' THEN 'Required FAILS: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
+                        ELSE CASE WHEN embed_required IS NOT NULL
+                                  THEN 'Required ~' || printf('%.2f', embed_required) || ' (embed model, not judged)'
+                                       || CASE WHEN embed_worst_line_p >= 0.5
+                                               THEN '; likeliest gap: ' || left(embed_worst_line, 110) ELSE '' END
+                                  ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)'
+                             END END END,
                CASE WHEN grade_process IS NULL AND grade_technical IS NULL AND grade_ai IS NULL
                          AND lens_best >= lens_strong_p() AND fit_bullseye >= 0.5
                     THEN 'bullseye ~' || printf('%.2f', fit_bullseye) || ' (model)' END,

@@ -67,7 +67,7 @@ The sweep above fills the database. The finder then works down it in ten steps. 
 | 4 | Screen | A rule engine (title, location or remote, pay floor, held clearance, level), then TF-IDF models: three lenses, `required` and `bullseye`. With a JD, the best lens score decides and a title-only reject is overturned. |
 | 5 | Coverage | Splits each survivor's JD into requirement lines and matches them to your evidence record. |
 | 6 | Second layer | Embeds the Required block of the high scorers and names the requirement line most likely to be unmet. |
-| 7 | LLM second judge | Planned. Must be scored blind against human-graded rows before it may move the rank. |
+| 7 | LLM second judge | Built, not run. Reads the full JD and a public-safe background document and makes a strict, independent Required-block call. Must be scored blind against human-graded rows before it may move the rank -- see below. |
 | 8 | Report | Every score visible, one Rank, one Why. |
 | 9 | Human review | You read the report and decide what to build and what to pass on. |
 | 10 | Feedback write-back | Every decision goes back into the database with a reason, and the models learn from it at the next retrain. |
@@ -104,6 +104,30 @@ record a human `grade_ai` today without either laundering an unasserted overall 
 overwriting an existing `required_fit`/other lens grade on the same posting; see `gold_ingest.ingest_f4`'s
 docstring for what schema change would fix it. `--dry-run` runs detection, normalization and precedence
 resolution against the DB and writes nothing.
+### The LLM second judge (§25) -- built, never called live from here
+
+`backend/finder/judge2.py` sends one narrow, strict prompt per posting: the Required lines (parsed by the
+existing requirement splitter, never re-parsed), the full JD (trimmed to a char cap, Required section
+preferred), and a background document -- by default the public, neutral lens descriptions already committed
+in `rubric.py` (`background="public"`), never anything from the gitignored personal rubric. A user-curated
+fact sheet can be used instead (`background="file"`, path from `JUDGE2_BACKGROUND_FILE`; copy
+`judge2_background.example.md` to the gitignored `judge2_background.local.md` and edit it). No posting_id
+semantics, URL, pay, score or first-judge output is ever sent -- the second judge judges independently.
+
+Every `unmet` line the model returns must be a verbatim substring of the JD text actually sent (checked after
+the same whitespace normalization used for description hashing, nothing looser); a line that fails is
+discarded, and a `fails` call with zero surviving quotes is downgraded to `partial`. `finder.py judge2 run
+--dry-run --show 3` builds and prints full payloads and a summary (postings, characters, estimated tokens,
+provider, model list) and calls nothing -- no API key needed. A real call additionally requires
+`JUDGE2_LIVE_OK=1` in the environment or `--i-have-approval`, on top of a dry run having already been read.
+
+Before it can move anything, `finder.py judge2 eval` scores it against `vw_report_feedback_blind` only (grade-
+first, reveal-second rows): it must catch at least 70% of the blind rows where the first judge said `meets`
+and a human found a disqualifying unmet requirement (a second-judge `fails` or `partial` both count as a
+catch), while agreeing (a second-judge `meets`, nothing softer) with at least 85% of the rows a human graded
+`meets`. Below the bar, or with fewer than 5 judged rows in either set, it ships as a visible "J2" report
+column only -- ONE Rank and ONE Why still come from human > second judge (once it clears the bar) > first
+judge > models, computed once in `vw_lens_fit` and read everywhere the rank is used.
 
 ## Supported platforms
 

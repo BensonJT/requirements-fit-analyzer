@@ -75,6 +75,9 @@ Be strict. Rules:
   must already be held; only the polygraph is obtainable).
 - A line asking for N+ years in a NAMED function, domain or platform that the background does not show is a
   years_gap: record the named function and the number of years.
+- A qualification listed under a Preferred / Desired / Nice-to-have / Bonus heading is NOT required. Never
+  put a preferred line in `unmet`, and never let one lower required_fit. The parsed lists below are a
+  machine's best split of the JD and can be wrong; the full JD text and its own headings are the authority.
 - Every `unmet` entry must be copied CHARACTER-FOR-CHARACTER from the JD text below. Do not paraphrase,
   summarize or combine lines. A quote that is not an exact substring of the JD will be discarded.
 - If the background is SILENT on a requirement (it neither shows nor rules it out), that is `partial`, not
@@ -99,7 +102,8 @@ OUTPUT_CONTRACT = (
 )
 
 # The ONLY fields sent, in this order (a test asserts this list against build_payload's actual keys).
-PAYLOAD_FIELDS = ("instructions", "background", "title", "employer", "jd_text", "required_lines")
+PAYLOAD_FIELDS = ("instructions", "background", "title", "employer", "jd_text", "required_lines",
+                  "preferred_lines")
 
 
 def public_background() -> str:
@@ -155,11 +159,16 @@ def _trim_jd(text: str, cap: int) -> str:
     return f"{head}\n...\n{block}" if head not in block else block
 
 
+def section_lines(jd_text: str, section: str) -> list:
+    """The parsed lines of one JD SECTION ('required' or 'preferred'), text only, in document order (reuses
+    `requirements.split_requirements`, never re-implemented). Reads `section`, NOT `group`: requirements.py's
+    'required' GROUP is Required + Preferred together (the person-facing group), and labelling a Preferred line
+    as Required here is exactly the false `fails` this judge exists to avoid."""
+    return [u.text for u in requirements.split_requirements(jd_text) if u.section == section]
+
+
 def required_lines(jd_text: str) -> list:
-    """The parsed Required lines (reuses `requirements.split_requirements`, never re-implemented): every unit
-    whose group is 'required' (the Required + Preferred sections; `requirements.py` calls this the person-
-    facing group), text only, in document order."""
-    return [u.text for u in requirements.split_requirements(jd_text) if u.group == "required"]
+    return section_lines(jd_text, "required")
 
 
 def build_payload(*, title: str, employer: str, jd_text: str, background: str = "public",
@@ -175,6 +184,7 @@ def build_payload(*, title: str, employer: str, jd_text: str, background: str = 
         "employer": employer or "",
         "jd_text": trimmed,
         "required_lines": required_lines(jd_text or ""),
+        "preferred_lines": section_lines(jd_text or "", "preferred"),
     }
 
 
@@ -182,11 +192,14 @@ def render_prompt(payload: dict) -> str:
     """The payload as one prompt string. Gemma models do not accept a separate system instruction, so
     everything -- instructions, background, posting facts, JD, parsed Required lines -- goes in one user turn."""
     lines_block = "\n".join(f"- {l}" for l in payload["required_lines"]) or "(none parsed)"
+    preferred_block = "\n".join(f"- {l}" for l in payload["preferred_lines"]) or "(none parsed)"
     return (
         f"{payload['instructions']}\n\n"
         f"=== BACKGROUND ===\n{payload['background']}\n\n"
         f"=== POSTING ===\nTitle: {payload['title']}\nEmployer: {payload['employer']}\n\n"
         f"=== PARSED REQUIRED LINES ===\n{lines_block}\n\n"
+        f"=== PARSED PREFERRED LINES (NOT required; an unmet line here is never a reason for `fails`) ===\n"
+        f"{preferred_block}\n\n"
         f"=== FULL JD TEXT (trimmed) ===\n{payload['jd_text']}\n"
     )
 
@@ -373,7 +386,7 @@ def _already_reviewed(con, pid: str, description_hash: str, pv: str) -> bool:
         [pid, description_hash, pv]).fetchone() is not None
 
 
-def _insert_review(con, *, pid, description_hash, pv, model, review: ValidatedReview) -> None:
+def _insert_review(con, *, pid, description_hash, pv, model, review: ValidatedReview, prompt_chars: int) -> None:
     con.execute("""
         INSERT OR REPLACE INTO judge2_reviews (
             posting_id, description_hash, prompt_version, provider, model, required_fit, unmet,
@@ -383,7 +396,7 @@ def _insert_review(con, *, pid, description_hash, pv, model, review: ValidatedRe
     """, [pid, description_hash, pv, PROVIDER, model, review.required_fit, json.dumps(review.unmet),
           review.unmet_discarded, review.downgraded, review.held_clearance,
           json.dumps(review.years_gap) if review.years_gap is not None else None, review.confidence,
-          review.raw_response, len(review.raw_response), _now()])
+          review.raw_response, prompt_chars, _now()])
 
 
 def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, show: int = 1,
@@ -436,6 +449,8 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
             "after you have run `--dry-run` and reviewed the payload and provider/model list.")
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key or not models:
+        raise RuntimeError("judge2.run refused: GEMINI_API_KEY and GEMINI_API_MODEL must both be set for a live run")
     rpm = rpm or int(os.environ.get("GEMINI_RPM", DEFAULT_RPM) or DEFAULT_RPM)
     if sleep_fn is None:
         import time as _time
@@ -443,8 +458,11 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
     if transport is None:
         transport = default_transport()
     reviewed, unparseable, skipped_no_model = 0, 0, 0
-    for pid, description_hash, title, employer, payload in candidates:
+    pace = (60.0 / rpm) if rpm > 0 else 0.0   # paid on EVERY request (a failed or re-asked one too), never only on success
+    for i, (pid, description_hash, title, employer, payload) in enumerate(candidates):
         prompt_text = render_prompt(payload)
+        if i and pace:
+            sleep_fn(pace)
         model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
         if data is None:
             skipped_no_model += 1
@@ -453,6 +471,8 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         review = parse_response(raw_text, payload["jd_text"], log=log)
         if review is None:
             # at most one re-ask per posting
+            if pace:
+                sleep_fn(pace)
             model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
             raw_text = _gemini_text(data) if data else ""
             review = parse_response(raw_text or "", payload["jd_text"], log=log) if raw_text else None
@@ -460,10 +480,9 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
             unparseable += 1
             log(f"judge2: {pid} gave no usable verdict after one re-ask; recording nothing")
             continue
-        _insert_review(con, pid=pid, description_hash=description_hash, pv=pv, model=model, review=review)
+        _insert_review(con, pid=pid, description_hash=description_hash, pv=pv, model=model, review=review,
+                       prompt_chars=len(prompt_text))
         reviewed += 1
-        if rpm > 0:
-            sleep_fn(60.0 / rpm)
 
     log(f"judge2.run: {reviewed} reviewed, {unparseable} unparseable (skipped), "
        f"{skipped_no_model} skipped (every model failed), prompt_version={pv}")
@@ -475,6 +494,7 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
 CATCH_BAR = 0.70
 AGREE_BAR = 0.85
 MIN_N = 5
+MAX_UNJUDGED_SHARE = 0.10
 
 
 def evaluate(con, *, background: str = "public", background_path: Optional[str] = None,
@@ -512,6 +532,12 @@ def evaluate(con, *, background: str = "public", background_path: Optional[str] 
     """, [pv]).fetchall()
 
     # row = (posting_id, employer, title, human_fit, judge_fit, judge2_fit)
+    # Rates are over rows the second judge has actually JUDGED under this prompt_version. An unjudged row is
+    # neither a catch nor a miss; but a bar passed on a partial run would be a bar passed on whichever rows
+    # happened to come back, so more than MAX_UNJUDGED_SHARE unjudged is "insufficient", never a pass.
+    n_eval_rows = len(rows)
+    rows = [r for r in rows if r[5] is not None]
+    n_unjudged = n_eval_rows - len(rows)
     catch_rows = [r for r in rows if r[4] == "meets" and r[3] == "fails"]
     catch_hits = [r for r in catch_rows if r[5] in ("fails", "partial")]
     catch_hits_strict = [r for r in catch_rows if r[5] == "fails"]
@@ -529,13 +555,15 @@ def evaluate(con, *, background: str = "public", background_path: Optional[str] 
     agree_hits = [r for r in agree_rows if r[5] == "meets"]
     agree_rate = (len(agree_hits) / n_agree) if n_agree else None
 
-    insufficient = n_catch < MIN_N or n_agree < MIN_N
+    too_many_unjudged = n_eval_rows > 0 and n_unjudged / n_eval_rows > MAX_UNJUDGED_SHARE
+    insufficient = n_catch < MIN_N or n_agree < MIN_N or too_many_unjudged
     passed = (not insufficient and catch_rate is not None and catch_rate >= CATCH_BAR
              and agree_rate is not None and agree_rate >= AGREE_BAR)
 
     if insufficient:
-        reason = (f"insufficient blind human Required calls: n_catch={n_catch}, n_agree={n_agree}; "
-                 "import graded blind sheets with required_fit first")
+        reason = (f"insufficient blind human Required calls judged: n_catch={n_catch}, n_agree={n_agree}, "
+                 f"unjudged={n_unjudged} of {n_eval_rows}; import graded blind sheets with required_fit, "
+                 "then `judge2 run --eval-set`, first")
     else:
         reason = (f"catch_rate(fails-or-partial)={catch_rate:.2f} (bar {CATCH_BAR}), "
                  f"agree_rate(meets-only)={agree_rate:.2f} (bar {AGREE_BAR})")
@@ -564,7 +592,7 @@ def evaluate(con, *, background: str = "public", background_path: Optional[str] 
     return {"prompt_version": pv, "n_catch": n_catch, "catch_rate": catch_rate,
            "catch_rate_strict": catch_rate_strict, "n_all_fails": n_all_fails,
            "catch_rate_all_fails": catch_rate_all_fails, "n_agree": n_agree, "agree_rate": agree_rate,
-           "insufficient": insufficient, "passed": passed, "reason": reason}
+           "n_unjudged": n_unjudged, "insufficient": insufficient, "passed": passed, "reason": reason}
 
 
 # ---------------------------------------------------------------- status

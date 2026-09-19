@@ -135,8 +135,30 @@ class _EmbedCache:
 
 # ---------------------------------------------------------------- data assembly
 def _fetch_population(con) -> dict:
-    """Every lens-surfaced-or-not judged posting with a required_fit call, matching the lab's
-    extract.py filter (JD >= 800 chars, scorer != 'user-adjudicated'). Returns posting_id -> row."""
+    """Every lens-surfaced-or-not judged posting with a required_fit call, matching the lab's extract.py
+    filter (JD >= 800 chars). Reads `vw_llm_labels_latest`, so a human required_fit call (`finder.py mark`,
+    sprint plan §22.3 Gap 2) already outranks the judge's own here -- no separate carve-out for
+    scorer='user-adjudicated': that used to be excluded outright, before a human required_fit call quoted its
+    own unmet lines, which the line model below (_line_labels) can now learn from like any other quote.
+
+    The inclusion rule is `l.required_fit IS NOT NULL` alone -- explicit, not incidental: it is the ONLY gate
+    on a scorer='user-adjudicated' row here, and it is what makes admitting them safe. It reaches every
+    PRE-EXISTING golden-CSV adjudicated row (loaded by feedback.load_csv, not only rows `finder.py mark`
+    writes) that carries a required_fit, exactly as it reaches a judge row -- there is no way to tell those
+    two producers apart from this query, nor any need to: both are "a human's own Required-block call, at
+    this description_hash", the only thing this module borrows from llm_labels. It does NOT admit a row on
+    the strength of scorer='user-adjudicated' alone: `record_mark()`'s 'placeholder' rows (required_fit set,
+    but the posting was never actually judged, and no lane info exists) still pass this filter -- correctly,
+    since a human required_fit call on a never-judged posting is real information for THIS model's target
+    (required_fit), whatever it does or doesn't say about the lane (`_is_lens_surfaced` reads grade_process/
+    technical/ai, all NULL on a placeholder row, so it never enters the lens-surfaced block/roll-up training
+    population -- see train() below).
+
+    Every posting_id this returns goes through the SAME employer-fold / _broad_oof machinery as an ordinary
+    judge row (`train()` never branches on scorer or `lens_grade_source`), so the "every judged posting gets
+    a held-out value, never an in-sample one" rule (this module's docstring) covers a human-adjudicated
+    required_fit row exactly like a judge one -- confirmed by reading train()/`_broad_oof`, which key
+    entirely on posting_id/fold_of, not on scorer identity. Returns posting_id -> row."""
     cols = ("posting_id", "employer", "title", "description_text", "grade_process", "grade_technical",
             "grade_ai", "required_fit", "required_unmet")
     p_cols = {"employer", "title", "description_text"}
@@ -144,7 +166,6 @@ def _fetch_population(con) -> dict:
         SELECT {', '.join(('p.' if c in p_cols else 'l.') + c for c in cols)}
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         WHERE l.required_fit IS NOT NULL AND length(p.description_text) >= 800
-          AND l.scorer != 'user-adjudicated'
     """).fetchall()
     return {r[0]: dict(zip(cols, r)) for r in rows}
 
@@ -364,7 +385,7 @@ def train(con, log=print) -> dict:
     from sklearn.linear_model import LogisticRegression
 
     pop = _fetch_population(con)
-    log(f"required_embed.train: {len(pop)} judged rows (JD>=800, scorer != user-adjudicated)")
+    log(f"required_embed.train: {len(pop)} judged rows (JD>=800)")
     lens_pids = [pid for pid, r in pop.items() if _is_lens_surfaced(r)]
     yB = {pid: (1 if (pop[pid]["required_fit"] or "").lower() == "meets" else 0) for pid in lens_pids}
     yA = {pid: (1 if pop[pid]["required_fit"] == "meets" else 0) for pid in lens_pids

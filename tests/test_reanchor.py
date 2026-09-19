@@ -93,17 +93,17 @@ def _make_v10_db(path, now=NOW):
     old_hash = _raw_sha1(TEXT_A)
     con.execute("UPDATE postings SET description_hash = ? WHERE posting_id = ?", [old_hash, pid])
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'claude-sonnet-batch', 'bullseye', 'bullseye', "
-                "'adjacent', NULL, 'process', 'high', NULL, 'good fit', NULL, NULL, 'batch_001', ?)",
+                "'adjacent', NULL, 'process', 'high', NULL, 'good fit', NULL, NULL, NULL, 'batch_001', ?)",
                [pid, old_hash, now])
     con.execute("INSERT INTO report_feedback VALUES (?, ?, NULL, 80, 'strong', 'bullseye', 'adjacent', "
                 "'bullseye', 'in_range', 'build', NULL, NULL, NULL, 'high', 'jd_read', 'user', true, "
-                "NULL, NULL, NULL, NULL, ?, ?)", [pid, old_hash, now, now])
+                "NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)", [pid, old_hash, now, now])
     con.execute("INSERT INTO coverage VALUES (?, ?, 'ev1', 'm1', 'c1', 80.0, 70.0, 3, 2, 1, 3, 2, 1, "
                 "'[]', '[]', '[]', ?)", [pid, old_hash, now])
     # a label already orphaned under the OLD schema -- untouched by the migration (its stored hash never
     # equaled the posting's own old hash, so it is not in scope; the reanchor command handles it separately)
     con.execute("INSERT INTO llm_labels VALUES (?, 'some-other-stale-hash', 'r1', 'claude-sonnet-batch', "
-                "'wrong', 'wrong', 'wrong', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_000', ?)",
+                "'wrong', 'wrong', 'wrong', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_000', ?)",
                [pid, now])
     con.execute("UPDATE schema_info SET version = 10")
     con.close()
@@ -177,9 +177,9 @@ def test_migration_pk_collision_keeps_newest(tmp_path):
     con.execute("UPDATE postings SET description_hash = ? WHERE posting_id = ?", [new_hash, pid])
     old_hash = "collide-hash-old"
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'scorerA', 'wrong', 'wrong', 'wrong', NULL, NULL, "
-                "NULL, NULL, NULL, NULL, NULL, 'b1', ?)", [pid, old_hash, datetime(2026, 9, 1)])
+                "NULL, NULL, NULL, NULL, NULL, NULL, 'b1', ?)", [pid, old_hash, datetime(2026, 9, 1)])
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'scorerA', 'bullseye', 'bullseye', 'adjacent', "
-                "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'b2', ?)", [pid, new_hash, datetime(2026, 9, 10)])
+                "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'b2', ?)", [pid, new_hash, datetime(2026, 9, 10)])
     con.execute("BEGIN")
     con.execute("CREATE OR REPLACE TEMP TABLE hash_map (posting_id VARCHAR, old_hash VARCHAR, new_hash VARCHAR)")
     con.execute("INSERT INTO hash_map VALUES (?, ?, ?)", [pid, old_hash, new_hash])
@@ -225,18 +225,18 @@ def _judge_db_and_batch(tmp_path, *, same_text_for="p_same", changed_text_for="p
     old_same, old_changed, old_rep = "old-hash-same", "old-hash-changed", "old-hash-rep"
     now = NOW
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'claude-sonnet-batch', 'bullseye', 'bullseye', "
-                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_001', ?)",
+                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_001', ?)",
                [p_same, old_same, now])
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'claude-sonnet-batch', 'adjacent', 'adjacent', "
-                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_001', ?)",
+                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_001', ?)",
                [p_changed, old_changed, now])
     con.execute("INSERT INTO llm_labels VALUES (?, ?, 'r1', 'claude-sonnet-batch', 'bullseye', 'bullseye', "
-                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+                "'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
                [p_dup, "old-hash-dup", f"dup:{p_rep}", now])
     # a gold row that must follow p_same's label when it re-anchors
     con.execute("INSERT INTO report_feedback VALUES (?, ?, NULL, 80, 'strong', 'bullseye', 'adjacent', "
                 "'bullseye', 'in_range', 'build', NULL, NULL, NULL, 'high', 'jd_read', 'user', true, "
-                "NULL, NULL, NULL, NULL, ?, ?)", [p_same, old_same, now, now])
+                "NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)", [p_same, old_same, now, now])
 
     batch_dir = tmp_path / "batches"
     batch_dir.mkdir()
@@ -308,7 +308,7 @@ def test_reanchor_no_batch_match_leaves_row_alone(tmp_path):
     con = store.connect(str(tmp_path / "nomatch.duckdb"))
     pid = _seed_posting(con, "PX", TEXT_A)
     con.execute("INSERT INTO llm_labels VALUES (?, 'orphan-hash', 'r1', 'claude-sonnet-batch', 'bullseye', "
-                "'bullseye', 'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_999', ?)",
+                "'bullseye', 'adjacent', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'batch_999', ?)",
                [pid, NOW])
     stats = reanchor.reanchor(con, [], log=_quiet)
     assert stats["examined"] == 1

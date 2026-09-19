@@ -19,8 +19,17 @@ FEEDBACK_CSV_COLUMNS = (
     "snapshot_final_score", "snapshot_band", "snapshot_grade_process", "snapshot_grade_technical",
     "human_grade", "level_fit", "verdict", "reason_code", "reason_detail", "positioning",
     "judge_agreement", "confidence", "basis", "assessor", "assessed_at", "confirmed_by_user",
-    "note", "grade_before_split", "needs_confirm", "split_reason",
+    "note", "grade_before_split", "needs_confirm", "split_reason", "required_fit", "required_unmet",
 )
+
+# Written by finder.py's `mark` CLI (sprint plan §22.3, Gap 2) through record_mark() below, the SAME table and
+# assessor='user' precedence load_csv() uses -- not a parallel mechanism. `finder.py mark`'s own reason codes;
+# 'clearance' is accepted at the CLI and recorded here as 'requirement' (see store.vw_decisions).
+USER_SCORER = "user-adjudicated"
+# Fixed, not rubric.rubric_version(): a human adjudication doesn't change when the judge's prompt text does,
+# and a stable value keeps INSERT OR REPLACE idempotent across repeated marks of the same posting/hash.
+USER_RUBRIC_VERSION = "user-adjudicated"
+DECISION_VERDICT = {"build": "build", "pass": "pass", "hold": "consider"}
 
 # Ordered low -> high; "one step" in the sprint plan means one position here.
 LEVEL_ORDER = ["too_low", "in_range", "stretch_up", "out_of_reach"]
@@ -122,6 +131,8 @@ def load_csv(con, path, log=print) -> dict:
                 _clean(raw.get("grade_before_split")),
                 _bool(raw.get("needs_confirm")),
                 _clean(raw.get("split_reason")),
+                _clean(raw.get("required_fit")),
+                _clean(raw.get("required_unmet")),
                 _ts(raw.get("assessed_at")) or now,
                 now,
             ])
@@ -133,8 +144,8 @@ def load_csv(con, path, log=print) -> dict:
                 snapshot_grade_process, snapshot_grade_technical, human_grade, level_fit, verdict,
                 reason_code, reason_detail, positioning, confidence, basis, assessor,
                 confirmed_by_user, note, grade_before_split, needs_confirm, split_reason,
-                assessed_at, loaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                required_fit, required_unmet, assessed_at, loaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
     counts = {"loaded": loaded, "skipped_no_posting": skipped_no_posting, "matched_by_url": matched_by_url}
     log(f"feedback load: {counts['loaded']} loaded ({counts['matched_by_url']} matched by url), "
@@ -198,6 +209,77 @@ def agreement(con, log=print) -> dict:
             "confusion": {h: dict(c) for h, c in confusion.items()}, "disagreements": disagreements}
 
 
+def record_mark(con, pid, description_hash, decision, reason_code=None, reason_detail=None,
+                 human_grade=None, required_fit=None, required_unmet=None, basis="seen", now=None) -> None:
+    """`finder.py mark`'s write-back (sprint plan §22.3, Gap 2). Writes ONE report_feedback row through the
+    SAME table and assessor='user' precedence load_csv() gives the golden-source CSV -- `--grade` is "a human
+    lane grade through the same path the golden feedback CSV import uses". `basis` ('blind' if the grade was
+    given before any machine score was shown, 'seen' otherwise) rides along on that same row so evaluation
+    code can filter to blind rows without a parallel table.
+
+    When `required_fit` is given (only `finder.py mark` decides that -- never for a logistics/comp pass, see
+    cmd_mark), this ALSO bridges into `llm_labels` as scorer='user-adjudicated'. `vw_llm_labels_latest`
+    already orders a user-adjudicated row ahead of the judge's own (see store.py) -- this is that SAME
+    existing precedence mechanism, not a new one, so it reaches every view and training set that already
+    reads the judge's `required_fit` call (vw_label_set_required, and the line model inside
+    required_embed.py).
+
+    A required_fit claim is NOT a lane claim -- the user said the JD's Required block isn't met, not that the
+    posting is (or isn't) the RIGHT KIND of work. So the bridge row's own grade/grade_process/grade_technical/
+    grade_ai columns are tagged with `lens_grade_source` (2026-09-19 audit fix, sprint plan §22.3 Gap 2 -- the
+    first version of this function carried the judge's own grade forward, or invented one, UNDER a human
+    label, which would have trained the lens/bullseye models as if the user had graded the lane, and let a
+    judge-vs-human comparison count the judge agreeing with itself):
+      - `human_grade` given (the user ALSO passed --grade): the lane grade IS human -- 'human', and, mirroring
+        load_csv()'s golden-source shape (a single overall human_grade, never a per-lens breakdown),
+        grade_process/technical/ai stay NULL rather than borrowing the judge's lens split.
+      - `human_grade` not given, posting already judged: carry the CURRENT latest lens grades forward
+        verbatim -- 'carried'. store.lens_label_source() reads this exactly like an ordinary judge row (same
+        weight, source name 'llm_judge') in every lens/bullseye view, never as 'user_adjudicated'.
+      - `human_grade` not given, posting never judged at all: llm_labels.grade is NOT NULL, so a placeholder
+        value is still required to satisfy the column -- 'placeholder'. Every lens/bullseye view excludes a
+        placeholder row outright via lens_label_source() returning NULL for it."""
+    now = now or _now()
+    con.execute("""
+        INSERT OR REPLACE INTO report_feedback (
+            posting_id, description_hash, report_files, snapshot_final_score, snapshot_band,
+            snapshot_grade_process, snapshot_grade_technical, human_grade, level_fit, verdict,
+            reason_code, reason_detail, positioning, confidence, basis, assessor, confirmed_by_user,
+            note, grade_before_split, needs_confirm, split_reason, required_fit, required_unmet,
+            assessed_at, loaded_at
+        ) VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?, ?, NULL, NULL, ?, 'user', TRUE,
+                  NULL, NULL, NULL, NULL, ?, ?, ?, ?)
+    """, [pid, description_hash, human_grade, DECISION_VERDICT[decision], reason_code, reason_detail, basis,
+          required_fit, required_unmet, now, now])
+
+    if required_fit is None:
+        return
+
+    if human_grade is not None:
+        grade, grade_process, grade_technical, grade_ai = human_grade, None, None, None
+        lens_grade_source = "human"
+    else:
+        prior = con.execute(
+            "SELECT grade, grade_process, grade_technical, grade_ai, scorer, lens_grade_source "
+            "FROM vw_llm_labels_latest WHERE posting_id = ?", [pid]).fetchone()
+        if prior:
+            grade, grade_process, grade_technical, grade_ai, prior_scorer, prior_source = prior
+            # The latest row may itself be an adjudicated one (a golden-CSV grade, or an earlier mark). Its
+            # lane grade keeps the standing it already had: a human grade stays human, a placeholder stays a
+            # placeholder. Only a judge's row becomes 'carried'.
+            lens_grade_source = (prior_source or "human") if prior_scorer == USER_SCORER else "carried"
+        else:
+            grade, grade_process, grade_technical, grade_ai = "adjacent", None, None, None
+            lens_grade_source = "placeholder"
+    con.execute("""
+        INSERT OR REPLACE INTO llm_labels (
+            posting_id, description_hash, rubric_version, scorer, grade, grade_process, grade_technical,
+            grade_ai, required_fit, required_unmet, lens_grade_source, judged_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, [pid, description_hash, USER_RUBRIC_VERSION, USER_SCORER, grade, grade_process, grade_technical,
+          grade_ai, required_fit, required_unmet, lens_grade_source, now])
+
+
 def export(con, out_path, log=print) -> Path:
     """Re-exports EVERY `report_feedback` row (every assessor, latest hash or not -- an `expired` column
     marks the stale ones) with the rule's live `level_fit`, the judge's three lens grades, and `needs_you` so
@@ -209,12 +291,12 @@ def export(con, out_path, log=print) -> Path:
                rf.snapshot_grade_process, rf.snapshot_grade_technical, rf.human_grade, rf.level_fit,
                rf.verdict, rf.reason_code, rf.reason_detail, rf.positioning, rf.confidence, rf.basis,
                rf.assessor, rf.confirmed_by_user, rf.note, rf.grade_before_split, rf.needs_confirm,
-               rf.split_reason, rf.assessed_at,
+               rf.split_reason, rf.required_fit, rf.required_unmet, rf.assessed_at,
                j.grade_process AS judge_grade_process, j.grade_technical AS judge_grade_technical,
                j.grade_ai AS judge_grade_ai, j.grade AS judge_grade
         FROM report_feedback rf
         JOIN postings p USING (posting_id)
-        LEFT JOIN vw_llm_labels_latest j USING (posting_id)
+        LEFT JOIN vw_llm_labels_latest_judge j USING (posting_id)
         ORDER BY rf.posting_id, rf.assessor
     """)
     cols = [d[0] for d in rows.description]

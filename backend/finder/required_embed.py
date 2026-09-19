@@ -135,8 +135,12 @@ class _EmbedCache:
 
 # ---------------------------------------------------------------- data assembly
 def _fetch_population(con) -> dict:
-    """Every lens-surfaced-or-not judged posting with a required_fit call, matching the lab's
-    extract.py filter (JD >= 800 chars, scorer != 'user-adjudicated'). Returns posting_id -> row."""
+    """Every lens-surfaced-or-not judged posting with a required_fit call, matching the lab's extract.py
+    filter (JD >= 800 chars). Reads `vw_llm_labels_latest`, so a human required_fit call (`finder.py mark`,
+    sprint plan §22.3 Gap 2) already outranks the judge's own here -- no separate carve-out for
+    scorer='user-adjudicated': that used to be excluded outright, before a human required_fit call quoted its
+    own unmet lines, which the line model below (_line_labels) can now learn from like any other quote.
+    Returns posting_id -> row."""
     cols = ("posting_id", "employer", "title", "description_text", "grade_process", "grade_technical",
             "grade_ai", "required_fit", "required_unmet")
     p_cols = {"employer", "title", "description_text"}
@@ -144,7 +148,6 @@ def _fetch_population(con) -> dict:
         SELECT {', '.join(('p.' if c in p_cols else 'l.') + c for c in cols)}
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         WHERE l.required_fit IS NOT NULL AND length(p.description_text) >= 800
-          AND l.scorer != 'user-adjudicated'
     """).fetchall()
     return {r[0]: dict(zip(cols, r)) for r in rows}
 
@@ -364,7 +367,7 @@ def train(con, log=print) -> dict:
     from sklearn.linear_model import LogisticRegression
 
     pop = _fetch_population(con)
-    log(f"required_embed.train: {len(pop)} judged rows (JD>=800, scorer != user-adjudicated)")
+    log(f"required_embed.train: {len(pop)} judged rows (JD>=800)")
     lens_pids = [pid for pid, r in pop.items() if _is_lens_surfaced(r)]
     yB = {pid: (1 if (pop[pid]["required_fit"] or "").lower() == "meets" else 0) for pid in lens_pids}
     yA = {pid: (1 if pop[pid]["required_fit"] == "meets" else 0) for pid in lens_pids

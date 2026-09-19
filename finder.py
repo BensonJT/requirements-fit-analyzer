@@ -11,6 +11,10 @@ Usage:
     .venv/bin/python finder.py top --out /tmp/t.md        # END-of-pipeline list: run after judge import
     .venv/bin/python finder.py sync --verbose             # mirror Application_Tracker.md
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
+    .venv/bin/python finder.py mark <target> pass --reason "requirement: active TS/SCI required" \
+        --unmet "Active TS/SCI clearance required" --basis blind
+    .venv/bin/python finder.py mark <target> build --grade bullseye --basis blind
+    .venv/bin/python finder.py mark --from-file decisions.csv   # one row per reviewed posting
     .venv/bin/python finder.py shortlist --days 7 --n 30
     .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
     .venv/bin/python finder.py labels --reanchor [--dry-run]  # recover llm_labels orphaned before the
@@ -28,10 +32,12 @@ Usage:
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
 import argparse
+import csv
 import json
 import os
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.abspath(__file__))
@@ -40,9 +46,14 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(REPO, ".env"))
 from backend.ats import store  # noqa: E402
-from backend.finder import features, labels, pipeline, report, tracker_sync, version  # noqa: E402
+from backend.finder import features, labels, pipeline, report, rubric, tracker_sync, version  # noqa: E402
 
-PASS_REASON_CODES = ("function", "nuance", "logistics", "comp", "other")
+# 'requirement' and 'level' (sprint plan §22.3, Gap 2): a hard Required line not met, or a seat too senior /
+# too junior. 'clearance' is accepted at the CLI as an alias for 'requirement' (see store.vw_decisions) --
+# only 'requirement' and 'level' are real codes; 'clearance' is never stored as the code itself.
+PASS_REASON_CODES = ("function", "nuance", "logistics", "comp", "other", "requirement", "level")
+PASS_REASON_ALIASES = {"clearance": "requirement"}
+MARK_BASIS_VALUES = ("blind", "seen")
 from backend.screen import company_keys, company_matches, norm_company, similar_title  # noqa: E402
 
 
@@ -185,7 +196,83 @@ def cmd_top(con, a):
     print(path)
 
 
+def _mark_reason_code(reason: str):
+    """The leading word of a pass --reason, normalized; 'clearance' reads as 'requirement'
+    (PASS_REASON_ALIASES, store.vw_decisions does the same mapping for rows written directly to the
+    `decisions` table). None if the reason doesn't start with a recognized word."""
+    m = re.match(r"\s*(\w+)", reason or "")
+    if not m:
+        return None
+    word = PASS_REASON_ALIASES.get(m.group(1).lower(), m.group(1).lower())
+    return word if word in PASS_REASON_CODES else None
+
+
+def _validate_unmet_usage(decision: str, reason_code, unmet: list):
+    if unmet and not (decision == "build" or (decision == "pass" and reason_code == "requirement")):
+        raise ValueError('--unmet only makes sense with "build" or a pass --reason starting "requirement" '
+                         '(or "clearance")')
+
+
+def _mark_required_fit(decision: str, reason_code, unmet: list):
+    """The (required_fit, required_unmet) a mark implies, or (None, None) when it makes no Required-block
+    claim (sprint plan §22.3, Gap 2). A `build` defaults to human required_fit = 'meets' "unless told
+    otherwise" -- --unmet on a build IS being told otherwise. A `pass` only ever claims 'fails', and only
+    when its reason is 'requirement' (which 'clearance' aliases to) -- never for logistics/comp/level/
+    function/nuance/other, so those can never become a required_fit negative for any model (Gap 2, rule 4)."""
+    lines = " ; ".join(unmet) if unmet else None
+    if decision == "build":
+        return ("fails", lines) if unmet else ("meets", None)
+    if decision == "pass" and reason_code == "requirement":
+        return "fails", (lines if lines is not None else "")
+    return None, None
+
+
+def _prepare_mark(con, pid: str, decision: str, reason, unmet: list, grade, basis) -> dict:
+    """Validates one mark (single CLI call or one --from-file row) and works out everything it implies,
+    without writing anything. Raises ValueError with a message naming what's wrong."""
+    unmet = list(unmet or [])
+    grade = grade or None
+    basis = basis or "seen"
+    if basis not in MARK_BASIS_VALUES:
+        raise ValueError(f"basis {basis!r} must be one of {', '.join(MARK_BASIS_VALUES)}")
+    if grade and grade not in rubric.GRADES:
+        raise ValueError(f"grade {grade!r} must be one of {', '.join(rubric.GRADES)}")
+    reason_code = None
+    if decision == "pass":
+        reason_code = _mark_reason_code(reason or "")
+        if reason_code is None:
+            raise ValueError(f"--reason must start with one of {', '.join(PASS_REASON_CODES)} or "
+                             f"{', '.join(PASS_REASON_ALIASES)} "
+                             f'(e.g. "function: clinical operations, not process work"); got {reason!r}')
+    _validate_unmet_usage(decision, reason_code, unmet)
+    required_fit, required_unmet = _mark_required_fit(decision, reason_code, unmet)
+    description_hash = None
+    if required_fit is not None or grade is not None:
+        row = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()
+        description_hash = row[0] if row else None
+        if not description_hash:
+            raise ValueError(f"{pid} has no description_hash yet (no JD text) -- cannot record a "
+                             "required-fit call or a human grade against it")
+    return {"reason": reason or None, "reason_code": reason_code, "unmet": unmet, "grade": grade,
+           "basis": basis, "required_fit": required_fit, "required_unmet": required_unmet,
+           "description_hash": description_hash}
+
+
+def _apply_mark(con, pid: str, decision: str, prep: dict, now) -> None:
+    con.execute("INSERT INTO decisions VALUES (?, ?, ?, 'cli', NULL, ?)", [pid, decision, prep["reason"], now])
+    if prep["required_fit"] is not None or prep["grade"] is not None:
+        from backend.finder import feedback
+        feedback.record_mark(con, pid, prep["description_hash"], decision, reason_code=prep["reason_code"],
+                             reason_detail=prep["reason"], human_grade=prep["grade"],
+                             required_fit=prep["required_fit"], required_unmet=prep["required_unmet"],
+                             basis=prep["basis"], now=now)
+
+
 def cmd_mark(con, a):
+    if getattr(a, "from_file", None):
+        return cmd_mark_from_file(con, a)
+    if not a.target or not a.decision:
+        sys.exit("mark: target and decision are required unless --from-file is given")
     hits = resolve_posting(con, a.target)
     if len(hits) != 1:
         print(f"mark: {len(hits)} postings match {a.target!r}; need exactly one.")
@@ -193,13 +280,58 @@ def cmd_mark(con, a):
             print(f"  {pid}  {status:<6}  {employer} | {title}")
         sys.exit(1)
     pid, employer, title, _ = hits[0]
-    if a.decision == "pass":
-        code = re.match(r"\s*(\w+)", a.reason or "")
-        if not code or code.group(1).lower() not in PASS_REASON_CODES:
-            sys.exit(f"mark pass: --reason must start with one of {', '.join(PASS_REASON_CODES)} "
-                     '(e.g. --reason "function: clinical operations, not process work")')
-    con.execute("INSERT INTO decisions VALUES (?, ?, ?, 'cli', NULL, ?)", [pid, a.decision, a.reason, _utcnow()])
+    try:
+        prep = _prepare_mark(con, pid, a.decision, a.reason, getattr(a, "unmet", None),
+                             getattr(a, "grade", None), getattr(a, "basis", None))
+    except ValueError as e:
+        sys.exit(f"mark: {e}")
+    _apply_mark(con, pid, a.decision, prep, _utcnow())
     print(f"{a.decision}: {pid}  {employer} | {title}")
+
+
+def _parse_mark_csv_row(con, raw: dict) -> dict:
+    """One --from-file row -> a fully validated, ready-to-apply dict, or raises ValueError."""
+    ref = (raw.get("posting") or "").strip()
+    if not ref:
+        raise ValueError("empty posting reference")
+    hits = resolve_posting(con, ref)
+    if len(hits) != 1:
+        raise ValueError(f"posting {ref!r} matched {len(hits)} postings, need exactly one")
+    pid, employer, title, _ = hits[0]
+    decision = (raw.get("decision") or "").strip()
+    if decision not in report.DECISIONS:
+        raise ValueError(f"decision {decision!r} must be one of {', '.join(report.DECISIONS)}")
+    reason = (raw.get("reason") or "").strip() or None
+    unmet = [u.strip() for u in (raw.get("unmet") or "").split("||") if u.strip()]
+    grade = (raw.get("grade") or "").strip() or None
+    basis = (raw.get("basis") or "").strip() or None
+    prep = _prepare_mark(con, pid, decision, reason, unmet, grade, basis)
+    return {"pid": pid, "employer": employer, "title": title, "decision": decision, **prep}
+
+
+def cmd_mark_from_file(con, a):
+    """`finder.py mark --from-file decisions.csv` (sprint plan §22.3, Gap 2): one row per reviewed posting,
+    columns posting/decision/reason/unmet/grade/basis (`unmet` multi-valued, ' || '-joined). Validates every
+    row FIRST and applies nothing until the whole file is clean; a single bad row aborts the entire file with
+    a message naming it, and everything is applied in one transaction."""
+    with open(a.from_file, newline="", encoding="utf-8-sig") as f:
+        raw_rows = list(csv.DictReader(f))
+    if not raw_rows:
+        sys.exit(f"mark --from-file: {a.from_file} has no data rows")
+    parsed = []
+    for i, raw in enumerate(raw_rows, start=2):   # row 1 is the header
+        try:
+            parsed.append(_parse_mark_csv_row(con, raw))
+        except ValueError as e:
+            sys.exit(f"mark --from-file: row {i}: {e} -- nothing written")
+    now = _utcnow()
+    con.execute("BEGIN")
+    for row in parsed:
+        _apply_mark(con, row["pid"], row["decision"], row, now)
+    con.execute("COMMIT")
+    by_decision = Counter(row["decision"] for row in parsed)
+    print(f"mark --from-file: applied {len(parsed)} decisions from {len(raw_rows)} rows "
+         f"({', '.join(f'{k}={v}' for k, v in sorted(by_decision.items()))})")
 
 
 def cmd_sync(con, a):
@@ -427,10 +559,21 @@ def main():
     s.set_defaults(func=cmd_top)
 
     s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")
-    s.add_argument("target", help='posting_id, posting URL, or "employer|title"')
-    s.add_argument("decision", choices=report.DECISIONS)
+    s.add_argument("target", nargs="?", help='posting_id, posting URL, or "employer|title" '
+                                             "(omit when using --from-file)")
+    s.add_argument("decision", nargs="?", choices=report.DECISIONS, default=None)
     s.add_argument("--reason", help="for pass, start with a code: " + " | ".join(PASS_REASON_CODES) +
+                   " | clearance (alias for requirement) "
                    ' (e.g. "function: clinical ops"); only function passes become calibration negatives')
+    s.add_argument("--unmet", action="append",
+                   help="a Required line, quoted from the JD, that the human call says is not met "
+                        "(repeatable); only valid with a build or a pass --reason requirement/clearance")
+    s.add_argument("--grade", choices=rubric.GRADES,
+                   help="a human lane grade, recorded the same way the golden feedback CSV import is")
+    s.add_argument("--basis", choices=MARK_BASIS_VALUES, default="seen",
+                   help="'blind' if this grade was given before any machine score was on screen (default seen)")
+    s.add_argument("--from-file", help="apply a whole review session at once -- CSV columns: "
+                                       "posting,decision,reason,unmet,grade,basis (unmet ' || '-joined)")
     s.set_defaults(func=cmd_mark)
 
     s = sub.add_parser("sync", parents=[common], help="mirror Application_Tracker.md into the tracker table")

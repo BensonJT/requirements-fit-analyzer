@@ -26,7 +26,11 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 14  # v14 (2026-09-19): required_embed table -- the "second layer" stacked model's
+SCHEMA_VERSION = 15  # v15 (2026-09-19): screens.fit_bullseye -- the `bullseye` TF-IDF model
+                     #                  (features.train(lens="bullseye")). NOT a lens (see features.BULLSEYE_MODEL):
+                     #                  answers "is this a BULLSEYE rather than merely ADJACENT", a ranking
+                     #                  signal only, never read by pipeline.content_fit / combine;
+                     # v14 (2026-09-19): required_embed table -- the "second layer" stacked model's
                      #                  embed_required (backend/finder/required_embed.py). NOT a lens, NOT on
                      #                  screens (a rescreen rewrites screens; these scores live in their own
                      #                  table, keyed by model_version + description_hash, see vw_required_embed_latest);
@@ -146,6 +150,10 @@ CREATE TABLE IF NOT EXISTS screens (
     fit_required    DOUBLE,                    -- Required-block ranking model (features.train(lens="required"));
                                                 -- NOT a lens -- never read by pipeline.content_fit / combine,
                                                 -- ranking only. NULL until the model exists / a rescreen fills it.
+    fit_bullseye    DOUBLE,                    -- `bullseye` TF-IDF model (features.train(lens="bullseye")); NOT a
+                                                -- lens -- answers "bullseye vs merely adjacent", not "what kind of
+                                                -- work is this". Ranking only, never read by content_fit / combine.
+                                                -- NULL until the model exists / a rescreen or the backfill fills it.
     embed_sim       DOUBLE,                    -- Phase 3 (raw cosine)
     llm_score       INTEGER,                   -- Phase 4
     final_score     INTEGER NOT NULL,          -- 0-100
@@ -570,7 +578,7 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                p.pay_min, p.pay_max, p.pay_interval, p.first_seen_at,
                date_diff('day', p.first_seen_at, now()) AS days_since_first_seen,
                s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.fit_process, s.fit_technical,
-               s.fit_ai, s.fit_required, s.level_fit,
+               s.fit_ai, s.fit_required, s.fit_bullseye, s.level_fit,
                s.reasons, s.flags,
                g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit, g.required_unmet,
                d.posting_id IS NOT NULL AS decided,
@@ -643,6 +651,19 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- fit_required). Neither is a lens and neither ever touches lens_breadth itself -- only this
            -- product, which exists for ranking (the judge queue, ad hoc reads), never for content_fit.
            lens_breadth * required_value(required_fit, coalesce(embed_required, fit_required)) AS breadth_x_required,
+           -- The `bullseye` model's stand-in for lens_best, used ONLY inside rank_score's 0.8x term, and ONLY
+           -- when nobody has judged this lane at all (all three lens grades NULL) and the lane is already
+           -- strong (lens_best >= lens_strong_p()) and the model has an opinion (fit_bullseye IS NOT NULL). A
+           -- judged lens is worth 0.75 (adjacent) to 1.0 (bullseye) on the lens_value scale; an unjudged strong
+           -- lens was worth only its raw probability, which cannot tell bullseye from adjacent (see the
+           -- lens_standout_p comment above). This maps fit_bullseye onto that same 0.75-1.0 scale and averages
+           -- it with the lens probability, so a model-confident bullseye nudges the rank the way a judged
+           -- adjacent-to-bullseye grade would, without ever touching lens_value, lens_best, lens_breadth or the
+           -- lens_best < lens_strong_p() zero gate itself. PROVISIONAL, like the rest of the rank.
+           CASE WHEN grade_process IS NULL AND grade_technical IS NULL AND grade_ai IS NULL
+                     AND fit_bullseye IS NOT NULL AND lens_best >= lens_strong_p()
+                THEN (lens_best + 0.75 + 0.25 * fit_bullseye) / 2.0
+                ELSE lens_best END AS rank_lens_best,
            -- THE rank: the one number a list is ordered by (0-100). Every component stays visible beside it;
            -- this is only their combination. Best lens carries it (0.8), breadth beyond the best lens adds to
            -- it (0.2 x the other two lenses' share). The best-lens weight must stay ABOVE 0.75: three adjacents
@@ -652,7 +673,7 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- floor) or no lens is strong. Anything holding a bullseye comes first, more lenses beside it ranking higher
            -- (three bullseyes > bullseye + adjacent > one bullseye), then breadth among adjacent-only rows (three > two > one). PROVISIONAL v1 weights, chosen to reproduce the user's stated
            -- ordering; to be re-fit to his gold grades and build / pass decisions once there are enough.
-           round(100.0 * (0.8 * lens_best + 0.2 * greatest(0.0, lens_breadth - lens_best) / 2.0)
+           round(100.0 * (0.8 * rank_lens_best + 0.2 * greatest(0.0, lens_breadth - lens_best) / 2.0)
                  * required_value(required_fit, coalesce(embed_required, fit_required)) * level_value(level_fit)
                  * CASE WHEN verdict = 'reject' OR lens_best < lens_strong_p() THEN 0.0 ELSE 1.0 END, 1) AS rank_score,
            -- WHY it sits there, in words: the deciding facts, not the numbers again.
@@ -671,6 +692,9 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                                            THEN '; likeliest gap: ' || left(embed_worst_line, 110) ELSE '' END
                               ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)'
                          END END,
+               CASE WHEN grade_process IS NULL AND grade_technical IS NULL AND grade_ai IS NULL
+                         AND lens_best >= lens_strong_p() AND fit_bullseye >= 0.5
+                    THEN 'bullseye ~' || printf('%.2f', fit_bullseye) || ' (model)' END,
                CASE WHEN coalesce(level_fit, 'unknown') != 'in_range' THEN 'level ' || coalesce(level_fit, 'unknown') END,
                CASE WHEN verdict = 'reject' THEN 'SCREEN REJECT: ' || coalesce(reasons ->> 0, 'see reasons') END
            ) AS rank_why
@@ -813,6 +837,32 @@ CREATE OR REPLACE VIEW vw_label_set_required AS
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     WHERE length(p.description_text) >= 800 AND l.required_fit IS NOT NULL;
 
+-- The `bullseye` model's training set (features.LENS_VIEWS["bullseye"]). NOT a lens -- like vw_label_set_required,
+-- this answers a different question than process/technical/ai: among postings already IN the candidate's lanes,
+-- is this a BULLSEYE rather than merely ADJACENT (stretch/wrong are a different question, already answered by
+-- the lens models, so those rows are excluded outright rather than folded in as negatives). The best of the
+-- three per-JD lens grades decides: label 1 when the best grade is `bullseye`, 0 when it is `adjacent`; rows
+-- whose best grade is `stretch`/`wrong`/NULL never appear here at all. weight 1.0 for every row (no invented
+-- weighting, same rule as vw_label_set_required). `grade` carries the winning grade itself (bullseye/adjacent)
+-- so features.grade_report's by-grade breakdown still prints something meaningful for this vocabulary.
+CREATE OR REPLACE VIEW vw_label_set_bullseye AS
+    WITH best AS (
+        SELECT l.posting_id, p.employer AS company, p.title, p.description_text AS text,
+               CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END AS source,
+               -- best across the three lenses: bullseye > adjacent > stretch > wrong
+               CASE WHEN 'bullseye' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'bullseye'
+                    WHEN 'adjacent' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'adjacent'
+                    WHEN 'stretch' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'stretch'
+                    WHEN 'wrong' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'wrong'
+                    ELSE NULL END AS best_grade
+        FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+        WHERE length(p.description_text) >= 800
+    )
+    SELECT 'llm:' || posting_id AS label_id, source, posting_id, company, title, text,
+           CASE WHEN best_grade = 'bullseye' THEN 1 ELSE 0 END AS label,
+           1.0 AS weight, best_grade AS grade
+    FROM best WHERE best_grade IN ('bullseye', 'adjacent');
+
 -- Annualized pay band (hourly x 2000) for postings that carry one.
 CREATE OR REPLACE VIEW vw_pay_annualized AS
     SELECT posting_id, employer, title, location_primary, status,
@@ -851,7 +901,8 @@ def _add_missing_columns(con):
     llm_labels.grade_ai (NULL until the applied-AI lens model / judge exist). v12: llm_labels.required_fit /
     required_unmet (NULL = judged before the Required-block question joined the rubric). v13: screens.fit_required
     (NULL until the Required-block ranking model exists / a rescreen fills it) -- NOT a lens, see the column
-    comment on `screens` above."""
+    comment on `screens` above. v15: screens.fit_bullseye (NULL until the `bullseye` model exists / a rescreen or
+    `finder.py bullseye-backfill` fills it) -- also NOT a lens, see features.BULLSEYE_MODEL."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("llm_labels", "grade_ai", "VARCHAR"),
@@ -861,6 +912,7 @@ def _add_missing_columns(con):
                                 ("screens", "fit_technical", "DOUBLE"),
                                 ("screens", "fit_ai", "DOUBLE"),
                                 ("screens", "fit_required", "DOUBLE"),
+                                ("screens", "fit_bullseye", "DOUBLE"),
                                 ("screens", "level_fit", "VARCHAR"),
                                 ("postings", "detail_attempts", "INTEGER DEFAULT 0")):
         if column not in _columns(con, table):

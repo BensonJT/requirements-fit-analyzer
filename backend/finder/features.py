@@ -78,7 +78,7 @@ def doc_text(title: Optional[str], text: Optional[str], company: Optional[str] =
 
 
 LENS_VIEWS = {None: "vw_label_set", "process": "vw_label_set_process", "technical": "vw_label_set_technical",
-             "ai": "vw_label_set_ai", "required": "vw_label_set_required"}
+             "ai": "vw_label_set_ai", "required": "vw_label_set_required", "bullseye": "vw_label_set_bullseye"}
 
 
 def training_set(con, lens=None) -> list:
@@ -465,6 +465,67 @@ def load_required_model(con, log=print, model_dir: Optional[str] = None) -> Opti
     trained. NOT a lens (see REQUIRED_MODEL) -- a separate function, not a LENSES entry, so it can only ever
     be loaded by a caller that explicitly asks for it."""
     return load_latest(con, lens=REQUIRED_MODEL, log=log, model_dir=model_dir)
+
+
+# The `bullseye` model's name (schema v15). Deliberately kept OUT of LENSES and out of load_lens_models's
+# result, same pattern and same reason as REQUIRED_MODEL above: it answers a different question (among
+# postings already in the candidate's lanes, is this a BULLSEYE rather than merely ADJACENT) than the three
+# lenses (what kind of work is this), and it is a ranking signal only -- it must never enter content_fit,
+# lens_best, lens_breadth, n_lenses_good, lens_bucket or any "lenses" report/count.
+BULLSEYE_MODEL = "bullseye"
+
+
+def load_bullseye_model(con, log=print, model_dir: Optional[str] = None) -> Optional[dict]:
+    """The `bullseye` model (features.train(lens=BULLSEYE_MODEL)), or None when it has not been trained.
+    NOT a lens (see BULLSEYE_MODEL) -- a separate function, not a LENSES entry, so it can only ever be loaded
+    by a caller that explicitly asks for it."""
+    return load_latest(con, lens=BULLSEYE_MODEL, log=log, model_dir=model_dir)
+
+
+def employer_grouped_auc(con, rows: list, texts: list, y: list, weights: list, *, C: float, min_df: int,
+                         ngram: tuple, max_features: int, max_df: float, n_splits: int = 5, seed: int = 7,
+                         shuffle_labels: bool = False, log=print) -> Optional[float]:
+    """5-fold employer-grouped OOF AUC, reusing `required_embed._employer_folds` (GroupKFold on normalized
+    employer) rather than features.cross_validate's text-based groups. The earlier embedding experiments
+    (2026-09-19) showed employer memorisation inflates AUC 7-14 points when folds are not employer-grouped, so
+    this is a separate, stricter measurement kept only for the `bullseye` acceptance gate -- it does not change
+    what `train()` reports or stores as `cv_auc` for any other lens.
+
+    `shuffle_labels=True` runs the same fold assignment and pipeline against a shuffled copy of `y` (a sanity
+    check that should land near 0.5; a real score there means the folds are leaking, not that the model works).
+    Only rows[i]["posting_id"] present are used (a row with no posting_id cannot be employer-grouped and is
+    dropped from this measurement only)."""
+    import numpy as np
+    from . import required_embed
+    idx = [i for i, r in enumerate(rows) if r.get("posting_id")]
+    if len(idx) < 2 * n_splits:
+        log(f"employer-grouped AUC: skipped (only {len(idx)} rows carry a posting_id)")
+        return None
+    pids = [rows[i]["posting_id"] for i in idx]
+    employer_of = {rows[i]["posting_id"]: (rows[i]["company"] or "").strip().lower() for i in idx}
+    fold_of = required_embed._employer_folds(pids, employer_of, seed=seed, n_splits=n_splits)
+    y_arr = np.asarray([y[i] for i in idx], dtype=float)
+    w_arr = np.asarray([weights[i] for i in idx], dtype=float)
+    texts_g = [texts[i] for i in idx]
+    if shuffle_labels:
+        rng = np.random.RandomState(seed)
+        y_arr = y_arr[rng.permutation(len(y_arr))]
+    fold_arr = np.asarray([fold_of.get(pid, -1) for pid in pids])
+    oof = np.full(len(idx), np.nan)
+    for f in sorted(set(fold_arr.tolist()) - {-1}):
+        test_idx = np.where(fold_arr == f)[0]
+        train_idx = np.where((fold_arr != f) & (fold_arr != -1))[0]
+        if len(set(y_arr[train_idx].tolist())) < 2 or len(test_idx) == 0:
+            continue
+        vec, clf = _pipeline_parts(C, min_df, ngram, max_features, max_df)
+        X = vec.fit_transform([texts_g[i] for i in train_idx])
+        clf.fit(X, y_arr[train_idx], sample_weight=w_arr[train_idx])
+        p = clf.predict_proba(vec.transform([texts_g[i] for i in test_idx]))[:, 1]
+        oof[test_idx] = p
+    mask = ~np.isnan(oof)
+    if mask.sum() == 0 or len(set(y_arr[mask].tolist())) < 2:
+        return None
+    return _auc(y_arr[mask].tolist(), oof[mask].tolist())
 
 
 def predict(model: dict, texts: list) -> list:

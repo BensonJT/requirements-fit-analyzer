@@ -75,10 +75,12 @@ def annual_top(job: Listing) -> Optional[float]:
 
 
 # A REMOTE_TERMS hit that reads as a duties sentence, not a location/workplace statement --
-# "manage remote field teams", "supports remote sites" -- never counts as the posting's own location.
+# "manage remote field teams", "supports remote sites", "virtual teams" -- never counts as the posting's
+# own location. "virtual" added 2026-09-19 (B2 amendment): "virtual teams" is duties vocabulary, not a
+# workplace statement, same as "remote teams".
 _REMOTE_DUTY_RE = re.compile(
-    r"\bremote\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
-    r"office|offices|customer|customers|client|clients|user|users|support)\b", re.I)
+    r"\b(?:remote|virtual)\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
+    r"office|offices|customer|customers|client|clients|user|users|support)\b|\bremote\s+sensing\b", re.I)
 # Locations too generic for an ATS on-site/hybrid flag to be trusted at all (Microsoft's
 # "United States, Multiple Locations" onsite tag being the case that surfaced this).
 _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
@@ -88,17 +90,83 @@ _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|natio
 # job.locations (the plural list), which _remote_in_context never reads.
 _US_OFFSITE_RE = re.compile(r"\bus\s+off-?site\b", re.I)
 
+# 2026-09-19 (B2): boilerplate that mentions a REMOTE_TERMS word on a line but is not a statement about
+# THIS posting's own workplace. Found via three blind-graded rows the old rule read as remote (an RTX
+# hybrid role, a Booz Allen Atlanta req, a T. Rowe Price Baltimore req) -- none of the three JDs contain
+# an actual remote/telework offer; each trips one of these four boilerplate shapes instead.
+#
+# 1. Explicit negation: "not a remote position", "no remote", "telework eligible: no".
+_REMOTE_NEGATION_RE = re.compile(
+    r"\bnot\s+(?:a\s+)?remote\b|\bno\s+remote\b|\btelework\s+eligible\s*:?\s*no\b", re.I)
+# 2. A generic three-way workplace-type enumeration ("designated as on-site, hybrid or remote") that
+#    classifies the CONCEPT without committing to which one this posting is -- the RTX case: "...regardless
+#    of whether the role is designated as on-site, hybrid or remote."
+_REMOTE_ENUMERATION_RE = re.compile(
+    r"\b(?:on-?site|hybrid|remote)\b(?:\s*,\s*|\s+(?:or|and)\s+)\b(?:on-?site|hybrid|remote)\b"
+    r"(?:\s*,\s*|\s+(?:or|and)\s+)\b(?:on-?site|hybrid|remote)\b", re.I)
+# 3. A policy glossary explaining what "remote" WOULD mean if this posting were tagged that way -- the Booz
+#    Allen case: "Remote: If this position is listed as remote, there may still be occasions..." (standard
+#    boilerplate run on every req, not a per-posting fact).
+_REMOTE_GLOSSARY_RE = re.compile(
+    r"\bif\s+this\s+(?:position|role|job)\s+is\s+(?:listed|designated|classified)\s+as\s+remote\b", re.I)
+# 4. A pay-transparency paragraph listing "remote workers" as one of several geographic compensation bands
+#    -- the T. Rowe Price case: "$122,000 - $209,000 for the location of: Maryland, Colorado, Washington
+#    and remote workers" -- a disclosure clause, not a statement of where THIS role sits.
+_REMOTE_PAY_BAND_RE = re.compile(r"\bfor the location of\b", re.I)
+# 5. Benefits / EEO paragraphs that happen to mention a remote term in passing (accommodation language,
+#    equal-opportunity boilerplate) rather than describing the job's own workplace.
+_REMOTE_EEO_RE = re.compile(
+    r"equal employment opportunit|reasonable accommodation|protected veteran|gender identity|"
+    r"sexual orientation|national origin|affirmative action", re.I)
+# 6. A bare section heading ("Remote" / "Remote:") that introduces a policy glossary paragraph on its own
+# line -- splitting the JD on "[\n.]+" (below) separates the heading from the sentence that actually
+# explains it (the Booz Allen case: "Remote\n: If this position is listed as remote, ..." splits into the
+# lone word "Remote" as its own line, which would otherwise match REMOTE_TERMS with zero context).
+_REMOTE_BARE_HEADING_RE = re.compile(r"^\s*(?:remote|hybrid|on-?site|telework)\s*:?\s*$", re.I)
+# 7. "virtually"/"virtual interview or meeting" describes HOW people communicate (camera-on policy,
+# interview format), not WHERE the job sits -- distinct from _REMOTE_DUTY_RE's "virtual teams" (a duties
+# noun phrase); this is the adverb/communication-mode usage.
+_REMOTE_VIRTUAL_MODE_RE = re.compile(
+    r"\bvirtually\b|\b(?:in.person or virtual|virtual or in.person)\b|\bvirtual\b(?:\s+\w+){0,2}\s+"
+    r"(?:interview|interviews|meeting|meetings)\b", re.I)
+_REMOTE_BOILERPLATE_RES = (_REMOTE_NEGATION_RE, _REMOTE_ENUMERATION_RE, _REMOTE_GLOSSARY_RE,
+                           _REMOTE_PAY_BAND_RE, _REMOTE_EEO_RE, _REMOTE_BARE_HEADING_RE,
+                           _REMOTE_VIRTUAL_MODE_RE)
+
+# 2026-09-19 amendment (user ruling): conditional remote phrasing is a GENUINE possible-remote fact, not
+# boilerplate -- "remote work may be considered for the right candidate" means the door is open, even
+# though it is not a flat commitment. Counts toward is_remote (no reject) but earns a visible flag so the
+# user can verify it before assuming full remote.
+_REMOTE_CONDITIONAL_RE = re.compile(
+    r"remote(?:\s+work)?\s+(?:will|may)\s+be\s+considered|remote\s+(?:is\s+)?considered\s+for\s+the\s+right\s+"
+    r"candidate|remote\s+work\s+may\s+be\s+considered\s+for", re.I)
+
 
 def _remote_in_context(text: str) -> bool:
     """A REMOTE_TERMS hit on a line/sentence that reads as a location or workplace statement --
     "Location: US-REMOTE with the ability to travel...", "This role is fully remote" -- as opposed
-    to the same word used in passing inside a duties sentence (see `_REMOTE_DUTY_RE`)."""
+    to the same word used in passing inside a duties sentence (`_REMOTE_DUTY_RE`) or one of the boilerplate
+    shapes in `_REMOTE_BOILERPLATE_RES` (negation, generic enumeration, policy glossary, pay-band
+    disclosure, EEO/benefits paragraph). Conditional phrasing ("remote work may be considered") is
+    deliberately NOT excluded here -- it is a genuine remote signal (see `_REMOTE_CONDITIONAL_RE` and the
+    2026-09-19 amendment); `conditional_remote_phrase` below surfaces it as a flag."""
     for line in re.split(r"[\n.]+", text or ""):
         if not line.strip() or _REMOTE_DUTY_RE.search(line):
+            continue
+        if any(rx.search(line) for rx in _REMOTE_BOILERPLATE_RES):
             continue
         if _has(line.lower(), P.REMOTE_TERMS):
             return True
     return False
+
+
+def conditional_remote_phrase(text: str) -> Optional[str]:
+    """The matched phrase when the JD states remote is conditional ("will/may be considered", "considered
+    for the right candidate") rather than a flat offer or a flat non-offer -- None otherwise. Used to add a
+    visible, unpenalized flag (UNPENALIZED_FLAG_PATTERNS: `^remote is conditional`) without rejecting or
+    silently treating the posting as fully remote."""
+    m = _REMOTE_CONDITIONAL_RE.search(text or "")
+    return m.group(0).strip() if m else None
 
 
 def is_remote(job: Listing) -> bool:
@@ -187,6 +255,191 @@ def place_matches(location: str, places) -> list:
     return hits
 
 
+# 2026-09-19 fix (blind-grading defects b1a/b1b, see profile.py's CLEARANCE_* comment):
+_CLEARANCE_START_FIELD_RE = re.compile(
+    r"minimum\s+clearance\s+required\s+to\s+start\s*:\s*([^\n]{0,120}?)(?:\.|;|\n|$)", re.I)
+_CLEARANCE_EMPTY_VALUE_RE = re.compile(r"^\s*(?:none|n/?a|not\s+applicable)\s*$", re.I)
+# A second structured field, "Security Clearance Status: Active and existing security clearance required
+# after day 1" -- the employer states WHEN the clearance must exist. "after day 1" means it is obtained on
+# the job (sponsored: the user's pass-through ruling), even though the words "active and existing" read as
+# held; "on day 1" / "prior to start" means it must already be held. Found 2026-09-19 in the dry run: the
+# proximity rule rejected a remote operations-analyst posting whose own text says "ability to obtain and
+# maintain" because this field's wording tripped CLEARANCE_HELD_RE.
+_CLEARANCE_TIMING_RE = re.compile(
+    r"clearance\s+(?:is\s+)?required\s+(after|on|by|before|prior\s+to)\s+(?:day\s*(?:1|one)|start(?:ing)?(?:\s+date)?|hire)",
+    re.I)
+
+
+def _term_windows(blob: str, terms) -> list:
+    """[(start, end, term)] for every occurrence of any of `terms` in blob (substring, not regex)."""
+    out = []
+    for term in terms:
+        start = 0
+        while True:
+            idx = blob.find(term, start)
+            if idx < 0:
+                break
+            out.append((idx, idx + len(term), term))
+            start = idx + len(term)
+    return out
+
+
+def _obtain_governs(window: str, anchor_term: str) -> bool:
+    """True when an "ability to obtain" phrase inside `window` governs `anchor_term` itself -- its object
+    (the ~40 chars right after "obtain") names the anchor term or the word "clearance" generically -- as
+    opposed to naming only "polygraph" while the anchor is a different, separately-stated term (bug b1b:
+    "TS/SCI ... with ability to obtain a polygraph" must not launder the TS/SCI into "reachable" just
+    because the polygraph is the obtainable half)."""
+    for m in re.finditer(P.CLEARANCE_OBTAIN_RE, window):
+        obj = window[m.end():m.end() + 70]
+        if re.match(r"\W*(?:an?\s+)?poly", obj) and anchor_term != "polygraph":
+            continue   # this occurrence governs only the polygraph, not this anchor
+        if anchor_term in obj or "clearance" in obj or _clearance_level(obj):
+            return True
+        # anything else -- a certification, a badge, a licence -- is not the clearance and governs nothing
+    return False
+
+
+_CLEARANCE_LEVELS = ((4, r"ts\s*/\s*sci|\bsci\b|sensitive compartmented"), (3, r"top\s+secret"),
+                     (2, r"secret"), (1, r"public\s+trust"))
+_CLEARANCE_GENERIC_LEVEL = 9    # "ability to obtain a security clearance" with no level named: covers any level
+# A "Nice If You Have:" / "Preferred Qualifications" heading makes every bullet under it soft, even though
+# the bullet's own line never says "preferred" (2026-09-19 audit: "Top Secret clearance" listed under such a
+# heading rejected a posting whose basic qualifications say "ability to obtain a Secret clearance").
+_CLEARANCE_SOFT_HEADING_RE = re.compile(
+    r"nice\s+if\s+you\s+have|nice\s+to\s+have|preferred\s+(?:qualifications|skills|experience)|desired\s*:|"
+    r"desired\s+(?:qualifications|skills)|additional\s+qualifications|bonus\s+points", re.I)
+_CLEARANCE_HARD_HEADING_RE = re.compile(
+    r"basic\s+qualifications|minimum\s+(?:qualifications|requirements)|required\s*(?:qualifications|skills)?\s*:|"
+    r"(?<!if )you\s+have\s*:|what\s+you\s+will\s+need|clearance\s*:", re.I)
+_CLEARANCE_STRUCTURED_ACTIVE_RE = re.compile(r"clearance\s+required\s*:\s*active", re.I)
+
+
+def _clearance_level(text: str) -> int:
+    """Highest clearance level named in `text` (4 TS/SCI, 3 Top Secret, 2 Secret, 1 Public Trust), 0 if none."""
+    for level, rx in _CLEARANCE_LEVELS:
+        if re.search(rx, text, re.I):
+            return level
+    return 0
+
+
+def _obtainable_level(blob: str) -> int:
+    """The highest clearance level the JD says the candidate may OBTAIN (the user's pass-through ruling).
+    The object of each "ability to obtain" phrase decides: a named level, the generic word "clearance"
+    (covers any level), or something else entirely -- a polygraph, a certification -- which covers nothing."""
+    best = 0
+    for m in re.finditer(P.CLEARANCE_OBTAIN_RE, blob):
+        obj = blob[m.end():m.end() + 70]
+        level = _clearance_level(obj)
+        if not level and re.search(r"clearance", obj) and not re.search(r"^\W*(?:an?\s+)?poly", obj):
+            level = _CLEARANCE_GENERIC_LEVEL
+        best = max(best, level)
+    return best
+
+
+def _under_soft_heading(blob: str, start: int) -> bool:
+    """True when the nearest qualifications heading before `start` (within 700 chars) is a soft one."""
+    before = blob[max(0, start - 700):start]
+    soft = [m.end() for m in _CLEARANCE_SOFT_HEADING_RE.finditer(before)]
+    if not soft:
+        return False
+    hard = [m.end() for m in _CLEARANCE_HARD_HEADING_RE.finditer(before)]
+    return not hard or max(soft) > max(hard)
+
+
+def clearance_call(blob: str) -> tuple:
+    """The clearance question, resolved per-anchor with proximity rather than a single blob-wide search.
+    Returns (verdict, detail):
+
+    'held'      -- at least one CONFIDENT anchor (a hard/conditional level, or a direct "actively held"
+                   phrase) is neither governed by a nearby "obtain" nor stated as merely preferred: screen.py
+                   turns this into a REJECT reason.
+    'sponsored' -- every anchor is governed by a nearby "ability to obtain" (P.CLEARANCE_PROXIMITY chars):
+                   reachable, unpenalized flag, never a reject.
+    'ambiguous' -- every anchor is stated as merely preferred/nice-to-have (and none is confidently held):
+                   stays a flag, never a reject.
+    None        -- no clearance language, or only incidental boilerplate (e.g. a compensation paragraph
+                   listing "security clearances" among many unrelated nouns) -- no flag at all.
+
+    'held' wins over 'ambiguous'/'sponsored' when anchors disagree (one confident hard requirement is
+    enough to reject, even if the JD also name-drops an unrelated sponsored/preferred clearance elsewhere).
+    """
+    if not _has(blob, P.CLEARANCE_TERMS):
+        return None, None
+
+    # Structured field ("Minimum Clearance Required to Start: TS/SCI with Polygraph") is definitive on its
+    # own unless its own value is empty/None/Not Applicable.
+    m = _CLEARANCE_START_FIELD_RE.search(blob)
+    if m:
+        value = m.group(1).strip()
+        if value and not _CLEARANCE_EMPTY_VALUE_RE.match(value):
+            if re.search(P.CLEARANCE_OBTAIN_RE, value):
+                return "sponsored", value
+            if _obtainable_level(blob) >= max(_clearance_level(value), 1):
+                # the field says it is needed to start, the qualifications say "ability to obtain" the same
+                # level: the posting contradicts itself, so it is shown with a flag, never rejected.
+                return "ambiguous", value
+            return "held", value
+
+    # Structured timing field (see _CLEARANCE_TIMING_RE). "after day 1", or an "ability to obtain" governing
+    # the same sentence, is sponsored; "on day 1" / "prior to start" is held. A posting that states BOTH
+    # contradicts itself and is shown with a flag, never rejected.
+    timing = set()
+    for m in _CLEARANCE_TIMING_RE.finditer(blob):
+        when = re.sub(r"\s+", " ", m.group(1).lower())
+        obtained = re.search(P.CLEARANCE_OBTAIN_RE, blob[max(0, m.start() - 110):m.start()])
+        timing.add("sponsored" if when == "after" or obtained else "held")
+    if timing == {"sponsored"}:
+        return "sponsored", "obtainable (required after day 1 / before start)"
+    if timing == {"held"}:
+        return "held", "clearance required on day 1 / prior to start"
+    if timing:
+        return "ambiguous", "posting states both held and obtainable"
+
+    hard_hits = _term_windows(blob, P.CLEARANCE_HARD_LEVELS)
+    cond_hits = [(s, e, t) for s, e, t in _term_windows(blob, P.CLEARANCE_CONDITIONAL_LEVELS)
+                if re.search(r"\bactive\b", blob[max(0, s - P.CLEARANCE_CONDITIONAL_PROXIMITY):
+                                                  e + P.CLEARANCE_CONDITIONAL_PROXIMITY])]
+    anchors = [(s, e, t) for s, e, t in hard_hits if t != "polygraph"] + cond_hits
+    anchors += [(m.start(), m.end(), "active") for m in re.finditer(P.CLEARANCE_HELD_RE, blob)]
+    if not anchors:
+        # No hard/conditional level and no direct "held" phrasing, but generic clearance language (bare
+        # "security clearance") with an "obtain" phrase anywhere: reachable.
+        if re.search(P.CLEARANCE_OBTAIN_RE, blob):
+            return "sponsored", None
+        return None, None
+
+    calls = []
+    obtainable = _obtainable_level(blob)
+    for s, e, t in anchors:
+        soft_window = blob[max(0, s - 60):e + 60]
+        if re.search(P.CLEARANCE_SOFT_RE, soft_window) or _under_soft_heading(blob, s):
+            calls.append(("ambiguous", t))
+            continue
+        window = blob[max(0, s - P.CLEARANCE_PROXIMITY):e + P.CLEARANCE_PROXIMITY]
+        if _obtain_governs(window, t):
+            calls.append(("sponsored", t))
+            continue
+        # Level-aware: the JD explicitly lets the candidate OBTAIN this level (or a higher one) somewhere, so
+        # a second mention of the same level elsewhere -- an employer's footer boilerplate ("Secret clearance
+        # is required"), a duty ("maintain active Secret clearance") -- does not make it held. A HIGHER level
+        # than the obtainable one still does ("TS/SCI ... ability to obtain a polygraph"), and so does the
+        # structured "Clearance Required : Active ..." header.
+        level = _clearance_level(blob[max(0, s - 12):e + 45]) or 2
+        structured = _CLEARANCE_STRUCTURED_ACTIVE_RE.search(blob[max(0, s - 40):e + 10])
+        if obtainable >= level:
+            # a structured "Clearance Required : Active X" header against an explicit "able to obtain X" in the
+            # qualifications is a self-contradicting posting: flag, never reject.
+            calls.append(("ambiguous" if structured else "sponsored", t))
+        else:
+            calls.append(("held", t))
+    for verdict in ("held", "ambiguous", "sponsored"):
+        hit = next((t for c, t in calls if c == verdict), None)
+        if hit is not None:
+            return verdict, hit
+    return None, None   # unreachable (calls is always non-empty here)
+
+
 def is_commutable(job: Listing) -> bool:
     """A commutable place is named in one of the listing's locations (each checked on its own, so a
     state in one location never vouches for a city in another). A `hybrid` workplace flag alone is
@@ -250,15 +503,18 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         reasons.append("hard-avoid industry")
 
     # 5. Clearance -- a blocker only when it must already be HELD. An employer asking for the "ability
-    #    to obtain" sponsors and funds it, so that is reachable and must not be flagged away.
-    if _has(blob, P.CLEARANCE_TERMS):
-        held = re.search(P.CLEARANCE_HELD_RE, blob)
-        hard = _has(blob, P.CLEARANCE_HARD_LEVELS)
-        sponsored = re.search(P.CLEARANCE_OBTAIN_RE, blob)
-        if held or (hard and not sponsored):
-            flags.append("clearance must already be held -- likely unreachable")
-        elif sponsored:
-            flags.append("clearance is sponsored (ability to obtain) -- reachable")
+    #    to obtain" sponsors and funds it, so that is reachable and must not be flagged away. 2026-09-19:
+    #    a CONFIDENTLY held clearance is now a REJECT reason (it leaves the rank, like commute/pay), not
+    #    merely a flag -- see clearance_call above and profile.py's CLEARANCE_* comment.
+    clearance_verdict, clearance_detail = clearance_call(blob)
+    if clearance_verdict == "held":
+        reasons.append(f"clearance must already be held -- likely unreachable ({clearance_detail})"
+                       if clearance_detail else "clearance must already be held -- likely unreachable")
+    elif clearance_verdict == "sponsored":
+        flags.append("clearance is sponsored (ability to obtain) -- reachable")
+    elif clearance_verdict == "ambiguous":
+        flags.append(f"clearance requirement unclear ({clearance_detail}) -- verify" if clearance_detail
+                    else "clearance requirement unclear -- verify")
 
     # 6. Comp -- overlap test on the band top; unposted is never a rejection
     top = annual_top(job)
@@ -278,6 +534,12 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         reasons.append("not remote and outside the commute area (per listing)")
     if local and not remote:
         flags.append("local/hybrid -- judge on route, not radius")
+    # 2026-09-19 amendment: conditional remote phrasing ("remote work may be considered for the right
+    # candidate") is a genuine possible-remote fact, not boilerplate -- it must never cost the posting a
+    # reject, but it is worth surfacing so the user verifies before assuming a flat remote offer.
+    cond = conditional_remote_phrase(f"{job.title}\n{job.location}\n{job.description}")
+    if cond:
+        flags.append(f'remote is conditional ("{cond}") -- verify')
 
     # 8. Mission signal
     if _has(f"{company} {desc}", P.FAITH_SIGNALS):

@@ -60,19 +60,32 @@ def cmd_screen(con, a):
     model = None if a.no_model else features.load_latest(con)
     lens_models = {} if a.no_model else features.load_lens_models(con)
     required_model = None if a.no_model else features.load_required_model(con)
+    bullseye_model = None if a.no_model else features.load_bullseye_model(con)
     pipeline.screen(con, since=since, full=a.full, limit=a.limit, model=model, lens_models=lens_models,
-                    required_model=required_model)
+                    required_model=required_model, bullseye_model=bullseye_model)
 
 
 def cmd_rescreen_all(con, a):
     before = _latest_counts(con)
     pipeline.screen(con, full=True, model=None if a.no_model else features.load_latest(con),
                     lens_models={} if a.no_model else features.load_lens_models(con),
-                    required_model=None if a.no_model else features.load_required_model(con))
+                    required_model=None if a.no_model else features.load_required_model(con),
+                    bullseye_model=None if a.no_model else features.load_bullseye_model(con))
     after = _latest_counts(con)
     print(f"{'verdict':<10} {'before':>8} {'after':>8} {'diff':>8}")
     for v in sorted(set(before) | set(after)):
         print(f"{v:<10} {before.get(v, 0):>8} {after.get(v, 0):>8} {after.get(v, 0) - before.get(v, 0):>+8}")
+
+
+def cmd_bullseye_backfill(con, a):
+    row = features.latest_row(con, lens=features.BULLSEYE_MODEL)
+    if row and json.loads(row[2] or "{}").get("auc_employer_grouped_passed") is False:
+        sys.exit("bullseye-backfill: the latest `bullseye` model FAILED its employer-grouped acceptance gate "
+                 "(see `finder.py train --lens bullseye` output / models.notes) -- retrain until it passes "
+                 "before backfilling.")
+    bullseye_model = features.load_bullseye_model(con)
+    stats = pipeline.bullseye_backfill(con, bullseye_model)
+    print(stats)
 
 
 def cmd_facets(con, a):
@@ -228,6 +241,9 @@ def cmd_labels(con, a):
               f"{len(features.training_set(con))} docs")
 
 
+BULLSEYE_GATE_AUC = 0.78   # acceptance gate: employer-grouped OOF AUC must clear this or the model is not wired
+
+
 def cmd_train(con, a):
     result = features.train(con, C=a.C, cv=a.cv, lens=a.lens)
     for side in ("positive", "negative"):
@@ -242,6 +258,38 @@ def cmd_train(con, a):
         print("Signal AUCs over labeled rows that have a screen (fit = held-out probability):")
         for name, auc_all, _, n_all, _ in features.signal_report(con, result):
             print(f"  {name:<10} AUC {auc_all}  (n={n_all})")
+    if a.lens == features.BULLSEYE_MODEL:
+        _bullseye_gate(con, a, result)
+
+
+def _bullseye_gate(con, a, result):
+    """Employer-grouped OOF AUC (GroupKFold on normalized employer, via required_embed._employer_folds) plus
+    a shuffled-label sanity check (expect ~0.5). Stored on the model's `models.notes` row so a later reader
+    (bullseye-backfill, the STATUS doc) sees the gate without re-training. ACCEPTANCE GATE: >= BULLSEYE_GATE_AUC
+    or the model is reported but not wired into the rank feed (no backfill run automatically)."""
+    rows = result["rows"]
+    texts = [features.doc_text(r["title"], r["text"], r["company"]) for r in rows]
+    y = [int(r["label"]) for r in rows]
+    weights = [float(r["weight"] or 1.0) for r in rows]
+    n_pos, n_neg = sum(y), len(y) - sum(y)
+    kwargs = dict(C=a.C, min_df=3, ngram=(1, 2), max_features=50_000, max_df=0.5, log=lambda *_a, **_k: None)
+    emp_auc = features.employer_grouped_auc(con, rows, texts, y, weights, **kwargs)
+    shuf_auc = features.employer_grouped_auc(con, rows, texts, y, weights, shuffle_labels=True, **kwargs)
+    passed = emp_auc is not None and emp_auc >= BULLSEYE_GATE_AUC
+    print(f"\nBULLSEYE ACCEPTANCE GATE: employer-grouped OOF AUC {emp_auc if emp_auc is None else round(emp_auc, 3)} "
+          f"(need >= {BULLSEYE_GATE_AUC}) — {'PASS' if passed else 'FAIL'} · shuffled-label sanity "
+          f"{shuf_auc if shuf_auc is None else round(shuf_auc, 3)} (expect ~0.5) · n_pos={n_pos} n_neg={n_neg}")
+    notes = json.loads(con.execute("SELECT notes FROM models WHERE model_version = ?",
+                                   [result["model_version"]]).fetchone()[0])
+    notes["auc_employer_grouped"] = emp_auc
+    notes["auc_employer_grouped_shuffled"] = shuf_auc
+    notes["auc_employer_grouped_gate"] = BULLSEYE_GATE_AUC
+    notes["auc_employer_grouped_passed"] = passed
+    con.execute("UPDATE models SET notes = ? WHERE model_version = ?", [json.dumps(notes), result["model_version"]])
+    if not passed:
+        print("GATE FAILED: stopping after training. The rank feed reads fit_bullseye only where a rescreen or "
+              "`bullseye-backfill` has written it -- do NOT run `finder.py bullseye-backfill` for this model "
+              "version until a passing retrain replaces it.")
 
 
 def judge_batch_default() -> int:
@@ -410,10 +458,15 @@ def main():
     s.add_argument("--cv", type=int, default=5)
     s.add_argument("--C", type=float, default=4.0)
     s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
-    s.add_argument("--lens", choices=["process", "technical", "ai", "required"],
-                   help="train one lens's model instead of the overall one; 'required' is NOT a lens -- it is "
-                        "the Required-block ranking model (features.REQUIRED_MODEL), a ranking signal only")
+    s.add_argument("--lens", choices=["process", "technical", "ai", "required", "bullseye"],
+                   help="train one lens's model instead of the overall one; 'required' and 'bullseye' are NOT "
+                        "lenses -- see features.REQUIRED_MODEL / features.BULLSEYE_MODEL, ranking signals only")
     s.set_defaults(func=cmd_train)
+
+    s = sub.add_parser("bullseye-backfill", parents=[common],
+                       help="one-time fit_bullseye UPDATE on the latest screens row of the in-population "
+                            "postings only (no rescreen); run once after `train --lens bullseye` passes its gate")
+    s.set_defaults(func=cmd_bullseye_backfill)
 
     s = sub.add_parser("evidence", parents=[common], help="check / embed the evidence manifest")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

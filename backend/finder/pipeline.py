@@ -173,11 +173,13 @@ def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
 # costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
 _BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
                             "fit_prob": "DOUBLE", "fit_process": "DOUBLE", "fit_technical": "DOUBLE",
-                            "fit_ai": "DOUBLE", "fit_required": "DOUBLE", "level_fit": "VARCHAR",
+                            "fit_ai": "DOUBLE", "fit_required": "DOUBLE", "fit_bullseye": "DOUBLE",
+                            "level_fit": "VARCHAR",
                             "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
                             "flags": "JSON", "top_terms": "JSON", "joined": "VARCHAR"}])
 _BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "fit_process", "fit_technical",
-               "fit_ai", "fit_required", "level_fit", "final_score", "band", "reasons", "flags", "top_terms")
+               "fit_ai", "fit_required", "fit_bullseye", "level_fit", "final_score", "band", "reasons", "flags",
+               "top_terms")
 
 
 def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
@@ -191,9 +193,9 @@ def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
         con.execute("""
             INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
                                             rule_score, fit_prob, fit_process, fit_technical, fit_ai, fit_required,
-                                            level_fit, final_score, band, reasons, flags, top_terms)
+                                            fit_bullseye, level_fit, final_score, band, reasons, flags, top_terms)
             SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, fit_process, fit_technical,
-                   fit_ai, fit_required, level_fit, final_score, band, reasons, flags, top_terms
+                   fit_ai, fit_required, fit_bullseye, level_fit, final_score, band, reasons, flags, top_terms
             FROM screen_batch""", [rv, mv, now])
         con.execute("""
             UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
@@ -266,8 +268,26 @@ def required_scores(required_model: Optional[dict], rows: list) -> list:
     return probs
 
 
+def bullseye_scores(bullseye_model: Optional[dict], rows: list) -> list:
+    """[prob per row] from the `bullseye` model (features.train(lens=features.BULLSEYE_MODEL)).
+
+    NOT a lens: same rationale as required_scores -- a ranking signal only, stored as screens.fit_bullseye and
+    read by the rank feed's rank_lens_best term in SQL. Must never be passed to `content_fit`, `combine`, or
+    folded into `lens_scores`'s dict. No top terms, same rationale as `lens_scores` / `required_scores`."""
+    probs = [None] * len(rows)
+    if bullseye_model is None:
+        return probs
+    from . import features
+    idx = [i for i, r in enumerate(rows) if (r.get("description_text") or "").strip()]
+    if idx:
+        texts = [features.doc_text(rows[i]["title"], rows[i]["description_text"], rows[i]["employer"]) for i in idx]
+        for j, prob in zip(idx, features.predict(bullseye_model, texts)):
+            probs[j] = prob
+    return probs
+
+
 def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_models=None, required_model=None,
-           encoder=None, log=print) -> dict:
+           bullseye_model=None, encoder=None, log=print) -> dict:
     """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band.
 
     `lens_models` ({lens: model}) adds fit_process / fit_technical / fit_ai alongside fit_prob, and the BEST of
@@ -275,7 +295,8 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
     averaged-grade model, is still stored but decides nothing once a lens score exists. `level_fit` (20.2) comes from the level rule inside
     `rules.screen_row` and is likewise stored and reported only -- it never changes verdict or rule_score.
     `required_model` (features.REQUIRED_MODEL) adds fit_required, stored and reported only -- NOT a lens, it
-    never reaches `content_fit`/`combine` and never moves verdict, tier or final_score."""
+    never reaches `content_fit`/`combine` and never moves verdict, tier or final_score. `bullseye_model`
+    (features.BULLSEYE_MODEL) adds fit_bullseye, same rules as required_model."""
     t0, started = time.monotonic(), _now()
     rv, mv = version.rules_version(), (model or {}).get("version", "none")
     calib = {"fit_weight": (model or {}).get("fit_weight")}
@@ -286,6 +307,7 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
         probs, terms = model_scores(model, rows)
         lens_probs = lens_scores(lens_models, rows)
         required_probs = required_scores(required_model, rows)
+        bullseye_probs = bullseye_scores(bullseye_model, rows)
         none_col = [None] * len(rows)
         for i, (row, fit_prob, top) in enumerate(zip(rows, probs, terms)):
             rec = rules.screen_row(row)
@@ -300,6 +322,8 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
                          "fit_ai": lens_probs.get("ai", none_col)[i],
                          # NOT a lens (features.REQUIRED_MODEL) -- stored and reported only, see required_scores.
                          "fit_required": required_probs[i],
+                         # NOT a lens (features.BULLSEYE_MODEL) -- stored and reported only, see bullseye_scores.
+                         "fit_bullseye": bullseye_probs[i],
                          # Agent A's level rule writes this note; until it lands rec.notes has no "level_fit"
                          # key and .get() returns None, same as an unscreened lens probability.
                          "level_fit": rec.notes.get("level_fit"),
@@ -315,11 +339,53 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
     stats = {"screened": done, "started": started, "seconds": round(time.monotonic() - t0, 1),
              "verdict": dict(verdicts), "band": dict(bands), "rules_version": rv, "model_version": mv,
              "lens_models": {k: v.get("version") for k, v in (lens_models or {}).items()},
-             "required_model": (required_model or {}).get("version")}
+             "required_model": (required_model or {}).get("version"),
+             "bullseye_model": (bullseye_model or {}).get("version")}
     log(f"Screen: {done} rows in {stats['seconds']}s — " +
         ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items())) + " | bands " +
         ", ".join(f"{k} {v}" for k, v in sorted(bands.items())) + f" | rules {rv} · model {mv}")
     return stats
+
+
+def bullseye_backfill(con, bullseye_model, *, log=print) -> dict:
+    """One-time UPDATE of `screens.fit_bullseye` on the LATEST screens row only, for the population no
+    rescreen can reach yet: active, non-rejected postings whose best TF-IDF lens probability or `lens_best`
+    (vw_lens_fit) is >= 0.5. `vw_screen_latest` picks the newest screens row per posting_id by screened_at;
+    this UPDATEs exactly that (posting_id, rules_version, model_version) triple and nothing else -- it never
+    inserts a new screens row, never touches verdict/final_score/any other column, and never touches a row
+    outside this population. Meant to run once after `finder.py train --lens bullseye`, before the orchestrator's
+    single rescreen makes it unnecessary going forward."""
+    if bullseye_model is None:
+        log("Bullseye backfill: skipped (no trained bullseye model; run `finder.py train --lens bullseye`)")
+        return {"updated": 0, "candidates": 0}
+    rows = con.execute("""
+        SELECT v.posting_id, p.title, p.description_text, p.employer, s.rules_version, s.model_version
+        FROM vw_lens_fit v
+        JOIN postings p USING (posting_id)
+        JOIN vw_screen_latest s USING (posting_id)
+        WHERE v.verdict != 'reject'
+          AND (greatest(coalesce(v.fit_process, 0), coalesce(v.fit_technical, 0), coalesce(v.fit_ai, 0)) >= 0.5
+               OR v.lens_best >= 0.5)
+    """).fetchall()
+    from . import features
+    idx = [i for i, r in enumerate(rows) if (r[2] or "").strip()]
+    if not idx:
+        log(f"Bullseye backfill: {len(rows)} candidates, none with JD text")
+        return {"updated": 0, "candidates": len(rows)}
+    texts = [features.doc_text(rows[i][1], rows[i][2], rows[i][3]) for i in idx]
+    probs = features.predict(bullseye_model, texts)
+    con.execute("BEGIN")
+    try:
+        for i, prob in zip(idx, probs):
+            pid, _, _, _, rv, mv = rows[i]
+            con.execute("UPDATE screens SET fit_bullseye = ? WHERE posting_id = ? AND rules_version = ? "
+                       "AND model_version = ?", [prob, pid, rv, mv])
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    log(f"Bullseye backfill: {len(idx)} of {len(rows)} candidates updated (rest had no JD text)")
+    return {"updated": len(idx), "candidates": len(rows)}
 
 
 def coverage_stage(con, *, since=None, log=print) -> Optional[dict]:
@@ -379,14 +445,15 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         t = time.monotonic()
         out["read_back"] = report_mod.read_back(con, vault_dir)
         log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")
-    model, lens_models, required_model = None, {}, None
+    model, lens_models, required_model, bullseye_model = None, {}, None, None
     if use_model:
         from . import features
         model = features.load_latest(con, log=log)
         lens_models = features.load_lens_models(con, log=log)
         required_model = features.load_required_model(con, log=log)   # NOT a lens; see features.REQUIRED_MODEL
+        bullseye_model = features.load_bullseye_model(con, log=log)   # NOT a lens; see features.BULLSEYE_MODEL
     out["screen"] = screen(con, since=since, full=full, model=model, lens_models=lens_models,
-                           required_model=required_model, log=log)
+                           required_model=required_model, bullseye_model=bullseye_model, log=log)
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
         out["required_embed"] = required_embed_stage(con, log=log)

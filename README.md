@@ -74,6 +74,8 @@ The sweep above fills the database. The finder then works down it in ten steps. 
 
 Two rules keep the loop honest. Grade first, reveal second: a grade given before any machine score is on screen is recorded as `blind`, and only blind rows are used to evaluate the models. And a pass for logistics or pay never trains a fit model, because the work can be right when the location is wrong.
 
+`finder.py mark` is how step 10 actually writes back. A plain `mark <target> pass --reason "logistics: not commutable"` still just records the decision. Adding `--reason "requirement: ..." --unmet "<the line, quoted from the JD>"` (repeatable) tells it a hard Required line was not met, which outranks the judge's own Required-block call everywhere that call is read, exactly the way a human lane grade already outranks the judge; `--reason "clearance: ..."` is an alias for `requirement`. `mark <target> build` writes a human required_fit of `meets` unless `--unmet` says otherwise. `--grade bullseye|adjacent|stretch|wrong` records a human lane grade through the same path as the golden feedback CSV import, and `--basis blind|seen` (default `seen`) records whether the grade was given before the machine scores were on screen. A whole review session can be applied at once with `finder.py mark --from-file decisions.csv` (columns: `posting,decision,reason,unmet,grade,basis`, `unmet` values joined with ` || `) -- the file is validated in full before anything is written, and one bad row aborts the whole file rather than applying part of it.
+
 ## Supported platforms
 
 | Platform | List endpoint gives | Detail fetch | Registry identifiers |

@@ -18,7 +18,7 @@ from backend import profile as P  # noqa: E402
 from backend import screen as S  # noqa: E402
 from backend.ats import normalize as N  # noqa: E402
 from backend.ats import store  # noqa: E402
-from backend.finder import features, labels, pipeline, report, rules, tracker_sync, version  # noqa: E402
+from backend.finder import feedback, features, labels, pipeline, report, rubric, rules, tracker_sync, version  # noqa: E402
 
 EXAMPLE = {k: v for k, v in runpy.run_path(os.path.join(ROOT, "backend", "profile_local.example.py")).items()
            if k.isupper()}
@@ -1991,6 +1991,393 @@ def test_mark_pass_requires_a_reason_code(tmp_path):
     con.close()
 
 
+# ---- sprint plan §22.3, Gap 2: mark --unmet / --grade / --basis / --from-file ----
+
+def test_mark_requirement_pass_writes_required_fails_and_bridges_to_llm_labels(tmp_path):
+    """`pass --reason "requirement: ..." --unmet "..."` writes a human required_fit = fails on
+    report_feedback AND bridges into llm_labels as scorer='user-adjudicated' -- the SAME precedence
+    vw_llm_labels_latest already gives a human call over the judge's, so it reaches vw_label_set_required
+    unchanged."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: active clearance required", unmet=["Active TS/SCI"],
+                                   grade=None, basis="blind", from_file=None))
+    rf = con.execute("SELECT required_fit, required_unmet, basis, assessor, confirmed_by_user "
+                     "FROM report_feedback WHERE posting_id = ?", [pid]).fetchone()
+    assert rf == ("fails", "Active TS/SCI", "blind", "user", True)
+    ll = con.execute("SELECT scorer, required_fit, required_unmet FROM llm_labels WHERE posting_id = ?",
+                     [pid]).fetchone()
+    assert ll == ("user-adjudicated", "fails", "Active TS/SCI")
+    rows = features.training_set(con, lens="required")
+    by_pid = {r["posting_id"]: r for r in rows}
+    assert by_pid[pid]["label"] == 0 and by_pid[pid]["source"] == "user_adjudicated"
+    con.close()
+
+
+def test_mark_clearance_reason_reads_as_requirement(tmp_path):
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="clearance: TS/SCI held",
+                                   unmet=["Active TS/SCI"], grade=None, basis="seen", from_file=None))
+    code = con.execute("SELECT reason_code FROM vw_decisions WHERE posting_id = ?", [pid]).fetchone()[0]
+    assert code == "requirement"
+    required_fit = con.execute("SELECT required_fit FROM report_feedback WHERE posting_id = ?",
+                               [pid]).fetchone()[0]
+    assert required_fit == "fails"
+    con.close()
+
+
+def test_mark_build_defaults_required_meets_unless_unmet_given(tmp_path):
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="build", reason=None, unmet=None, grade=None,
+                                   basis="seen", from_file=None))
+    assert con.execute("SELECT required_fit FROM report_feedback WHERE posting_id = ?",
+                       [pid]).fetchone()[0] == "meets"
+
+    con2, pid2 = _covered_posting(tmp_path)
+    finder.cmd_mark(con2, Namespace(target=pid2, decision="build", reason=None, unmet=["some line"],
+                                    grade=None, basis="seen", from_file=None))
+    assert con2.execute("SELECT required_fit, required_unmet FROM report_feedback WHERE posting_id = ?",
+                        [pid2]).fetchone() == ("fails", "some line")
+    con.close()
+    con2.close()
+
+
+def test_mark_unmet_rejected_outside_build_or_requirement_pass(tmp_path):
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    with pytest.raises(SystemExit):
+        finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="logistics: too far",
+                                       unmet=["not commutable"], grade=None, basis="seen", from_file=None))
+    con.close()
+
+
+def test_mark_grade_writes_through_the_same_report_feedback_path_as_csv_import(tmp_path):
+    """--grade is 'a human lane grade, recorded the same way the golden feedback CSV import is' (§22.3):
+    same table, same assessor='user' / confirmed_by_user=True shape as feedback.load_csv writes."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="build", reason=None, unmet=None, grade="bullseye",
+                                   basis="blind", from_file=None))
+    row = con.execute("SELECT human_grade, verdict, basis, assessor, confirmed_by_user "
+                      "FROM report_feedback WHERE posting_id = ?", [pid]).fetchone()
+    assert row == ("bullseye", "build", "blind", "user", True)
+    con.close()
+
+
+def test_mark_logistics_and_comp_never_become_fit_negatives_even_with_grade(tmp_path):
+    """Gap 2, rule 4: a logistics/comp pass is a legitimate human lane grade ("bullseye work, passed for
+    location") but must NEVER count as a negative for the lens, required or bullseye models -- even when
+    --grade is given alongside it."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="logistics: not commutable",
+                                   unmet=None, grade="bullseye", basis="seen", from_file=None))
+    # the grade is recorded (descriptive, human lane grade)...
+    assert con.execute("SELECT human_grade FROM report_feedback WHERE posting_id = ?",
+                       [pid]).fetchone()[0] == "bullseye"
+    # ...but no required_fit claim was made, so no llm_labels bridge exists at all -- required/bullseye
+    # (neither of which reads `decisions`) cannot see this pass as a negative either
+    assert con.execute("SELECT count(*) FROM llm_labels WHERE posting_id = ?", [pid]).fetchone()[0] == 0
+    # the raw per-lens view itself must not carry the logistics decision as a negative row
+    assert pid not in {r[0] for r in con.execute(
+        "SELECT posting_id FROM vw_label_set_process WHERE source = 'decision'").fetchall()}
+    assert pid not in {r[0] for r in con.execute(
+        "SELECT posting_id FROM vw_label_set_technical WHERE source = 'decision'").fetchall()}
+    # and training_set() (what actually trains the lens models) never sees it as a negative either
+    assert pid not in {r["posting_id"] for r in features.training_set(con, lens="process")
+                       if r["label"] == 0 and r["source"] == "decision"}
+    assert pid not in {r["posting_id"] for r in features.training_set(con, lens="technical")
+                       if r["label"] == 0 and r["source"] == "decision"}
+    con.close()
+
+
+def test_comp_pass_excluded_from_the_raw_per_lens_view_too(tmp_path):
+    """`training_set()` already drops every decision-negative regardless of reason (features.py: "nothing
+    the user read is a negative") -- the view-level fix is defense in depth for anything that reads
+    vw_label_set_process/technical directly, e.g. labels.py's --report counts."""
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'comp: below floor', 'cli', NULL, ?)", [pid, now])
+    assert pid not in {r[0] for r in con.execute(
+        "SELECT posting_id FROM vw_label_set_process WHERE source = 'decision'").fetchall()}
+    con.close()
+
+
+def test_function_pass_reason_code_still_reaches_hard_negatives_for_coverage(tmp_path):
+    """The logistics/comp fix must not touch `function`'s existing role as a coverage hard negative
+    (vw_hard_negatives) -- a separate mechanism from the per-lens views."""
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'function: wrong lane', 'cli', NULL, ?)", [pid, now])
+    assert (pid, "decision:function") in set(
+        con.execute("SELECT posting_id, source FROM vw_hard_negatives").fetchall())
+    # still present in the raw per-lens view too (unlike logistics/comp) -- training_set() is what drops it
+    assert pid in {r[0] for r in con.execute(
+        "SELECT posting_id FROM vw_label_set_process WHERE source = 'decision'").fetchall()}
+    con.close()
+
+
+def test_mark_basis_default_seen_and_blind_view_filters(tmp_path):
+    import finder
+    con, pid_blind = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid_blind, decision="build", reason=None, unmet=None,
+                                   grade="adjacent", basis="blind", from_file=None))
+    now = datetime(2026, 9, 15, 12)
+    store.record_board(con, "Beta", "greenhouse", [N.base(req_id="C3", title="Process Excellence Lead 3",
+                                                           url="https://x/C3", location="Remote - USA",
+                                                           workplace_type="remote")], now)
+    pid_seen = con.execute("SELECT posting_id FROM postings WHERE req_id = 'C3'").fetchone()[0]
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h3' WHERE posting_id = ?",
+               [REQ_JD, pid_seen])
+    finder.cmd_mark(con, Namespace(target=pid_seen, decision="build", reason=None, unmet=None,
+                                   grade="adjacent", basis=None, from_file=None))
+    assert con.execute("SELECT basis FROM report_feedback WHERE posting_id = ?",
+                       [pid_seen]).fetchone()[0] == "seen"
+    blind_ids = {r[0] for r in con.execute("SELECT posting_id FROM vw_report_feedback_blind").fetchall()}
+    assert pid_blind in blind_ids and pid_seen not in blind_ids
+    con.close()
+
+
+def test_mark_from_file_validates_all_rows_before_applying_any(tmp_path):
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    csv_path = tmp_path / "decisions.csv"
+    csv_path.write_text(
+        "posting,decision,reason,unmet,grade,basis\n"
+        f"{pid},pass,logistics: too far,,,\n"
+        "nonexistent-ref,build,,,,\n"
+    )
+    with pytest.raises(SystemExit) as exc:
+        finder.cmd_mark(con, Namespace(target=None, decision=None, reason=None, unmet=None, grade=None,
+                                       basis="seen", from_file=str(csv_path)))
+    assert "row 3" in str(exc.value)
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0   # nothing written
+    con.close()
+
+
+def test_mark_from_file_applies_in_one_transaction(tmp_path):
+    import finder
+    con, pid1 = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    store.record_board(con, "Beta", "greenhouse", [N.base(req_id="C2", title="Process Excellence Lead 2",
+                                                           url="https://x/C2", location="Remote - USA",
+                                                           workplace_type="remote")], now)
+    pid2 = con.execute("SELECT posting_id FROM postings WHERE req_id = 'C2'").fetchone()[0]
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h2' WHERE posting_id = ?",
+               [REQ_JD, pid2])
+    csv_path = tmp_path / "decisions.csv"
+    csv_path.write_text(
+        "posting,decision,reason,unmet,grade,basis\n"
+        f"{pid1},build,,,bullseye,blind\n"
+        f"{pid2},pass,requirement: needs a CPA,CPA license required || 10 years public accounting,,seen\n"
+    )
+    finder.cmd_mark(con, Namespace(target=None, decision=None, reason=None, unmet=None, grade=None,
+                                   basis="seen", from_file=str(csv_path)))
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 2
+    assert con.execute("SELECT required_fit FROM report_feedback WHERE posting_id = ?",
+                       [pid1]).fetchone()[0] == "meets"
+    rf2 = con.execute("SELECT required_fit, required_unmet FROM report_feedback WHERE posting_id = ?",
+                      [pid2]).fetchone()
+    assert rf2 == ("fails", "CPA license required ; 10 years public accounting")
+    con.close()
+
+
+def test_report_feedback_required_fit_columns_present_fresh_and_upgraded(tmp_path):
+    """v16 additive migration, same pattern as llm_labels.required_fit at v12."""
+    fresh = store.connect(str(tmp_path / "fresh.duckdb"))
+    assert {"required_fit", "required_unmet"} <= store._columns(fresh, "report_feedback")
+    fresh.close()
+
+    old = store.connect(str(tmp_path / "old.duckdb"))
+    old.execute("ALTER TABLE report_feedback DROP COLUMN required_fit")
+    old.execute("ALTER TABLE report_feedback DROP COLUMN required_unmet")
+    old.execute("UPDATE schema_info SET version = 15")
+    old.close()
+    upgraded = store.connect(str(tmp_path / "old.duckdb"))
+    assert {"required_fit", "required_unmet"} <= store._columns(upgraded, "report_feedback")
+    upgraded.close()
+
+
+def test_required_embed_population_includes_user_adjudicated_rows(tmp_path):
+    """required_embed._fetch_population used to exclude scorer='user-adjudicated' outright; a human
+    required_fit call (mark --unmet) must now be visible to it (sprint plan §22.3, Gap 2)."""
+    from backend.finder import required_embed
+    con, pid = _covered_posting(tmp_path)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    now = datetime(2026, 9, 15, 12)
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "required_fit, required_unmet, judged_at) VALUES (?, ?, 'user-adjudicated', "
+               "'user-adjudicated', 'adjacent', 'fails', 'Active TS/SCI', ?)", [pid, dh, now])
+    pop = required_embed._fetch_population(con)
+    assert pid in pop and pop[pid]["required_fit"] == "fails" and pop[pid]["required_unmet"] == "Active TS/SCI"
+    con.close()
+
+
+# ---- 2026-09-19 audit fix: a required-only mark must not launder the lane grade (§22.3 Gap 2) ----
+
+def test_lens_label_source_macro(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    row = con.execute("""
+        SELECT lens_label_source('claude-sonnet-batch', NULL),
+               lens_label_source('user-adjudicated', 'human'),
+               lens_label_source('user-adjudicated', 'carried'),
+               lens_label_source('user-adjudicated', 'placeholder'),
+               lens_label_source('user-adjudicated', NULL)
+    """).fetchone()
+    assert row == ("llm_judge", "user_adjudicated", "llm_judge", None, "user_adjudicated")
+    con.close()
+
+
+def test_llm_labels_lens_grade_source_column_and_backfill(tmp_path):
+    """v16 additive column; every pre-existing scorer='user-adjudicated' row is backfilled to 'human' -- the
+    only way such a row could have existed before this column did."""
+    fresh = store.connect(str(tmp_path / "fresh.duckdb"))
+    assert "lens_grade_source" in store._columns(fresh, "llm_labels")
+    fresh.close()
+
+    old = store.connect(str(tmp_path / "old.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    store.record_board(old, "Acme", "greenhouse", [N.base(req_id="P1", title="Process Excellence Lead",
+                                                           url="https://x/P1", location="Remote - USA",
+                                                           workplace_type="remote")], now)
+    pid = old.execute("SELECT posting_id FROM postings WHERE req_id = 'P1'").fetchone()[0]
+    old.execute("UPDATE postings SET description_hash = 'h1' WHERE posting_id = ?", [pid])
+    old.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "judged_at) VALUES (?, 'h1', 'r1', 'user-adjudicated', 'bullseye', ?)", [pid, now])
+    old.execute("ALTER TABLE llm_labels DROP COLUMN lens_grade_source")
+    old.execute("UPDATE schema_info SET version = 15")
+    old.close()
+
+    upgraded = store.connect(str(tmp_path / "old.duckdb"))
+    assert "lens_grade_source" in store._columns(upgraded, "llm_labels")
+    assert upgraded.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ?",
+                           [pid]).fetchone()[0] == "human"
+    upgraded.close()
+
+
+def test_required_only_mark_on_judged_posting_carries_judges_lens_grade_not_human(tmp_path):
+    """Audit fix scenario 1: a required-only mark on an ALREADY-judged posting must not launder the judge's
+    own lens grade into a human label. The required label set sees the human's fails; the lens label set
+    still attributes the SAME grade to the judge, at the judge's own weight and source name."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "grade_process, grade_technical, required_fit, judged_at) VALUES "
+               "(?, ?, 'rv1', 'claude-sonnet-batch', 'bullseye', 'bullseye', 'adjacent', 'meets', ?)",
+               [pid, dh, now])
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade=None, basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    proc_rows = {r["posting_id"]: r for r in features.training_set(con, lens="process")
+                if r["source"] != "decision"}
+    assert proc_rows[pid]["source"] == "llm_judge" and proc_rows[pid]["grade"] == "bullseye"
+    assert proc_rows[pid]["weight"] == 1.0
+    assert con.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ? "
+                       "AND scorer = 'user-adjudicated'", [pid]).fetchone()[0] == "carried"
+    con.close()
+
+
+def test_required_only_mark_on_never_judged_posting_excluded_from_lens_and_bullseye(tmp_path):
+    """Audit fix scenario 2: a required-only mark on a posting that was NEVER judged makes a required_fit
+    claim only -- it must be absent from every lens and bullseye label set (its placeholder grade is not a
+    lane claim), while still present, as human, in the required label set."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade=None, basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    for lens in (None, "process", "technical", "ai", "bullseye"):
+        rows = features.training_set(con, lens=lens)
+        assert pid not in {r["posting_id"] for r in rows if r["source"] != "decision"}
+    assert con.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ?",
+                       [pid]).fetchone()[0] == "placeholder"
+    con.close()
+
+
+def test_required_mark_with_grade_is_human_in_both(tmp_path):
+    """Audit fix scenario 3: --grade together with a required call makes BOTH claims human."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade="bullseye", basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    base_rows = {r["posting_id"]: r for r in features.training_set(con, lens=None) if r["source"] != "decision"}
+    assert base_rows[pid]["source"] == "user_adjudicated" and base_rows[pid]["grade"] == "bullseye"
+    assert con.execute("SELECT lens_grade_source, grade_process FROM llm_labels WHERE posting_id = ?",
+                       [pid]).fetchone() == ("human", None)
+    con.close()
+
+
+def test_judge_agreement_ignores_placeholder_rows(tmp_path):
+    """Audit fix scenario 4: judge.agreement() must not count a required-only mark's fabricated placeholder
+    grade as if the judge had given it."""
+    from backend.finder import judge as J
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="build", reason=None, unmet=None, grade=None,
+                                   basis="seen", from_file=None))
+    result = J.agreement(con, log=_quiet)
+    assert result["total"] == {}
+    assert result["pursued"] == {}
+    con.close()
+
+
+def test_judge_agreement_still_counts_carried_rows_as_the_judges_own_grade(tmp_path):
+    """A carried row IS the judge's real answer, so it must still be counted (unlike a placeholder)."""
+    from backend.finder import judge as J
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "required_fit, judged_at) VALUES (?, ?, 'rv1', 'claude-sonnet-batch', 'wrong', 'fails', ?)",
+               [pid, dh, now])
+    # "pursued" is keyed off label_docs (application) / tracker / a build decision -- label_docs avoids a
+    # race against cmd_mark's own (real-clock) `decided_at` on the `decisions` table below.
+    con.execute("INSERT INTO label_docs VALUES ('vault1', 'application', 'f', ?, 'Acme', 'x', ?, 1, 1.0, ?)",
+               [pid, FIT_JD, now])
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="requirement: needs a CPA",
+                                   unmet=["CPA license required"], grade=None, basis="seen", from_file=None))
+    result = J.agreement(con, log=_quiet)
+    assert result["total"] == {"wrong": 1}
+    assert result["pursued"] == {"wrong": 1}
+    con.close()
+
+
+def test_feedback_export_judge_grade_ignores_adjudicated_bridge_row(tmp_path):
+    """feedback.export()'s judge_grade column must show the judge's REAL latest grade, not a required-only
+    mark's carried-forward or placeholder bridge row (which now always outranks the judge in
+    vw_llm_labels_latest)."""
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "judged_at) VALUES (?, ?, 'rv1', 'claude-sonnet-batch', 'wrong', ?)", [pid, dh, now])
+    import finder
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="requirement: needs a CPA",
+                                   unmet=["CPA license required"], grade=None, basis="seen", from_file=None))
+    # cmd_mark already wrote the report_feedback row (verdict='pass', reason_code='requirement'); export()
+    # is what this test checks, not a second hand-written row.
+    import csv
+    out = feedback.export(con, tmp_path / "export.csv", log=_quiet)
+    with out.open() as f:
+        rows = list(csv.DictReader(f))
+    row = next(r for r in rows if r["posting_id"] == pid)
+    assert row["judge_grade"] == "wrong"
+    con.close()
+
+
 def test_setup_check_passes_on_example_and_fails_on_broken_manifest(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     assert setup_check.run(con, manifest=os.path.join(ROOT, "evidence.example.toml"), log=_quiet)
@@ -2964,3 +3351,20 @@ def test_residence_restriction_distance_duty_on_nearby_people_is_not_a_restricti
     kind, places, _ = S.residence_restriction("Candidates must reside within commuting distance of our office "
                                               "in Plano, TX")
     assert kind == "places" and any("TX" in p for p in places)
+
+
+def test_repeat_required_mark_keeps_the_lane_standing_it_already_had(tmp_path):
+    """A second required-only mark must not turn a placeholder into a judge grade, nor demote a human grade."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    ns = dict(target=pid, decision="pass", reason="requirement: needs an active clearance",
+              unmet=["Active TS/SCI"], basis="seen", from_file=None)
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    src = "SELECT lens_grade_source FROM vw_llm_labels_latest WHERE posting_id = ?"
+    assert con.execute(src, [pid]).fetchone()[0] == "placeholder"
+    finder.cmd_mark(con, Namespace(grade="bullseye", **ns))
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    assert con.execute(src, [pid]).fetchone()[0] == "human"
+    assert con.execute("SELECT grade FROM vw_llm_labels_latest WHERE posting_id = ?", [pid]).fetchone()[0] == "bullseye"
+    con.close()

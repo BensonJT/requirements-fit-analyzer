@@ -944,3 +944,51 @@ Review feedback is top-heavy, so it can measure precision at the top and cannot 
 4. §26 (the blind sheet generator), so the next evaluation is one command.
 5. §25 (second judge), only on the user's go.
 6. The guide for someone else to configure this for their own search (§22.6 item 7).
+
+## 28. Amendment — a home for single-lens human grades, schema v19 (2026-09-19, branch `lens-grades`, not yet merged)
+The F4 gold sheet (`human_grade_ai`, one lens only) parsed and validated but was refused at write (§25's
+handoff item 2, `gold_ingest.ingest_f4`'s old docstring): `llm_labels.lens_grade_source` is one flag for the
+WHOLE row, not one per lens, so writing a human `grade_ai` there would either launder an unasserted overall
+grade into `user_adjudicated` status, or overwrite an existing user-adjudicated row's `required_fit`/other
+lens grades on the same PK. Both are worse than not writing, which is why it stayed refused.
+
+**The fix is a new table, not a new `llm_labels` column.** `human_lens_grades` (posting_id, description_hash,
+lens, grade, basis, level_fit, note, source_file, graded_at; PK `(posting_id, description_hash, lens)`).
+`description_hash` is the posting's hash at ingest time, same "retired when the JD moves on" shape as
+`llm_labels`/`report_feedback` -- `vw_human_lens_grades_current` joins it to the posting's CURRENT hash, so a
+stale-hash row is simply absent, same as everywhere else in this schema. It NEVER writes to or alters
+`llm_labels`: the overall grade, `required_fit`, and the other two lenses are untouched by an F4 ingest.
+
+**Ingest.** `gold_ingest.ingest_f4` now has a real write path, following the SAME seed-from-DB / merge /
+basis-conflict precedence `_parse_f2_f3` already gives the overall report_feedback sheet: idempotent
+re-ingest (same row twice is a no-op past the first), a changed grade updates, and a `seen` row never
+silently overwrites an existing `blind` row for the same `(posting_id, description_hash, lens)` -- the
+mismatch lands in `fr.conflicts` and the existing basis is kept, exactly like `_resolve_basis` already does
+for `report_feedback`. `level_fit` from the sheet is stored on the `human_lens_grades` row only; it is not fed
+into any level training, because no such training exists anywhere in this repo -- the level rule is a live
+computation (`rules.py`), not a trained model, so every other sheet format's `level_fit` is already
+report/agreement-only. `--dry-run` still works: nothing is written until the final, non-dry-run pass.
+
+**Per-lens training views.** `vw_label_set_process` / `_technical` / `_ai` now LEFT JOIN
+`vw_human_lens_grades_current` for their own lens: when a human grade exists for the posting's current hash,
+it REPLACES the judge's own grade for that lens, source `user_adjudicated` (same source name/weight the
+judge-outranked human grade already gets everywhere else in this schema) -- and a posting with a human grade
+but no `llm_labels` row at all still appears (a separate UNION ALL branch, excluded from the first branch's
+INNER join to `vw_llm_labels_latest` so no posting can appear twice). The averaged `vw_label_set` (the overall
+grade) is untouched -- it reads `llm_labels` directly and never joins `human_lens_grades`. A stale-hash human
+grade is ignored by the view, same as a stale-hash `llm_labels` row already is.
+
+**Reporting.** `feedback.export()` now LEFT JOINs `vw_human_lens_grades_current` three times (one per lens)
+and prints `human_grade_process`/`human_grade_technical`/`human_grade_ai` beside the existing
+`judge_grade_process`/`judge_grade_technical`/`judge_grade_ai` columns it already had. `judge.py`'s
+`agreement()` (corpus-level aggregate stats, ~line 609-650) was left alone -- folding a per-posting human/judge
+comparison into those aggregates is a bigger design question (which existing number does it change, and how)
+than this branch's scope covers; flagged here rather than half-done.
+
+**Also fixed on this branch: `--db`/`--vault` position on `feedback`'s sub-subparsers.** `finder.py feedback
+ingest --db X ...` (given AFTER the sub-action) used to fail outright -- the nested `sheet`/`sheet-import`/
+`ingest` subparsers had no `--db` of their own at all. They now take an inner parent parser
+(`common_inner`) with `default=argparse.SUPPRESS`, so `--db`/`--vault` work in either position without the
+inner parser's own (unset) default silently overwriting a value the outer parser already captured. `judge2`
+and `required-embed` take a plain `action` CHOICE positional, not a nested subparser, so they never had this
+bug.

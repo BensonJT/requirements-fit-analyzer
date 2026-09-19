@@ -97,7 +97,7 @@ def _make_v10_db(path, now=NOW):
                [pid, old_hash, now])
     con.execute("INSERT INTO report_feedback VALUES (?, ?, NULL, 80, 'strong', 'bullseye', 'adjacent', "
                 "'bullseye', 'in_range', 'build', NULL, NULL, NULL, 'high', 'jd_read', 'user', true, "
-                "NULL, NULL, NULL, NULL, ?, ?)", [pid, old_hash, now, now])
+                "NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)", [pid, old_hash, now, now])
     con.execute("INSERT INTO coverage VALUES (?, ?, 'ev1', 'm1', 'c1', 80.0, 70.0, 3, 2, 1, 3, 2, 1, "
                 "'[]', '[]', '[]', ?)", [pid, old_hash, now])
     # a label already orphaned under the OLD schema -- untouched by the migration (its stored hash never
@@ -236,7 +236,7 @@ def _judge_db_and_batch(tmp_path, *, same_text_for="p_same", changed_text_for="p
     # a gold row that must follow p_same's label when it re-anchors
     con.execute("INSERT INTO report_feedback VALUES (?, ?, NULL, 80, 'strong', 'bullseye', 'adjacent', "
                 "'bullseye', 'in_range', 'build', NULL, NULL, NULL, 'high', 'jd_read', 'user', true, "
-                "NULL, NULL, NULL, NULL, ?, ?)", [p_same, old_same, now, now])
+                "NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)", [p_same, old_same, now, now])
 
     batch_dir = tmp_path / "batches"
     batch_dir.mkdir()

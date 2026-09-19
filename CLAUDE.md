@@ -32,7 +32,13 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - `backend/ats/normalize.py` — one shape for every platform's fields
 - `backend/ats/store.py` — DuckDB schema v3 (finder tables added), transactional upsert/close, views + macros
 - `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget, then the finder stage)
-- **`finder.py`** — finder CLI: screen, rescreen-all, report, top, mark, sync, shortlist, labels, train, evidence, coverage, setup-check
+- **`finder.py`** — finder CLI: screen, rescreen-all, report, top, mark, sync, shortlist, labels, train, evidence, coverage, setup-check.
+  `mark`'s `--unmet "<JD line>"` (repeatable, with `--reason "requirement: ..."` or `"clearance: ..."`) records a
+  human Required-block miss that outranks the judge everywhere; `mark <target> build` defaults to Required
+  `meets` unless `--unmet` says otherwise. `--grade bullseye|adjacent|stretch|wrong` + `--basis blind|seen`
+  records a human lane grade the same way the golden feedback CSV import does. `mark --from-file decisions.csv`
+  applies a whole review session (columns `posting,decision,reason,unmet,grade,basis`) in one transaction,
+  validated in full first. A logistics/comp pass is never a fit negative for any model, even graded.
 - `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), required_embed (the "second layer" stacked model: TF-IDF + bge-base Required-block embedding + per-line roll-up -> `embed_required`, own `required_embed` table, NOT a lens), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
 - `tests/test_ats.py`, `tests/test_finder.py` — run with `.venv/bin/python -m pytest -q`
 - `db/` — the DuckDB job store (gitignored contents; see `db/README.md`)

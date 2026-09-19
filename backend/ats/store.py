@@ -26,7 +26,14 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 15  # v15 (2026-09-19): screens.fit_bullseye -- the `bullseye` TF-IDF model
+SCHEMA_VERSION = 16  # v16 (2026-09-19): report_feedback.required_fit / required_unmet -- `finder.py mark`'s
+                     #                  `--unmet` (sprint plan §22.3, Gap 2). Lets a human Required call
+                     #                  (`pass --reason "requirement: ..." --unmet "..."` or a `build`) sit
+                     #                  beside the CSV import's human_grade/level_fit on the SAME golden-source
+                     #                  row, then bridges into llm_labels as scorer='user-adjudicated' so the
+                     #                  existing judge-outranking precedence (vw_llm_labels_latest) carries it
+                     #                  everywhere the judge's required_fit is already read;
+                     # v15 (2026-09-19): screens.fit_bullseye -- the `bullseye` TF-IDF model
                      #                  (features.train(lens="bullseye")). NOT a lens (see features.BULLSEYE_MODEL):
                      #                  answers "is this a BULLSEYE rather than merely ADJACENT", a ranking
                      #                  signal only, never read by pipeline.content_fit / combine;
@@ -323,6 +330,9 @@ CREATE TABLE IF NOT EXISTS report_feedback (
     assessor VARCHAR NOT NULL,           -- 'user' / 'human-override' outrank 'claude-*-review'
     confirmed_by_user BOOLEAN NOT NULL DEFAULT false,
     note VARCHAR, grade_before_split VARCHAR, needs_confirm BOOLEAN, split_reason VARCHAR,
+    required_fit VARCHAR,                -- meets|fails; the human's own Required-block call (v16), NULL =
+                                          -- not assessed. `arguable` is a judge-only value, never written here.
+    required_unmet VARCHAR,              -- the unmet requirement line(s) quoted from the JD, ' ; '-joined
     assessed_at TIMESTAMP NOT NULL, loaded_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, assessor)
 );
@@ -409,10 +419,15 @@ CREATE OR REPLACE MACRO text_match(pattern) AS TABLE
 CREATE OR REPLACE VIEW vw_screen_latest AS
     SELECT * FROM screens QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY screened_at DESC) = 1;
 
+-- reason_code: 'clearance' is an ALIAS for 'requirement' (sprint plan §22.3, Gap 2) -- a held-clearance miss
+-- is a Required-block miss like any other, so it is recorded and trained the same way, just spelled the way
+-- the user actually writes it at the CLI.
 CREATE OR REPLACE VIEW vw_decisions AS
     SELECT *, CASE WHEN decision != 'pass' THEN NULL
-                   WHEN regexp_matches(lower(coalesce(reason, '')), '^(function|nuance|logistics|comp|other)\\b')
-                   THEN regexp_extract(lower(reason), '^(function|nuance|logistics|comp|other)\\b', 1)
+                   WHEN regexp_matches(lower(coalesce(reason, '')), '^clearance\\b') THEN 'requirement'
+                   WHEN regexp_matches(lower(coalesce(reason, '')),
+                                       '^(function|nuance|logistics|comp|other|requirement|level)\\b')
+                   THEN regexp_extract(lower(reason), '^(function|nuance|logistics|comp|other|requirement|level)\\b', 1)
                    ELSE 'other' END AS reason_code
     FROM decisions QUALIFY row_number() OVER (PARTITION BY posting_id ORDER BY decided_at DESC) = 1;
 
@@ -446,6 +461,13 @@ CREATE OR REPLACE VIEW vw_report_feedback_latest AS
       AND coalesce(p.description_hash, '') = f.description_hash
     QUALIFY row_number() OVER (PARTITION BY f.posting_id
         ORDER BY (f.assessor IN ('user', 'human-override')) DESC, f.confirmed_by_user DESC, f.assessed_at DESC) = 1;
+
+-- basis = 'blind' (graded before any machine score was on screen) only -- sprint plan §22.4: "Evaluation of
+-- the judge, the models and any second judge uses blind rows only. Training uses both." Any future scoring
+-- code (step 7's second judge, an AUC/precision check on `required_fit`) reads THIS view, not
+-- vw_report_feedback_latest directly, so it can never silently mix in an anchored ('seen') grade.
+CREATE OR REPLACE VIEW vw_report_feedback_blind AS
+    SELECT * FROM vw_report_feedback_latest WHERE basis = 'blind';
 
 -- Ordinal rank for level_fit, low -> high; unknown/NULL has no rank (20.2's "one step" language needs a
 -- distance, not just equality).
@@ -738,6 +760,9 @@ CREATE OR REPLACE VIEW vw_label_set AS
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
     WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+      -- A logistics/comp pass says the WORK was right and something else (location, pay) was wrong; it must
+      -- never teach a lens model that the work itself is a negative (sprint plan §22.4/§22.3, Gap 2).
+      AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     -- Graded labels: bullseye / adjacent are positives (1.0 / 0.6), stretch / wrong the hard negatives the
     -- model never had (0.5 / 1.0). A user-adjudicated row is a separate, higher-priority source.
@@ -762,6 +787,7 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
     WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+      AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
            CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
@@ -781,6 +807,7 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
     WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+      AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
            CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
@@ -902,7 +929,9 @@ def _add_missing_columns(con):
     required_unmet (NULL = judged before the Required-block question joined the rubric). v13: screens.fit_required
     (NULL until the Required-block ranking model exists / a rescreen fills it) -- NOT a lens, see the column
     comment on `screens` above. v15: screens.fit_bullseye (NULL until the `bullseye` model exists / a rescreen or
-    `finder.py bullseye-backfill` fills it) -- also NOT a lens, see features.BULLSEYE_MODEL."""
+    `finder.py bullseye-backfill` fills it) -- also NOT a lens, see features.BULLSEYE_MODEL. v16:
+    report_feedback.required_fit / required_unmet (NULL on every row loaded before `finder.py mark --unmet`
+    existed)."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("llm_labels", "grade_ai", "VARCHAR"),
@@ -914,7 +943,9 @@ def _add_missing_columns(con):
                                 ("screens", "fit_required", "DOUBLE"),
                                 ("screens", "fit_bullseye", "DOUBLE"),
                                 ("screens", "level_fit", "VARCHAR"),
-                                ("postings", "detail_attempts", "INTEGER DEFAULT 0")):
+                                ("postings", "detail_attempts", "INTEGER DEFAULT 0"),
+                                ("report_feedback", "required_fit", "VARCHAR"),
+                                ("report_feedback", "required_unmet", "VARCHAR")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":

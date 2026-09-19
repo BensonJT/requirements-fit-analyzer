@@ -3368,3 +3368,10 @@ def test_repeat_required_mark_keeps_the_lane_standing_it_already_had(tmp_path):
     assert con.execute(src, [pid]).fetchone()[0] == "human"
     assert con.execute("SELECT grade FROM vw_llm_labels_latest WHERE posting_id = ?", [pid]).fetchone()[0] == "bullseye"
     con.close()
+
+
+def test_residence_restriction_boilerplate_cut_at_inc_and_country_with_a_second_clause():
+    assert S.residence_restriction("While the position is Remote Eligible, you must live in a state where "
+                                   "Acme, Inc")[0] == "none"
+    assert S.residence_restriction("Must reside in the United States, and work must be performed within the "
+                                   "United States")[0] == "none"

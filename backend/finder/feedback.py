@@ -254,7 +254,14 @@ def record_mark(con, pid, description_hash, decision, reason_code=None, reason_d
 
     if required_fit is None:
         return
+    bridge_required_label(con, pid, description_hash, human_grade, required_fit, required_unmet, now)
 
+
+def bridge_required_label(con, pid, description_hash, human_grade, required_fit, required_unmet, now) -> None:
+    """The llm_labels bridge for a human required_fit claim -- factored out of record_mark() so
+    `finder.py mark` and the blind-sheet import (backend/finder/blind_sheet.py, sprint plan §26) write it
+    through the exact same lens_grade_source rules instead of two copies drifting apart. See record_mark's
+    docstring above for the full rationale."""
     if human_grade is not None:
         grade, grade_process, grade_technical, grade_ai = human_grade, None, None, None
         lens_grade_source = "human"

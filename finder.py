@@ -26,6 +26,8 @@ Usage:
     .venv/bin/python finder.py coverage [--all] [--limit N]   # requirement coverage for survivors
     .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
+    .venv/bin/python finder.py feedback sheet --n 20 [--seed S] [--out PATH]  # monthly blind sheet w/ decoys (§26)
+    .venv/bin/python finder.py feedback sheet-import PATH                    # import it; basis='blind'
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
 
@@ -496,7 +498,17 @@ def cmd_judge(con, a):
 
 def cmd_feedback(con, a):
     """Load the golden-source CSV, check the level rule against confirmed human rows, and/or re-export
-    (any combination of --load/--agreement/--export, always in that order)."""
+    (any combination of --load/--agreement/--export, always in that order) -- or, with a nested
+    `sheet` / `sheet-import` subcommand, the monthly blind sheet with decoys (sprint plan §26)."""
+    action = getattr(a, "feedback_action", None)
+    if action == "sheet":
+        from backend.finder import blind_sheet
+        blind_sheet.generate_sheet(con, n=a.n, seed=a.seed, out_path=a.out)
+        return
+    if action == "sheet-import":
+        from backend.finder import blind_sheet
+        blind_sheet.import_sheet(con, a.path, history_path=a.history)
+        return
     from backend.finder import feedback
     if a.load:
         feedback.load_csv(con, a.load)
@@ -660,7 +672,19 @@ def main():
     s.add_argument("--agreement", action="store_true",
                    help="print the rule's level_fit vs confirmed human rows")
     s.add_argument("--export", help="re-export every report_feedback row with the rule's answer and needs_you")
-    s.set_defaults(func=cmd_feedback)
+    s.set_defaults(func=cmd_feedback, feedback_action=None)
+    fsub = s.add_subparsers(dest="feedback_action")
+
+    fs = fsub.add_parser("sheet", help="write a blind grading CSV with decoys (sprint plan §26)")
+    fs.add_argument("--n", type=int, default=20)
+    fs.add_argument("--seed", type=int, help="seeds the sample/shuffle for a reproducible sheet")
+    fs.add_argument("--out", help="CSV output path (default db/blind_sheets/blind_sheet_<date>.csv)")
+    fs.set_defaults(func=cmd_feedback, feedback_action="sheet")
+
+    fs = fsub.add_parser("sheet-import", help="import a graded blind sheet (basis='blind')")
+    fs.add_argument("path")
+    fs.add_argument("--history", help="history JSONL path (default db/blind_sheet_history.jsonl)")
+    fs.set_defaults(func=cmd_feedback, feedback_action="sheet-import")
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

@@ -65,11 +65,37 @@ lens -- an HR business-partner role with no analysis in it is `wrong` on the tec
 pipeline role with no process ownership in it is `wrong` on the process lens. Hedging destroys the signal: it
 is the difference between "this role needs both capabilities" and "I was unsure".
 
+REQUIRED-BLOCK FIT -- A SECOND, SEPARATE QUESTION. Answer it AFTER the three lens grades and do NOT let it
+change them: the lens grades say what KIND of work the role is; this says whether the candidate would clear the
+posting's own stated requirements.
+- Find every line that states a required QUALIFICATION -- years of experience in something, a named tool or
+  platform, a credential, a track record -- wherever it appears (some postings put them under a role heading, and
+  some lines tagged [required] are boilerplate or duties: ignore those). Ignore soft skills and generic degree lines.
+- Mark each one against the candidate record:
+    met    : the record shows it, OR the line is a list of alternatives ("program management, product management,
+             service delivery, or a related field") and the record satisfies any one of them.
+    partly : the same kind of experience but short on years; a named tool that is light in the record while the
+             skill behind it is strong; an adjacent function; industry-only tenure ("experience in healthcare").
+    unmet  : years of experience IN a business function, domain, specialism or platform practice that is not in the
+             record (HR operations, claims, capital planning, content strategy, a vendor platform's implementation
+             practice, leading software-engineering teams), a gating licence, or people-leadership scale well
+             beyond the record.
+- required_fit is the overall call:
+    `meets`    : every qualification line is met or partly, and the central experience line is met.
+    `arguable` : the central experience line is met or partly, with one or two unmet lines that are not the core
+                 of the seat, or several partly lines. A recruiter could be persuaded.
+    `fails`    : the central experience requirement -- usually the first years-of-experience line -- is unmet, or
+                 most qualification lines are unmet. Be strict: a confident candidate reading this block would
+                 say "they are not looking for me".
+- If the posting states no real qualifications, required_fit is `arguable` and say so.
+
 OUTPUT: one JSON object per posting, nothing else:
 {"posting_id": "<id>", "grade_process": "bullseye|adjacent|stretch|wrong",
  "grade_technical": "bullseye|adjacent|stretch|wrong", "grade_ai": "bullseye|adjacent|stretch|wrong",
  "lane": "primary|secondary|wrong", "confidence": "high|medium|low",
  "blocker": "<the single biggest gap, or empty>",
+ "required_fit": "meets|arguable|fails",
+ "required_unmet": "<the unmet qualification lines, quoted briefly and separated by ' ; ', or empty>",
  "rationale": "<one sentence naming the actual work, and which lens it lands on>"}
 """
 

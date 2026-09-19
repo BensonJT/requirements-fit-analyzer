@@ -12,7 +12,7 @@ Workable, BambooHR, SmartRecruiters). Then query the views:
     SELECT * FROM vw_board_health WHERE NOT ok;
 
 Usage:
-    .venv/bin/python sweep_ats.py                       # everything, 300 JD fetches
+    .venv/bin/python sweep_ats.py                       # everything, 2000 JD fetches
     .venv/bin/python sweep_ats.py --limit 10            # first 10 boards (smoke test)
     .venv/bin/python sweep_ats.py --employer "capital one"
     .venv/bin/python sweep_ats.py --platform workday --detail-budget 0
@@ -36,8 +36,8 @@ def main():
     ap.add_argument("--max-pages", type=int, help="safety valve: stop a board after N pages and skip its close-pass")
     ap.add_argument("--new-detail-cap", type=int, default=5000,
                     help="max JD fetches for postings that are NEW this run, every title (0 = off; default 5000)")
-    ap.add_argument("--detail-budget", type=int, default=300,
-                    help="JD fetches for the older backlog, title-prefiltered (0 = none; default 300)")
+    ap.add_argument("--detail-budget", type=int, default=2000,
+                    help="JD fetches for the older backlog, title-prefiltered (0 = none; default 2000)")
     ap.add_argument("--detail-all", action="store_true", help="ignore the title prefilter when choosing JDs to fetch")
     ap.add_argument("--skip-sweep", action="store_true", help="only run the detail stage")
     ap.add_argument("--db", help="override the DuckDB path")

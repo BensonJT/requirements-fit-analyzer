@@ -484,7 +484,7 @@ def test_f4_blind_not_overwritten_by_seen(tmp_path):
     basis, grade = con.execute("SELECT basis, grade FROM human_lens_grades WHERE posting_id = ?",
                                [PID_A]).fetchone()
     assert basis == "blind"
-    assert grade == "wrong"  # basis kept from the blind row; the later grade still lands (same as _merge)
+    assert grade == "bullseye"  # the blind row is kept whole: a seen grade never lands under a blind basis
     con.close()
 
 

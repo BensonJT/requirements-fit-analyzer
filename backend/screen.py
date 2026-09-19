@@ -681,8 +681,12 @@ def employer_residence_note(company: str) -> Optional[dict]:
     key = norm_company(company)
     if not key:
         return None
+    # EXACT match on the normalized name (or a parenthetical alias), never company_matches(): its
+    # whole-word containment and shared-first-word fallbacks are right for dedup, too loose for a rule
+    # that REJECTS -- a note on 'Acme' must not reject 'Acme Robotics'.
+    mine = set(company_keys(company)) | {key}
     for raw_key, note in notes.items():
-        if company_matches(key, company_keys(raw_key)):
+        if mine & set(company_keys(raw_key)):
             return note
     return None
 

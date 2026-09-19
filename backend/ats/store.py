@@ -15,7 +15,9 @@ a staging table inside ONE transaction (measured 10x faster), not row-by-row.
 """
 import hashlib
 import os
+import re
 import shutil
+import unicodedata
 from datetime import datetime
 
 import duckdb
@@ -24,7 +26,11 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 10  # v10 (2026-09-17): screens.level_fit / fit_ai, llm_labels.grade_ai, report_feedback table
+SCHEMA_VERSION = 11  # v11 (2026-09-18): description_hash normalized before hashing (whitespace/NBSP/zero-width/
+                     #                  case/NFKC no longer orphan llm_labels / report_feedback / coverage /
+                     #                  requirement_units / embeddings on a trivial re-fetch) — see
+                     #                  normalize_for_hash and _migrate_v11_hash_normalization;
+                     # v10 (2026-09-17): screens.level_fit / fit_ai, llm_labels.grade_ai, report_feedback table
                      #                  (sprint plan 20.2 / 21 — level rule + applied-AI lens);
                      # v9 (2026-09-17): postings.detail_attempts;
                      # v8 (2026-09-16): screens.fit_process / fit_technical;
@@ -636,7 +642,11 @@ def connect(db_path=None):
     con.execute(SCHEMA)
     if not con.execute("SELECT count(*) FROM schema_info").fetchone()[0]:
         con.execute("INSERT INTO schema_info VALUES (?)", [SCHEMA_VERSION])
-    else:  # v2 -> v3 added tables only (CREATE IF NOT EXISTS above), so just record the version
+    else:
+        prev = con.execute("SELECT version FROM schema_info").fetchone()[0]
+        if prev < 11 <= SCHEMA_VERSION:
+            _migrate_v11_hash_normalization(con)
+        # v2 -> v3 added tables only (CREATE IF NOT EXISTS above), so bumping the version is otherwise enough
         con.execute("UPDATE schema_info SET version = ? WHERE version < ?", [SCHEMA_VERSION, SCHEMA_VERSION])
     _add_missing_columns(con)
     con.execute(VIEWS)
@@ -728,10 +738,112 @@ def posting_id(employer, platform, req_id):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
+_HASH_WS_RE = re.compile("[\\s\u200b\u200c\u200d\ufeff]+")  # \\s already covers NBSP; zero-widths named by escape, never as literals
+
+
+def normalize_for_hash(text: str) -> str:
+    """NFKC + whitespace/zero-width collapse + case-fold, so two fetches of the same JD that differ only in
+    incidental whitespace (measured: 10 of 12 retired gold labels differed from the prior text by 1-3 chars,
+    similarity 1.000) hash identically. NFKC alone already maps NBSP to a plain space; the zero-width
+    characters (ZWSP/ZWNJ/ZWJ/BOM) have no such mapping and are folded to a space explicitly."""
+    return _HASH_WS_RE.sub(" ", unicodedata.normalize("NFKC", text)).strip().lower()
+
+
 def description_hash(text):
     if not text:
         return None
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(normalize_for_hash(text).encode("utf-8")).hexdigest()[:16]
+
+
+# Tables that store a description_hash column, and whether it is part of the primary key. Non-PK tables can
+# be remapped with a plain UPDATE; PK tables need collision handling because two historical rows (fetched at
+# different times, hashing differently under the OLD raw-text hash) can normalize to the SAME new hash.
+# (extra_pk_cols, newest_ts_col) for the PK tables; the non-PK tables are handled directly in the migration.
+_HASH_PK_TABLES = {
+    "requirement_units": (("splitter", "ord"), "embedded_at"),
+    "coverage": (("evidence_version", "model", "calibration"), "scored_at"),
+    "llm_labels": (("rubric_version", "scorer"), "judged_at"),
+    "report_feedback": (("assessor",), "assessed_at"),
+}
+_HASH_PLAIN_TABLES = ("embeddings",)  # description_hash present but NOT part of the primary key
+
+
+def _remap_hash_pk_table(con, table: str, extra_pk_cols: tuple, ts_col: str) -> None:
+    """Remaps `table`.description_hash via the `hash_map` temp table (posting_id, old_hash, new_hash), where
+    description_hash is part of the primary key. On a collision -- a row already sits at the new hash for the
+    same other PK columns -- the row with the newer `ts_col` survives and the other is deleted; ties favor the
+    incoming (remapped) row. Safe to call twice: the second call finds hash_map empty of anything to do."""
+    pk_cols = ", ".join(("posting_id", "description_hash") + extra_pk_cols)
+    t_extra = ", ".join(f"t.{c}" for c in extra_pk_cols)
+    u_extra = ", ".join(f"u.{c}" for c in extra_pk_cols)
+    join_extra = " AND ".join(f"t.{c} = u.{c}" for c in extra_pk_cols)
+    # 1. An existing row already at the new hash that LOSES to the incoming (old-hash) row: delete it.
+    con.execute(f"""
+        DELETE FROM {table} WHERE ({pk_cols}) IN (
+            SELECT t.posting_id, t.description_hash, {t_extra}
+            FROM {table} t
+            JOIN hash_map m ON m.posting_id = t.posting_id AND m.new_hash = t.description_hash
+            JOIN {table} u ON u.posting_id = m.posting_id AND u.description_hash = m.old_hash AND {join_extra}
+            WHERE u.{ts_col} >= t.{ts_col}
+        )""")
+    # 2. The incoming (old-hash) row LOSES to an existing, newer row already at the new hash: delete it
+    #    instead of remapping it (its data is superseded).
+    con.execute(f"""
+        DELETE FROM {table} WHERE ({pk_cols}) IN (
+            SELECT u.posting_id, u.description_hash, {u_extra}
+            FROM {table} u
+            JOIN hash_map m ON m.posting_id = u.posting_id AND u.description_hash = m.old_hash
+            JOIN {table} t ON t.posting_id = m.posting_id AND t.description_hash = m.new_hash AND {join_extra}
+            WHERE t.{ts_col} > u.{ts_col}
+        )""")
+    # 3. Whatever is left at the old hash has no surviving collision: remap it.
+    con.execute(f"""
+        UPDATE {table} u SET description_hash = m.new_hash
+        FROM hash_map m WHERE u.posting_id = m.posting_id AND u.description_hash = m.old_hash
+    """)
+
+
+def _migrate_v11_hash_normalization(con, log=lambda *a, **k: None) -> int:
+    """v10 -> v11: rehash every posting's description under `normalize_for_hash` and remap every table that
+    stores a description_hash (llm_labels, report_feedback, coverage, requirement_units, embeddings, postings)
+    from the old raw-text hash to the new one. Idempotent -- a posting whose stored hash already equals its
+    normalized hash contributes nothing to `hash_map`, so a second call is a no-op. Runs as ONE transaction.
+
+    Deliberately does NOT touch description_fetched_at: the finder decides "needs (re)screen" by comparing
+    screened_at to description_fetched_at (backend/finder/pipeline.RESCREEN_SQL), not by the hash, so this
+    migration does not make the whole corpus look changed to the screening stage.
+    """
+    con.execute("BEGIN")
+    try:
+        con.execute("CREATE OR REPLACE TEMP TABLE hash_map "
+                    "(posting_id VARCHAR, old_hash VARCHAR, new_hash VARCHAR)")
+        reader = con.cursor()
+        try:
+            reader.execute("SELECT posting_id, description_hash, description_text FROM postings "
+                           "WHERE description_text IS NOT NULL")
+            while batch := reader.fetchmany(5000):
+                rows = [(pid, old, description_hash(text)) for pid, old, text in batch]
+                rows = [r for r in rows if r[1] and r[2] and r[1] != r[2]]
+                if rows:
+                    con.executemany("INSERT INTO hash_map VALUES (?, ?, ?)", rows)
+        finally:
+            reader.close()
+        n_changed = con.execute("SELECT count(*) FROM hash_map").fetchone()[0]
+        if n_changed:
+            for table, (extra_pk_cols, ts_col) in _HASH_PK_TABLES.items():
+                _remap_hash_pk_table(con, table, extra_pk_cols, ts_col)
+            for table in _HASH_PLAIN_TABLES:
+                con.execute(f"""UPDATE {table} e SET description_hash = m.new_hash FROM hash_map m
+                               WHERE e.posting_id = m.posting_id AND e.description_hash = m.old_hash""")
+            con.execute("""UPDATE postings p SET description_hash = m.new_hash FROM hash_map m
+                          WHERE p.posting_id = m.posting_id AND p.description_hash = m.old_hash""")
+        con.execute("DROP TABLE hash_map")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    log(f"v11 hash normalization: {n_changed} posting(s) rehashed")
+    return n_changed
 
 
 def _stage(con, employer, platform, jobs, now):

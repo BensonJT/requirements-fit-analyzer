@@ -243,3 +243,13 @@ def test_export_needs_you_branches(tmp_path, monkeypatch):
     assert not needs_you("N6"), "a row with nothing wrong must not be flagged"
     assert by_req["N6"]["expired"] in ("False", "false", "0")
     con.close()
+
+
+def test_ts_accepts_the_formats_excel_rewrites_a_timestamp_into():
+    assert feedback._ts("2026-09-16T10:30:00") == datetime(2026, 9, 16, 10, 30)
+    assert feedback._ts("9/16/2026 10:30") == datetime(2026, 9, 16, 10, 30)
+    assert feedback._ts("9/16/2026 10:30:05") == datetime(2026, 9, 16, 10, 30, 5)
+    assert feedback._ts("9/16/2026") == datetime(2026, 9, 16)
+    assert feedback._ts("") is None
+    with pytest.raises(ValueError):
+        feedback._ts("not a date")

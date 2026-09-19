@@ -52,9 +52,23 @@ def _int(v) -> Optional[int]:
     return int(v) if v is not None else None
 
 
+EXCEL_TS_FORMATS = ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y")
+
+
 def _ts(v):
+    """ISO first; then the US formats Excel rewrites a timestamp into when the vault CSV is saved from it."""
     v = _clean(v)
-    return datetime.fromisoformat(v) if v is not None else None
+    if v is None:
+        return None
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        for fmt in EXCEL_TS_FORMATS:
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        raise
 
 
 def _steps_apart(order: list, a: Optional[str], b: Optional[str]) -> Optional[int]:

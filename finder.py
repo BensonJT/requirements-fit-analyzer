@@ -12,6 +12,8 @@ Usage:
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
     .venv/bin/python finder.py shortlist --days 7 --n 30
     .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
+    .venv/bin/python finder.py labels --reanchor [--dry-run]  # recover llm_labels orphaned before the
+                                                                # description_hash normalization fix (§ v11)
     .venv/bin/python finder.py train --report                 # TF-IDF + LR on the labels
     .venv/bin/python finder.py setup-check                    # personal files, optional dependencies, DB
     .venv/bin/python finder.py evidence --check               # evidence manifest: sources, units, samples
@@ -184,6 +186,12 @@ def cmd_shortlist(con, a):
 
 
 def cmd_labels(con, a):
+    if a.reanchor:
+        from backend.finder import reanchor as reanchor_mod
+        import glob
+        dirs = a.batch_dir or sorted(glob.glob(os.path.join(REPO, "db", "batches*")))
+        reanchor_mod.reanchor(con, dirs, dry_run=a.dry_run)
+        return
     if not a.vault:
         sys.exit("labels: set JOBSEARCH_VAULT_DIR or pass --vault")
     counts = labels.sync_labels(con, a.vault, n_pseudo=a.pseudo, seed=a.seed)
@@ -348,6 +356,12 @@ def main():
     s.add_argument("--report", action="store_true", help="per-source table and the Phase 2 thresholds")
     s.add_argument("--pseudo", type=int, default=1500, help="pseudo-negatives to sample (default 1500)")
     s.add_argument("--seed", type=int, default=7)
+    s.add_argument("--reanchor", action="store_true",
+                   help="recover llm_labels orphaned before the description_hash normalization fix, using the "
+                        "judge batch files under db/batches* as evidence the JD did not materially change")
+    s.add_argument("--dry-run", action="store_true", help="with --reanchor: print counts only, write nothing")
+    s.add_argument("--batch-dir", action="append", help="with --reanchor: a batch dir to search (repeatable; "
+                                                        "default every db/batches* directory)")
     s.set_defaults(func=cmd_labels)
 
     s = sub.add_parser("train", parents=[common], help="train the TF-IDF + logistic regression fit model")

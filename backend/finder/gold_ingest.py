@@ -182,6 +182,19 @@ def _seed_from_db(con, posting_id, description_hash):
         FROM report_feedback WHERE posting_id = ? AND description_hash = ? AND assessor = 'user'
     """, [posting_id, description_hash]).fetchone()
     if not row:
+        # No row of this ingest's own (assessor 'user', this JD text) -- but the user may already have graded
+        # this posting through another path (the golden CSV's 'human-override' rows, or an older JD text).
+        # Any such grade that was not blind means a later sheet is a SECOND look, not a held-out one: seed the
+        # basis as 'seen' so _resolve_basis keeps it (and reports the conflict) instead of minting a 'blind'
+        # row beside it that vw_report_feedback_blind would then count as evaluation data (§22.4).
+        prior = con.execute("""
+            SELECT count(*) FILTER (WHERE basis != 'blind'), count(*) FROM report_feedback
+            WHERE posting_id = ? AND assessor IN ('user', 'human-override')
+        """, [posting_id]).fetchone()
+        if prior and prior[0]:
+            return {"posting_id": posting_id, "description_hash": description_hash, "basis": "seen",
+                    "human_grade": None, "level_fit": None, "note": None,
+                    "required_fit": None, "required_unmet": None}
         return None
     basis, human_grade, level_fit, note, required_fit, required_unmet = row
     return {"posting_id": posting_id, "description_hash": description_hash, "basis": basis,

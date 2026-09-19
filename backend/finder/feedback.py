@@ -153,6 +153,52 @@ def load_csv(con, path, log=print) -> dict:
     return counts
 
 
+# The report_feedback INSERT, in one place: load_csv's own upsert, blind_sheet.import_sheet and
+# gold_ingest.py all land here so the column order and the loaded_at stamp never drift into two copies.
+REPORT_FEEDBACK_INSERT_SQL = """
+    INSERT OR REPLACE INTO report_feedback (
+        posting_id, description_hash, report_files, snapshot_final_score, snapshot_band,
+        snapshot_grade_process, snapshot_grade_technical, human_grade, level_fit, verdict,
+        reason_code, reason_detail, positioning, confidence, basis, assessor,
+        confirmed_by_user, note, grade_before_split, needs_confirm, split_reason,
+        required_fit, required_unmet, assessed_at, loaded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _report_feedback_row(rec: dict, now) -> list:
+    """One `report_feedback` row, in REPORT_FEEDBACK_INSERT_SQL's column order, from a normalized record
+    dict (posting_id, description_hash, basis, assessor and verdict are required; everything else is
+    read with .get() and defaults to NULL)."""
+    return [
+        rec["posting_id"], rec["description_hash"], rec.get("report_files"),
+        rec.get("snapshot_final_score"), rec.get("snapshot_band"), rec.get("snapshot_grade_process"),
+        rec.get("snapshot_grade_technical"), rec.get("human_grade"), rec.get("level_fit"),
+        rec["verdict"], rec.get("reason_code"), rec.get("reason_detail"), rec.get("positioning"),
+        rec.get("confidence"), rec["basis"], rec["assessor"], bool(rec.get("confirmed_by_user")),
+        rec.get("note"), rec.get("grade_before_split"), rec.get("needs_confirm"), rec.get("split_reason"),
+        rec.get("required_fit"), rec.get("required_unmet"), rec.get("assessed_at") or now, now,
+    ]
+
+
+def write_records(con, records: list, log=print) -> dict:
+    """Writes pre-normalized report_feedback rows (dicts; see `_report_feedback_row` for the fields) through
+    REPORT_FEEDBACK_INSERT_SQL, then bridges any row that carries a `required_fit` into `llm_labels` via
+    `bridge_required_label` -- the SAME two write paths `load_csv`'s golden-source import uses, factored out
+    here so `blind_sheet.import_sheet` and `backend/finder/gold_ingest.py` share them instead of each keeping
+    its own copy (blind_sheet used to round-trip through a temp CSV file just to reach `load_csv`; this is
+    that same destination without the detour)."""
+    now = _now()
+    if records:
+        con.executemany(REPORT_FEEDBACK_INSERT_SQL, [_report_feedback_row(r, now) for r in records])
+        for r in records:
+            if r.get("required_fit") is not None:
+                bridge_required_label(con, r["posting_id"], r["description_hash"], r.get("human_grade"),
+                                       r["required_fit"], r.get("required_unmet"), r.get("assessed_at") or now)
+    log(f"feedback write: {len(records)} row(s)")
+    return {"written": len(records)}
+
+
 def rule_level_fit(con, posting_ids) -> dict:
     """{posting_id: {"level_fit", "level_fit_hits"}} computed LIVE by the level rule, straight off the current
     `postings` row -- not the stored `screens.level_fit`. This works before any rescreen (sprint plan 20.4

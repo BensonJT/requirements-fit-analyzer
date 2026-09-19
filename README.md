@@ -80,6 +80,31 @@ Two rules keep the loop honest. Grade first, reveal second: a grade given before
 
 Review feedback is top-heavy -- only postings that already ranked high get a human look, so it can measure precision at the top but never a miss (a good job buried lower, or wrongly screen-rejected). `finder.py feedback sheet --n 20 [--seed S] [--out PATH]` writes a small blind grading CSV once a month with NO rank, verdict, reason or flag on it: 8 rows from the top 50 by Rank, 6 from ranks 200-600, and 6 screen rejects with a JD (2 each whose reject reason is location, clearance or title, falling back to any reject when a bucket is short), shuffled, one row per posting per (employer, normalized title), excluding anything already graded or decided. Fill in `human_grade`, `required_fit`, `required_unmet`, `level_fit`, `note` by hand, then `finder.py feedback sheet-import PATH` writes the grades back through the same `report_feedback` path the golden-source CSV uses (`basis='blind'`), bridges any `required_fit` into `llm_labels` the same way `mark` does, and prints precision at the top, the miss rate in the 200-600 band, and the false-reject rate per rule bucket -- appended, timestamped, to `db/blind_sheet_history.jsonl`.
 
+### Gold-sheet ingest
+
+Hand-graded sheets accumulate outside the repo in several header shapes -- only the golden-source wide CSV
+above was ingestible before `finder.py feedback ingest PATH [PATH ...] [--manifest FILE] [--basis blind|seen]
+[--dry-run] [--accept-proposed]`. It detects the format from the header (case/whitespace/BOM-insensitive,
+tolerates and logs unknown extra columns), normalizes enum values through a logged alias table (`to_low` ->
+`too_low`, `stretch` -> `stretch_up`, `out_of_range` -> `out_of_reach` for `level_fit`; anything still outside
+the enum rejects that ROW only, with file/line/posting_id/value), and writes through the same
+`feedback.write_records` path the golden CSV and the blind sheet use. A narrow sheet (no `basis` column of
+its own) requires `--basis` or a manifest row's own `basis` -- there is no default, because blurring blind vs
+seen would defeat the whole point of the distinction (sprint plan §22.4). `--manifest FILE` reads a
+`path,basis,notes` CSV (paths relative to the manifest's own directory; see `docs/gold_manifest.example.csv`)
+so a full re-ingest is one command. When the same posting is graded more than once (across files in one run,
+or already in the DB), the later file's grade/level/note win, but a `required_fit` is never overwritten by a
+later row that lacks one, and a row's `basis` never moves from `blind` to `seen` or back -- a conflict is
+reported, not silently resolved. A file whose header carries `proposal_confidence` is a machine-drafted
+proposal, not a confirmed grading sheet, and is refused unless `--accept-proposed` is given. A derived
+train/frozen split (`half`/`baseline_judge_grade` columns) is never ingestible and is always refused. A
+single-lens (Applied-AI) grade sheet parses and validates for the `--dry-run` report but is never written
+live -- `llm_labels.lens_grade_source` is one flag for the whole row, not one per lens, so there is no way to
+record a human `grade_ai` today without either laundering an unasserted overall grade as human-adjudicated or
+overwriting an existing `required_fit`/other lens grade on the same posting; see `gold_ingest.ingest_f4`'s
+docstring for what schema change would fix it. `--dry-run` runs detection, normalization and precedence
+resolution against the DB and writes nothing.
+
 ## Supported platforms
 
 | Platform | List endpoint gives | Detail fetch | Registry identifiers |

@@ -260,11 +260,14 @@ def record_mark(con, pid, description_hash, decision, reason_code=None, reason_d
         lens_grade_source = "human"
     else:
         prior = con.execute(
-            "SELECT grade, grade_process, grade_technical, grade_ai FROM vw_llm_labels_latest WHERE posting_id = ?",
-            [pid]).fetchone()
+            "SELECT grade, grade_process, grade_technical, grade_ai, scorer, lens_grade_source "
+            "FROM vw_llm_labels_latest WHERE posting_id = ?", [pid]).fetchone()
         if prior:
-            grade, grade_process, grade_technical, grade_ai = prior
-            lens_grade_source = "carried"
+            grade, grade_process, grade_technical, grade_ai, prior_scorer, prior_source = prior
+            # The latest row may itself be an adjudicated one (a golden-CSV grade, or an earlier mark). Its
+            # lane grade keeps the standing it already had: a human grade stays human, a placeholder stays a
+            # placeholder. Only a judge's row becomes 'carried'.
+            lens_grade_source = (prior_source or "human") if prior_scorer == USER_SCORER else "carried"
         else:
             grade, grade_process, grade_technical, grade_ai = "adjacent", None, None, None
             lens_grade_source = "placeholder"

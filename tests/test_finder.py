@@ -3118,3 +3118,20 @@ def test_rank_score_is_the_one_ordering_and_rank_why_names_the_deciding_facts(tm
     assert why["weak"].startswith("no strong lens")
     assert [x[0] for x in report.top_rows(con, "apply")][:2] == ["bulladj", "stretchup"]       # 87.5 then 85: ordered by the one rank
     con.close()
+
+
+def test_repeat_required_mark_keeps_the_lane_standing_it_already_had(tmp_path):
+    """A second required-only mark must not turn a placeholder into a judge grade, nor demote a human grade."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    ns = dict(target=pid, decision="pass", reason="requirement: needs an active clearance",
+              unmet=["Active TS/SCI"], basis="seen", from_file=None)
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    src = "SELECT lens_grade_source FROM vw_llm_labels_latest WHERE posting_id = ?"
+    assert con.execute(src, [pid]).fetchone()[0] == "placeholder"
+    finder.cmd_mark(con, Namespace(grade="bullseye", **ns))
+    finder.cmd_mark(con, Namespace(grade=None, **ns))
+    assert con.execute(src, [pid]).fetchone()[0] == "human"
+    assert con.execute("SELECT grade FROM vw_llm_labels_latest WHERE posting_id = ?", [pid]).fetchone()[0] == "bullseye"
+    con.close()

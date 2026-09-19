@@ -67,7 +67,7 @@ The sweep above fills the database. The finder then works down it in ten steps. 
 | 4 | Screen | A rule engine (title, location or remote, pay floor, held clearance, level), then TF-IDF models: three lenses, `required` and `bullseye`. With a JD, the best lens score decides and a title-only reject is overturned. |
 | 5 | Coverage | Splits each survivor's JD into requirement lines and matches them to your evidence record. |
 | 6 | Second layer | Embeds the Required block of the high scorers and names the requirement line most likely to be unmet. |
-| 7 | LLM second judge | Planned. Must be scored blind against human-graded rows before it may move the rank. |
+| 7 | LLM second judge | Built, not run. Reads the full JD and a public-safe background document and makes a strict, independent Required-block call. Must be scored blind against human-graded rows before it may move the rank -- see below. |
 | 8 | Report | Every score visible, one Rank, one Why. |
 | 9 | Human review | You read the report and decide what to build and what to pass on. |
 | 10 | Feedback write-back | Every decision goes back into the database with a reason, and the models learn from it at the next retrain. |
@@ -79,6 +79,55 @@ Two rules keep the loop honest. Grade first, reveal second: a grade given before
 `finder.py mark` is how step 10 actually writes back. A plain `mark <target> pass --reason "logistics: not commutable"` still just records the decision. Adding `--reason "requirement: ..." --unmet "<the line, quoted from the JD>"` (repeatable) tells it a hard Required line was not met, which outranks the judge's own Required-block call everywhere that call is read, exactly the way a human lane grade already outranks the judge; `--reason "clearance: ..."` is an alias for `requirement`. `mark <target> build` writes a human required_fit of `meets` unless `--unmet` says otherwise. `--grade bullseye|adjacent|stretch|wrong` records a human lane grade through the same path as the golden feedback CSV import, and `--basis blind|seen` (default `seen`) records whether the grade was given before the machine scores were on screen. A whole review session can be applied at once with `finder.py mark --from-file decisions.csv` (columns: `posting,decision,reason,unmet,grade,basis`, `unmet` values joined with ` || `) -- the file is validated in full before anything is written, and one bad row aborts the whole file rather than applying part of it.
 
 Review feedback is top-heavy -- only postings that already ranked high get a human look, so it can measure precision at the top but never a miss (a good job buried lower, or wrongly screen-rejected). `finder.py feedback sheet --n 20 [--seed S] [--out PATH]` writes a small blind grading CSV once a month with NO rank, verdict, reason or flag on it: 8 rows from the top 50 by Rank, 6 from ranks 200-600, and 6 screen rejects with a JD (2 each whose reject reason is location, clearance or title, falling back to any reject when a bucket is short), shuffled, one row per posting per (employer, normalized title), excluding anything already graded or decided. Fill in `human_grade`, `required_fit`, `required_unmet`, `level_fit`, `note` by hand, then `finder.py feedback sheet-import PATH` writes the grades back through the same `report_feedback` path the golden-source CSV uses (`basis='blind'`), bridges any `required_fit` into `llm_labels` the same way `mark` does, and prints precision at the top, the miss rate in the 200-600 band, and the false-reject rate per rule bucket -- appended, timestamped, to `db/blind_sheet_history.jsonl`.
+
+### Gold-sheet ingest
+
+Hand-graded sheets accumulate outside the repo in several header shapes -- only the golden-source wide CSV
+above was ingestible before `finder.py feedback ingest PATH [PATH ...] [--manifest FILE] [--basis blind|seen]
+[--dry-run] [--accept-proposed]`. It detects the format from the header (case/whitespace/BOM-insensitive,
+tolerates and logs unknown extra columns), normalizes enum values through a logged alias table (`to_low` ->
+`too_low`, `stretch` -> `stretch_up`, `out_of_range` -> `out_of_reach` for `level_fit`; anything still outside
+the enum rejects that ROW only, with file/line/posting_id/value), and writes through the same
+`feedback.write_records` path the golden CSV and the blind sheet use. A narrow sheet (no `basis` column of
+its own) requires `--basis` or a manifest row's own `basis` -- there is no default, because blurring blind vs
+seen would defeat the whole point of the distinction (sprint plan §22.4). `--manifest FILE` reads a
+`path,basis,notes` CSV (paths relative to the manifest's own directory; see `docs/gold_manifest.example.csv`)
+so a full re-ingest is one command. When the same posting is graded more than once (across files in one run,
+or already in the DB), the later file's grade/level/note win, but a `required_fit` is never overwritten by a
+later row that lacks one, and a row's `basis` never moves from `blind` to `seen` or back -- a conflict is
+reported, not silently resolved. A file whose header carries `proposal_confidence` is a machine-drafted
+proposal, not a confirmed grading sheet, and is refused unless `--accept-proposed` is given. A derived
+train/frozen split (`half`/`baseline_judge_grade` columns) is never ingestible and is always refused. A
+single-lens (Applied-AI) grade sheet parses and validates for the `--dry-run` report but is never written
+live -- `llm_labels.lens_grade_source` is one flag for the whole row, not one per lens, so there is no way to
+record a human `grade_ai` today without either laundering an unasserted overall grade as human-adjudicated or
+overwriting an existing `required_fit`/other lens grade on the same posting; see `gold_ingest.ingest_f4`'s
+docstring for what schema change would fix it. `--dry-run` runs detection, normalization and precedence
+resolution against the DB and writes nothing.
+### The LLM second judge (§25) -- built, never called live from here
+
+`backend/finder/judge2.py` sends one narrow, strict prompt per posting: the Required lines (parsed by the
+existing requirement splitter, never re-parsed), the full JD (trimmed to a char cap, Required section
+preferred), and a background document -- by default the public, neutral lens descriptions already committed
+in `rubric.py` (`background="public"`), never anything from the gitignored personal rubric. A user-curated
+fact sheet can be used instead (`background="file"`, path from `JUDGE2_BACKGROUND_FILE`; copy
+`judge2_background.example.md` to the gitignored `judge2_background.local.md` and edit it). No posting_id
+semantics, URL, pay, score or first-judge output is ever sent -- the second judge judges independently.
+
+Every `unmet` line the model returns must be a verbatim substring of the JD text actually sent (checked after
+the same whitespace normalization used for description hashing, nothing looser); a line that fails is
+discarded, and a `fails` call with zero surviving quotes is downgraded to `partial`. `finder.py judge2 run
+--dry-run --show 3` builds and prints full payloads and a summary (postings, characters, estimated tokens,
+provider, model list) and calls nothing -- no API key needed. A real call additionally requires
+`JUDGE2_LIVE_OK=1` in the environment or `--i-have-approval`, on top of a dry run having already been read.
+
+Before it can move anything, `finder.py judge2 eval` scores it against `vw_report_feedback_blind` only (grade-
+first, reveal-second rows): it must catch at least 70% of the blind rows where the first judge said `meets`
+and a human found a disqualifying unmet requirement (a second-judge `fails` or `partial` both count as a
+catch), while agreeing (a second-judge `meets`, nothing softer) with at least 85% of the rows a human graded
+`meets`. Below the bar, or with fewer than 5 judged rows in either set, it ships as a visible "J2" report
+column only -- ONE Rank and ONE Why still come from human > second judge (once it clears the bar) > first
+judge > models, computed once in `vw_lens_fit` and read everywhere the rank is used.
 
 ## Supported platforms
 

@@ -1,0 +1,4 @@
+path,basis,notes
+golden/report_feedback_export.csv,,golden-source wide export (F1) -- basis is ignored, each row carries its own
+narrow/spot_check_wave1.csv,seen,spot-check sheet graded after seeing the report
+narrow/blind_wave_2026Q3.csv,blind,"monthly blind sheet with decoys, graded before any score was shown"

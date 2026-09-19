@@ -192,6 +192,17 @@ LENS 3 — APPLIED AI (grade_ai)
 - Judge the duties and the Required block, not the title; "AI" in a title is not evidence.
 """
 
+# Public-safe background for the second judge (backend/finder/judge2.py, sprint plan §25's default
+# `background="public"`). Captured into a PRIVATE module constant here, BEFORE the `rubric_local` star import
+# at the bottom of this file, so a real or fake `rubric_local` that happens to define a name like
+# `RUBRIC_LENS_PROCESS` cannot silently change what judge2's public payload sends -- the star import below can
+# only ever rebind the *names* `RUBRIC_LENS_PROCESS` etc. in this module's globals after this line has already
+# copied their values. judge2.py reads THIS constant, never the bare names, and never `RUBRIC_PERSONAL*`.
+# tests/test_judge2.py proves the immunity by monkeypatching the bare names after import and checking this
+# constant (and judge2's payload) are unaffected.
+JUDGE2_PUBLIC_BACKGROUND = RUBRIC_LENS_PROCESS + RUBRIC_LENS_TECHNICAL + RUBRIC_LENS_AI
+
+
 def rubric_version(extra: str = "") -> str:
     """Changes when any prompt text changes, so relabelled rows are distinguishable."""
     from . import requirements

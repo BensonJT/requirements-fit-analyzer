@@ -28,10 +28,16 @@ Usage:
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
     .venv/bin/python finder.py feedback sheet --n 20 [--seed S] [--out PATH]  # monthly blind sheet w/ decoys (§26)
     .venv/bin/python finder.py feedback sheet-import PATH                    # import it; basis='blind'
+    .venv/bin/python finder.py feedback ingest --manifest gold_manifest.csv  # ingest every gold sheet at once
+    .venv/bin/python finder.py feedback ingest PATH --basis seen [--dry-run] # one narrow/blind sheet
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
     .venv/bin/python finder.py retrain [--dry-run]             # weekly retrain, gated + ledgered (sprint plan §24)
     .venv/bin/python finder.py retrain --history               # print the model_runs ledger, newest first
+    .venv/bin/python finder.py judge2 run --dry-run --show 3    # print payloads, call nothing (sprint plan §25)
+    .venv/bin/python finder.py judge2 run --eval-set --i-have-approval   # judge the blind human-graded rows
+    .venv/bin/python finder.py judge2 eval                      # the §25 acceptance bar vs blind human rows
+    .venv/bin/python finder.py judge2 status                    # counts, discard/downgrade rates, last eval
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -503,6 +509,19 @@ def cmd_feedback(con, a):
     (any combination of --load/--agreement/--export, always in that order) -- or, with a nested
     `sheet` / `sheet-import` subcommand, the monthly blind sheet with decoys (sprint plan §26)."""
     action = getattr(a, "feedback_action", None)
+    if action == "ingest":
+        from backend.finder import gold_ingest
+        targets = []
+        if a.manifest:
+            for path, basis, _notes in gold_ingest.load_manifest(a.manifest):
+                targets.append((path, basis or a.basis))
+        for p in a.paths or []:
+            targets.append((p, a.basis))
+        if not targets:
+            print("feedback ingest: nothing to do -- give a PATH or --manifest")
+            sys.exit(1)
+        result = gold_ingest.ingest(con, targets, accept_proposed=a.accept_proposed, dry_run=a.dry_run)
+        sys.exit(0 if result["ok"] else 1)
     if action == "sheet":
         from backend.finder import blind_sheet
         blind_sheet.generate_sheet(con, n=a.n, seed=a.seed, out_path=a.out)
@@ -527,6 +546,27 @@ def cmd_retrain(con, a):
         retrain_mod.print_history(con)
         return
     retrain_mod.run(con, dry_run=a.dry_run)
+
+
+def cmd_judge2(con, a):
+    """The LLM second judge (sprint plan §25, backend/finder/judge2.py). `run` refuses to make a live call
+    without JUDGE2_LIVE_OK=1 or --i-have-approval; `--dry-run` never needs either."""
+    from backend.finder import judge2
+    if a.action == "status":
+        judge2.status(con, background=a.background, background_path=a.background_file)
+        return
+    if a.action == "eval":
+        judge2.evaluate(con, background=a.background, background_path=a.background_file)
+        return
+    # action == "run"
+    try:
+        result = judge2.run(con, top_n=a.top, dry_run=a.dry_run, force=a.force, show=a.show,
+                            background=a.background, background_path=a.background_file,
+                            only_blind=a.eval_set, i_have_approval=a.i_have_approval)
+    except RuntimeError as exc:
+        print(exc)
+        sys.exit(1)
+    print(result)
 
 
 def cmd_setup_check(con, a):
@@ -697,6 +737,19 @@ def main():
     fs.add_argument("--history", help="history JSONL path (default db/blind_sheet_history.jsonl)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet-import")
 
+    fs = fsub.add_parser("ingest", help="ingest gold-standard sheets in any of the vault's header formats")
+    fs.add_argument("paths", nargs="*", metavar="PATH", help="one or more gold-sheet CSVs")
+    fs.add_argument("--manifest", help="a path,basis,notes CSV listing every file to ingest in one run")
+    fs.add_argument("--basis", choices=MARK_BASIS_VALUES,
+                    help="required for a narrow (F2/F3) sheet with no basis column of its own, unless the "
+                         "manifest gives that file its own basis")
+    fs.add_argument("--accept-proposed", action="store_true",
+                    help="ingest a machine-drafted 'proposed required calls' file (header carries "
+                         "proposal_confidence) once the user has reviewed and confirmed it")
+    fs.add_argument("--dry-run", action="store_true",
+                    help="detect, normalize and resolve precedence against the DB; write nothing")
+    fs.set_defaults(func=cmd_feedback, feedback_action="ingest")
+
     s = sub.add_parser("retrain", parents=[common],
                        help="the weekly retrain, gated and ledgered (sprint plan §24)")
     s.add_argument("--dry-run", action="store_true",
@@ -704,6 +757,22 @@ def main():
                         "'dry-run'), promote and rescreen nothing")
     s.add_argument("--history", action="store_true", help="print the model_runs ledger, newest first")
     s.set_defaults(func=cmd_retrain)
+
+    s = sub.add_parser("judge2", parents=[common],
+                       help="LLM second judge on the Required block (sprint plan §25); never live without a go")
+    s.add_argument("action", choices=["run", "eval", "status"])
+    s.add_argument("--top", type=int, default=150, help="run: top N by rank_score (default 150)")
+    s.add_argument("--dry-run", action="store_true", help="run: build and print payloads, call nothing")
+    s.add_argument("--show", type=int, default=1, help="run --dry-run: how many full payloads to print")
+    s.add_argument("--force", action="store_true", help="run: re-review even if already reviewed at this hash")
+    s.add_argument("--eval-set", action="store_true",
+                   help="run: target exactly the blind human-graded rows (vw_report_feedback_blind), "
+                        "ignoring the top-N/decided/screen filters, so evaluate() has something to score")
+    s.add_argument("--background", choices=["public", "file"], default="public")
+    s.add_argument("--background-file", help="path for --background file (default $JUDGE2_BACKGROUND_FILE)")
+    s.add_argument("--i-have-approval", action="store_true",
+                   help="the other half of the live-call gate, alongside JUDGE2_LIVE_OK=1")
+    s.set_defaults(func=cmd_judge2)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

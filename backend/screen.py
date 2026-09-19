@@ -456,7 +456,7 @@ def is_commutable(job: Listing) -> bool:
 _RESIDENCE_TRIGGER_RES = (
     re.compile(r"must\s+(?:live|reside|be\s+located|be\s+based)\s+(?:in|within|near)", re.I),
     re.compile(r"within\s+\d+\s*(?:miles?|mi\.?)\s+of", re.I),
-    re.compile(r"commutable\s+distance\s+(?:to|of)", re.I),
+    re.compile(r"commut(?:able|ing)\s+distance\s+(?:to|of)", re.I),
     re.compile(r"remote\s+(?:in|within|from)\s+the\s+following\s+(?:states|locations)", re.I),
     re.compile(r"eligible\s+(?:states|locations)\b", re.I),
     re.compile(r"\bhub\s+(?:city|cities|office|offices|location|locations)\b", re.I),
@@ -466,9 +466,13 @@ _RESIDENCE_TRIGGER_RES = (
 # restriction on its own; see _RESIDENCE_OPTION_RE below, which excludes that shape outright.
 _RESIDENCE_HUB_OBLIGATION_RE = re.compile(r"\b(?:must|required|require)\b", re.I)
 
-# Exclusions -- false-reject guards found 9/19: a pay-transparency clause naming a location for
-# comp-band purposes, a "states we cannot hire in" (exclude) list, an office list offered as an
-# alternative, and time-zone wording phrased as merely "preferred".
+# Exclusions -- false-reject guards found 9/19 and in the 9/20 dry-run audit (§23 rework):
+# a pay-transparency clause naming a location for comp-band purposes, a "states we cannot hire in"
+# (exclude) list, an office list offered as an alternative, time-zone wording phrased as merely
+# "preferred", a conditional clause that binds only people who already meet it ("if you live within
+# 50 miles of..."), an outright preference ("preference will be given to candidates residing
+# within..."), and a "state where <employer> has a registered entity" boilerplate line that covers
+# most of the country and names no real place.
 _RESIDENCE_PAY_TRANSPARENCY_RE = re.compile(
     r"for\s+(?:the\s+location\s+of|candidates?\s+(?:located|based)\s+in|employees?\s+(?:located|based)\s+in)",
     re.I)
@@ -479,48 +483,126 @@ _RESIDENCE_OPTION_RE = re.compile(
     r"\bor\s+work\s+from\s+(?:any\s+of\s+|one\s+of\s+)?(?:our\s+|the\s+)?offices?\b|"
     r"\bwork\s+from\s+any\s+of\s+our\s+offices\b", re.I)
 _RESIDENCE_TIMEZONE_PREFERRED_RE = re.compile(r"time\s*zone.{0,30}\bpreferred\b|\bpreferred\b.{0,30}time\s*zone", re.I)
+# A sentence that opens on a condition ("If you live within...", "If employees are within...", "For
+# those who live within...") imposes nothing on someone who does NOT meet the condition -- it is a
+# perk/hybrid-cadence clause, not a residence gate. Anchored to the start of the sentence, not a
+# search anywhere in it, so it never eats an unrelated "if" deep in an unconditional restriction.
+_RESIDENCE_CONDITIONAL_RE = re.compile(
+    r"^\s*if\s+(?:you|employees?|candidates?|team\s+members?)\b|"
+    r"^\s*for\s+those\s+who\b|^\s*(?:employees?|candidates?)\s+who\b", re.I)
+_RESIDENCE_PREFERENCE_RE = re.compile(
+    r"preference\s+(?:will\s+be|is)\s+given|\bpreferred\b|\bideally\b|\ba\s+plus\b", re.I)
+_RESIDENCE_REGISTERED_ENTITY_RE = re.compile(
+    r"state\s+where\b.{0,80}?\b(?:has|is)\b.{0,30}?\b(?:registered|legal)\s+entity\b", re.I)
 _RESIDENCE_EXCLUSION_RES = (_RESIDENCE_PAY_TRANSPARENCY_RE, _RESIDENCE_CANNOT_HIRE_RE, _RESIDENCE_OPTION_RE,
-                            _RESIDENCE_TIMEZONE_PREFERRED_RE, *_REMOTE_BOILERPLATE_RES)
+                            _RESIDENCE_TIMEZONE_PREFERRED_RE, _RESIDENCE_CONDITIONAL_RE, _RESIDENCE_PREFERENCE_RE,
+                            _RESIDENCE_REGISTERED_ENTITY_RE, *_REMOTE_BOILERPLATE_RES)
 
 # Generic words that show up in the tail of a restriction sentence but never name a place -- filtered out
 # of the extracted place list ("one of our hubs: A, B, C" -> "A, B, C", not "one of our hubs A B C").
+# Deliberately does NOT include "state(s)" -- a lone "United States" fragment must still read as a whole
+# country phrase (see _RESIDENCE_COUNTRY_RE), not get shredded into the meaningless leftover "United".
 _RESIDENCE_FILLER_WORDS = {
     "one", "of", "our", "the", "a", "an", "these", "those", "following", "hub", "hubs", "office",
-    "offices", "location", "locations", "state", "states", "and", "or", "must", "be", "in", "within",
-    "near", "distance", "to", "commutable", "commuting", "miles", "mi", "eligible", "based", "live",
-    "reside", "residing", "located", "headquarters", "hq", "area", "region", "vicinity", "team", "company",
+    "offices", "location", "locations", "and", "or", "must", "be", "in", "within", "near", "distance",
+    "to", "commutable", "commuting", "miles", "mi", "eligible", "based", "live", "reside", "residing",
+    "located", "headquarters", "hq", "area", "region", "vicinity", "team", "company",
 }
+# A bare country reference -- never a place a residence rule can act on. "Canada" is included
+# unconditionally (the 9/19 ruling: never reject on it) rather than only "when listed beside the US".
+_RESIDENCE_COUNTRY_RE = re.compile(
+    r"^(?:the\s+)?(?:united\s+states(?:\s+of\s+america)?|u\.?s\.?a?\.?|america|canada)$", re.I)
+# "US Citizen(ship)" is eligibility-to-work boilerplate that regularly rides along with a country
+# mention ("...within the United States and US Citizen") -- stripped before splitting so it never
+# survives as a bogus non-country candidate that would turn a country-only sentence into 'unclear'.
+_RESIDENCE_CITIZENSHIP_RE = re.compile(r"\b(?:u\.?s\.?a?\.?)\s+citizen(?:ship)?\b", re.I)
 
 
-def _split_or_and(text: str) -> list:
-    return re.split(r"\s*;\s*|\s+(?:or|and)\s+", text)
+def _split_places_delims(text: str) -> list:
+    return re.split(r"\s*;\s*|\s+(?:or|and)\s+|\s*/\s*", text)
 
 
-def _extract_places(tail: str) -> list:
-    """Named places in the tail of a residence-restriction sentence (the text from the trigger phrase
-    to the end of the sentence). A colon introduces the list when present ("hubs: Austin, TX; Denver,
-    CO"); a "City, ST" pair is kept whole so the state stays pinned to its own city, while a bare list
-    of names/states ("Texas, Colorado, Arizona") is split on commas."""
+def _clean_words(text: str) -> str:
+    text = re.sub(r"[’']s\b", "", text)   # drop a possessive ("McKesson's" -> "McKesson")
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z.]*", text) if w.lower() not in _RESIDENCE_FILLER_WORDS]
+    return " ".join(words).strip()
+
+
+def _leading_state(text: str):
+    """The state name/code `text` STARTS with, or None -- used to pair a city with a state that runs
+    on into the rest of the sentence with no comma to delimit it ("Irving, TX will be required to be
+    onsite...": the comma-split part after "Irving" is "TX will be required...", not a bare "TX")."""
+    text = text.strip()
+    m = re.match(r"^([A-Za-z]{2})\b", text)
+    if m and m.group(1).upper() in _STATES:
+        return m.group(1).upper()
+    m = _STATE_NAME_RE.match(text)
+    return m.group(1) if m else None
+
+
+def _candidate_places(tail: str) -> tuple:
+    """Raw place-shaped candidates in the tail of a residence-restriction sentence (the text from
+    the trigger phrase to the end of the sentence, capped at ~200 chars), before validation. Returns
+    (candidates, saw_country): `saw_country` is True when at least one segment was a bare country
+    reference (dropped, not a candidate) -- the caller uses it to tell "just a country, no real
+    restriction" (kind 'none') apart from "named something, but nothing validates" (kind 'unclear').
+
+    A colon introduces the list when present ("hubs: Austin, TX; Denver, CO", discarding whatever
+    came before the colon -- a country-prefixed lead-in like "the United States: Rhode Island, ..."
+    must not swallow the real list that follows). A "City, ST" pair is kept whole so the state stays
+    pinned to its own city. A comma list that alternates city/state without "and"/"or" between pairs
+    ("Windsor, CT, Boston, MA") is walked pairwise: a token immediately followed by a real state name
+    or code is paired with it; anything left over is a candidate on its own (validated, or not, by
+    the caller)."""
     if ":" in tail:
         tail = tail.split(":", 1)[1]
-    tail = re.sub(r"\(.*?\)", "", tail).strip(" .")
+    tail = _RESIDENCE_CITIZENSHIP_RE.sub(" ", tail)
+    tail = re.sub(r"\(.*?\)", "", tail).strip(" .")[:200]
     if not tail:
-        return []
-    places = []
-    for segment in _split_or_and(tail):
+        return [], False
+    candidates, saw_country = [], False
+    for segment in _split_places_delims(tail):
         segment = segment.strip(" .")
         if not segment:
             continue
+        if _RESIDENCE_COUNTRY_RE.match(segment):
+            saw_country = True
+            continue
         m = re.match(r"^(.+?),\s*([A-Za-z]{2})$", segment)
         if m and m.group(2).upper() in _STATES:
-            places.append(segment)
+            city = _clean_words(m.group(1))
+            candidates.append(f"{city}, {m.group(2).upper()}" if city else segment.strip())
             continue
-        for part in segment.split(","):
-            words = [w for w in re.findall(r"[A-Za-z][A-Za-z.]*", part) if w.lower() not in _RESIDENCE_FILLER_WORDS]
-            cleaned = " ".join(words).strip()
-            if cleaned:
-                places.append(cleaned)
-    return places
+        parts = [p.strip() for p in segment.split(",")]
+        i = 0
+        while i < len(parts):
+            cur = _clean_words(parts[i])
+            nxt = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            # `cur` pairs with a following state name/code as its own suffix only when `cur` is not
+            # ALREADY a state itself -- "Rhode Island, Vermont" is two independent states in a list,
+            # not a city named "Rhode Island" in the state of Vermont; "Austin, Texas" is a real pair.
+            cur_is_state = cur.lower() in _STATE_BY_NAME or cur.upper() in _STATES
+            st = None if cur_is_state else _leading_state(nxt)
+            if cur and st:
+                candidates.append(f"{cur}, {st}")
+                i += 2
+                continue
+            if cur:
+                if _RESIDENCE_COUNTRY_RE.match(cur):
+                    saw_country = True
+                else:
+                    candidates.append(cur)
+            i += 1
+    return candidates, saw_country
+
+
+def _validate_place(candidate: str) -> bool:
+    """A candidate counts as a real place only if it validates: a US state name or code (anywhere in
+    it -- covers a bare state and a "City, ST" pair alike), or a token `place_matches` finds in
+    P.COMMUTABLE_PLACES. Anything else (a bare city with no state, a stray boilerplate fragment, a
+    marketing sentence a trigger accidentally swallowed) is dropped -- the rule would rather flag it
+    `unclear` than reject on a place it cannot actually confirm."""
+    return bool(states_in(candidate)) or bool(place_matches(candidate, P.COMMUTABLE_PLACES))
 
 
 def residence_restriction(text: str) -> tuple:
@@ -530,12 +612,15 @@ def residence_restriction(text: str) -> tuple:
     "City, ST" case to pin a two-letter state code, which a lowercased "st" can never match.
 
     Returns (kind, places, phrase):
-        'none'   -- no restriction language found; (places=[], phrase=None).
-        'places' -- a parseable list of required places; `places` holds them, `phrase` is the
-                    triggering sentence (quoted in the Why when it does not resolve to a pass).
-        'unclear' -- restriction language with no parseable place list; `phrase` is the sentence,
-                     quoted verbatim so the user can verify -- never a reject (same pass-through
-                     principle as `clearance_call`'s ambiguous verdict).
+        'none'    -- no restriction language found, or the only place-shaped text was a bare country
+                     reference ("must reside in the United States"); (places=[], phrase=None or the
+                     line, respectively -- screen() only acts on 'places'/'unclear').
+        'places'  -- at least one candidate VALIDATES (a real state name/code, or a configured
+                     commutable place); `places` holds only the validated ones, `phrase` is the
+                     triggering sentence (quoted in the Why when it does not resolve to a pass).
+        'unclear' -- restriction language whose candidates (if any) all fail validation; `phrase` is
+                     the sentence, quoted verbatim so the user can verify -- never a reject (same
+                     pass-through principle as `clearance_call`'s ambiguous verdict).
     """
     for sentence in re.split(r"[\n.]+", text or ""):
         line = sentence.strip()
@@ -557,10 +642,13 @@ def residence_restriction(text: str) -> tuple:
         # sentence ("within 50 miles of") wins over a broader one earlier in it ("must live within"),
         # keeping the extracted tail free of the words between them.
         anchor = max(matches, key=lambda m: m.end())
-        places = _extract_places(line[anchor.end():])
+        candidates, saw_country = _candidate_places(line[anchor.end():])
+        places = [c for c in candidates if _validate_place(c)]
         if places:
-            return "places", places, line
-        return "unclear", [], line
+            return "places", places, line[:200]
+        if saw_country and not candidates:
+            return "none", [], None   # a bare country mention names no place at all
+        return "unclear", [], line[:200]
     return "none", [], None
 
 
@@ -667,7 +755,7 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
             if not matched:
                 reasons.append(f"remote restricted to: {', '.join(places)}")
         elif kind == "unclear":
-            flags.append(f'remote-residence-check ("{phrase}")')
+            flags.append(f'remote-residence-check ("{(phrase or "")[:140]}")')
 
     # 8. Mission signal
     if _has(f"{company} {desc}", P.FAITH_SIGNALS):

@@ -175,8 +175,17 @@ def cross_validate(texts: list, y: list, w: list, *, C: float, min_df: int, ngra
 
 
 def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_features: int = 50_000, cv: int = 5,
-          seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, lens=None, log=print) -> dict:
-    """Cross-validates, fits on all labels, saves db/models/<version>.joblib and inserts a `models` row.
+          seed: int = 7, max_df: float = 0.5, model_dir: Optional[str] = None, insert_row: bool = True,
+          lens=None, log=print) -> dict:
+    """Cross-validates, fits on all labels, saves <model_dir or MODEL_DIR>/<version>.joblib and, when
+    `insert_row` (default True), inserts a `models` row for it immediately.
+
+    `insert_row=False` is `finder.py retrain`'s candidate path (sprint plan §24): pass a `model_dir` that is
+    a fresh tempdir on the SAME filesystem as MODEL_DIR so the joblib lands there instead of overwriting the
+    live artifact, and the `models` row is withheld until the caller's promotion gate passes and calls
+    `promote_artifact` (atomic rename into MODEL_DIR) + `write_model_row` (the same INSERT this function
+    would otherwise have run itself) -- a failed candidate is simply deleted, and the live model + its row
+    are never touched.
 
     `lens` ('process' | 'technical' | 'ai') trains that lens's model and stores it under its own `kind`, so the
     three coexist and `latest_model` can ask for one by name. `lens="required"` (REQUIRED_MODEL) runs through
@@ -245,15 +254,17 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
     # (load_latest resolves it back to the same absolute path via os.path.join, so this is a no-op for callers).
     stored_path = os.path.relpath(path, REPO_ROOT)
     kind = f"tfidf_lr_{lens}" if lens else "tfidf_lr"
-    con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, "
-                "cv_precision_at_20, path, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [version, kind, _now(), n_pos, n_neg, cvr["auc"], cvr["precision_at_20"], stored_path,
-                 json.dumps(notes)])
+    trained_at = _now()
+    if insert_row:
+        write_model_row(con, version=version, kind=kind, trained_at=trained_at, n_pos=n_pos, n_neg=n_neg,
+                        cv_auc=cvr["auc"], cv_precision_at_20=cvr["precision_at_20"], stored_path=stored_path,
+                        notes=notes)
 
     in_sample = clf.predict_proba(vec.transform(texts[:n_jobs]))[:, 1]
     source_gap = _source_gap(con, rows, oof, pairs)
     result = {
-        "model_version": version, "path": path, "n_pos": n_pos, "n_neg": n_neg,
+        "model_version": version, "path": path, "stored_path": stored_path, "kind": kind,
+        "trained_at": trained_at, "notes": notes, "n_pos": n_pos, "n_neg": n_neg,
         "cv_auc": cvr["auc"], "cv_precision_at_20": cvr["precision_at_20"], "oof_auc": _auc(y_jobs, oof_jobs),
         "source_gap": source_gap, "coefficients": _extreme_terms(vec, clf),
         "confusion_at_0_5": confusion, "pos_mean_fit_oof": float(oof_jobs[y_jobs == 1].mean()),
@@ -282,6 +293,29 @@ def train(con, *, C: float = 4.0, min_df: int = 3, ngram: tuple = (1, 2), max_fe
                 f"`{gr}` {_fmt(g.get(f'auc_vs_{gr}'))} (graded positives only: "
                 f"{_fmt(result['grades_graded_only'].get(f'auc_vs_{gr}'))})" for gr in present))
     return result
+
+
+def write_model_row(con, *, version: str, kind: str, trained_at, n_pos: int, n_neg: int, cv_auc, cv_precision_at_20,
+                    stored_path: str, notes: dict) -> None:
+    """The `models` INSERT `train()` runs itself when `insert_row=True` -- pulled out so `finder.py retrain`
+    can run it a second time, later, once a candidate trained with `insert_row=False` clears its promotion
+    gate (see `train`'s docstring and `promote_artifact`)."""
+    con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, "
+                "cv_precision_at_20, path, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [version, kind, trained_at, n_pos, n_neg, cv_auc, cv_precision_at_20, stored_path,
+                 json.dumps(notes)])
+
+
+def promote_artifact(candidate_path: str, model_dir: Optional[str] = None) -> str:
+    """Atomically renames a candidate joblib -- written by `train(..., model_dir=<tempdir>, insert_row=False)`
+    -- into the live model directory (MODEL_DIR by default), returning the repo-relative path `write_model_row`
+    expects. `os.replace` is atomic on the same filesystem, which is why the candidate's tempdir must be
+    created under MODEL_DIR (`tempfile.mkdtemp(dir=features.MODEL_DIR, ...)`), not the platform temp dir."""
+    folder = model_dir or MODEL_DIR
+    os.makedirs(folder, exist_ok=True)
+    final_path = os.path.join(folder, os.path.basename(candidate_path))
+    os.replace(candidate_path, final_path)
+    return os.path.relpath(final_path, REPO_ROOT)
 
 
 def _text_group_ids(rows: list) -> list:

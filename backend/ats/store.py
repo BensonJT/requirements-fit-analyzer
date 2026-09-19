@@ -26,7 +26,10 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 16  # v16 (2026-09-19): report_feedback.required_fit / required_unmet -- `finder.py mark`'s
+SCHEMA_VERSION = 17  # v17 (2026-09-19): model_runs table -- the `finder.py retrain` ledger (sprint plan §24).
+                     #                  Additive only (new table, CREATE IF NOT EXISTS below is enough, no
+                     #                  migration function needed, same as the v2 -> v3 note below);
+                     # v16 (2026-09-19): report_feedback.required_fit / required_unmet -- `finder.py mark`'s
                      #                  `--unmet` (sprint plan §22.3, Gap 2). Lets a human Required call
                      #                  (`pass --reason "requirement: ..." --unmet "..."` or a `build`) sit
                      #                  beside the CSV import's human_grade/level_fit on the SAME golden-source
@@ -210,6 +213,19 @@ CREATE TABLE IF NOT EXISTS models (
     model_version VARCHAR PRIMARY KEY, kind VARCHAR NOT NULL,  -- tfidf_lr | embed_centroid
     trained_at TIMESTAMP NOT NULL, n_pos INTEGER, n_neg INTEGER, cv_auc DOUBLE, cv_precision_at_20 DOUBLE,
     embed_lo DOUBLE, embed_hi DOUBLE, path VARCHAR, notes VARCHAR
+);
+
+-- The `finder.py retrain` ledger (sprint plan §24): one row per model per retrain run, promoted or not, so
+-- "did last week's feedback help" is answerable without re-reading logs. `model` is one of the five step-4
+-- TF-IDF models (process | technical | ai | required | bullseye) or required_embed. `auc` / `shuffle_auc` are
+-- the employer-grouped held-out AUC and its shuffled-label sanity check (features.employer_grouped_auc for
+-- the five TF-IDF models; required_embed's own stack AUC / shuffled sanity AUC for required_embed, since it
+-- already computes and gates on those itself -- see backend/finder/retrain.py). `reason` names the gate that
+-- passed or failed, with the actual numbers, or 'dry-run'.
+CREATE TABLE IF NOT EXISTS model_runs (
+    run_id VARCHAR PRIMARY KEY, model VARCHAR NOT NULL, trained_at TIMESTAMP NOT NULL,
+    n_pos INTEGER, n_neg INTEGER, auc DOUBLE, shuffle_auc DOUBLE,
+    promoted BOOLEAN NOT NULL, reason VARCHAR, model_version VARCHAR
 );
 
 -- Jobs_Found files already read back for decisions (re-read only when mtime changes).

@@ -1266,6 +1266,228 @@ def test_screen_row_rtx_style_enumeration_still_rejects_when_not_commutable():
     assert "not remote and outside the commute area (per listing)" in rec.reasons
 
 
+# ---------------------------------------------------------------- §23: residence-restricted remote
+def _remote_row(desc: str, **kw):
+    kw.setdefault("workplace_type", "remote")
+    return _row(location_primary="Remote - USA", description_text=desc, **kw)
+
+
+def test_residence_restriction_hub_list_rejects_when_none_commutable():
+    """Acceptance (a): a hub restriction naming no commutable place rejects."""
+    desc = ("This role is remote but must be located within commuting distance of one of our hubs: "
+            "Austin, TX; Denver, CO.")
+    assert S.residence_restriction(desc)[0] == "places"
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+    assert any(r.startswith("remote restricted to:") and "Austin, TX" in r and "Denver, CO" in r
+               for r in rec.reasons)
+
+
+def test_residence_restriction_passes_when_a_hub_is_commutable():
+    desc = ("This role is remote but must be located within commuting distance of one of our hubs: "
+            "Springfield, IL; Denver, CO.")
+    rec = rules.screen_row(_remote_row(desc))
+    assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+    assert rec.verdict != "reject"
+
+
+def test_residence_restriction_state_list_rejects_when_none_match_home_state():
+    desc = "This role is remote within the following states: Texas, Colorado, Arizona."
+    rec = rules.screen_row(_remote_row(desc))
+    assert any(r.startswith("remote restricted to:") for r in rec.reasons)
+    assert rec.verdict == "reject"
+
+
+def test_residence_restriction_state_list_passes_on_home_state_match():
+    desc = "This role is remote within the following states: Illinois, Indiana, Wisconsin."
+    rec = rules.screen_row(_remote_row(desc))
+    assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+
+
+def test_residence_restriction_within_n_miles_trigger():
+    desc = "Employees must live within 50 miles of Austin, TX or Denver, CO."
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "places" and places == ["Austin, TX", "Denver, CO"]
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+
+
+def test_residence_restriction_eligible_states_trigger():
+    desc = "Eligible states: Texas, Colorado, Arizona."
+    rec = rules.screen_row(_remote_row(desc))
+    assert any(r.startswith("remote restricted to:") for r in rec.reasons)
+
+
+def test_residence_restriction_unclear_flags_without_rejecting():
+    """Restriction language with no parseable place list flags, quoted, and never rejects -- same
+    pass-through principle as clearance_call's ambiguous verdict."""
+    desc = "This role must be based within commuting distance of our headquarters."
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "unclear" and places == [] and phrase
+    rec = rules.screen_row(_remote_row(desc))
+    assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+    flags = [f for f in rec.flags if f.startswith("remote-residence-check")]
+    assert flags and "headquarters" in flags[0]
+    assert rec.verdict != "reject"
+
+
+def test_residence_restriction_none_when_no_restriction_language():
+    assert S.residence_restriction("This role is fully remote, work from anywhere in the US.")[0] == "none"
+    assert S.residence_restriction("")[0] == "none"
+
+
+def test_residence_restriction_only_applies_when_read_as_remote():
+    """An on-site posting is already handled by the commute rule -- the residence rule must not add
+    its own reason on top of it."""
+    row = _row(location_primary="Austin, TX", workplace_type="onsite",
+              description_text=("This role must be located within commuting distance of one of our "
+                                 "hubs: Austin, TX; Denver, CO."))
+    rec = rules.screen_row(row)
+    assert "not remote and outside the commute area (per listing)" in rec.reasons
+    assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+
+
+# ---- exclusions: false-reject guards (§23 "what must NOT trigger it")
+def test_residence_restriction_excludes_pay_transparency_clause():
+    desc = ("For candidates located in the following states, the range differs: must be based within "
+            "commuting distance of Denver, CO for local comp-band eligibility.")
+    assert S.residence_restriction(desc)[0] == "none"
+
+
+def test_residence_restriction_excludes_cannot_hire_list():
+    """A 'states where we cannot hire' exclusion list must not be read as an inclusion requirement,
+    even when it sits in the same sentence as a genuine eligible-states phrase."""
+    desc = ("We are unable to hire in several states, but our eligible states are: California, New "
+            "York, Washington.")
+    assert S.residence_restriction(desc)[0] == "none"
+
+
+def test_residence_restriction_excludes_office_list_offered_as_option():
+    """Acceptance (b): an office list offered as an alternative ('or work from any of our offices'),
+    even one that includes a commutable city, is not a restriction and must still pass."""
+    desc = ("This role is remote but must be located within commuting distance of one of our hub "
+            "offices, or work from any of our offices in Austin, Denver, or Chicago.")
+    assert S.residence_restriction(desc)[0] == "none"
+    rec = rules.screen_row(_remote_row(desc))
+    assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+    assert rec.verdict != "reject"
+
+
+def test_residence_restriction_excludes_eeo_boilerplate():
+    desc = ("Reasonable accommodation will be provided; must be based within commuting distance of "
+            "our office in Cupertino.")
+    assert S.residence_restriction(desc)[0] == "none"
+
+
+def test_residence_restriction_excludes_preferred_timezone_language():
+    desc = "Must be located within the Pacific time zone (preferred)."
+    assert S.residence_restriction(desc)[0] == "none"
+
+
+def test_residence_restriction_bare_hub_list_with_no_obligation_word_is_not_a_trigger():
+    desc = "You may choose any of our hub offices: Austin, Denver, or Chicago."
+    assert S.residence_restriction(desc)[0] == "none"
+
+
+# ---- §23 rework (9/20 dry-run audit): the ~8/49 false rejects and the ROOT FIX (validated places only)
+def test_residence_restriction_country_only_is_none_not_a_reject():
+    """Case 1: a bare country reference names no place at all -- kind 'none', never a reject, even
+    when it rides along with unrelated eligibility-to-work boilerplate ('US Citizen')."""
+    for desc in ("Applicants must reside in the United States.",
+                 "Employees must be based in the United States.",
+                 "Candidates must be located within the United States and US Citizen."):
+        assert S.residence_restriction(desc) == ("none", [], None), desc
+        rec = rules.screen_row(_remote_row(desc))
+        assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+        assert rec.verdict != "reject"
+
+
+def test_residence_restriction_country_prefix_before_colon_does_not_swallow_the_real_list():
+    """The country mention before the colon must not turn the sentence into 'none' -- the list after
+    the colon is the actual restriction and must still be read (and reject when none of its states
+    is commutable or the home state)."""
+    desc = "Must reside in the United States: Rhode Island, Vermont or Arizona."
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "places" and places == ["Rhode Island", "Vermont", "Arizona"]
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+    assert any(r.startswith("remote restricted to:") for r in rec.reasons)
+
+
+def test_residence_restriction_registered_entity_boilerplate_is_none():
+    """Case 2: 'a state where <employer> has a registered entity' is company boilerplate covering
+    most of the country and names no real place -- must not reject."""
+    desc = "You must live in a state where Denimwear Holdings, Inc has a registered entity."
+    assert S.residence_restriction(desc)[0] == "none"
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict != "reject"
+
+
+def test_residence_restriction_conditional_clause_is_none():
+    """Case 3: a sentence that opens on a condition binds only people who already meet it -- it is a
+    hybrid-cadence/perk clause, not a residence gate."""
+    for desc in (
+            "If you live within 50 miles of one of our hub locations, the expectation is twice a "
+            "week in office.",
+            "If you are within 50 miles of Denver, Austin or Chicago you will be required to work a "
+            "hybrid schedule.",
+            "For those who live within commuting distance of Denver, CO, a hybrid schedule applies."):
+        assert S.residence_restriction(desc)[0] == "none", desc
+
+
+def test_residence_restriction_preference_language_is_none():
+    """Case 4: a preference, not a requirement -- 'preference will be given', 'preferred', 'ideally',
+    'a plus' must never turn into a reject."""
+    for desc in ("Preference will be given to candidates residing within 50 miles of Denver, CO.",
+                 "Living within 50 miles of Austin, TX is preferred but not required.",
+                 "Ideally the candidate would live within 50 miles of Denver, CO."):
+        assert S.residence_restriction(desc)[0] == "none", desc
+
+
+def test_residence_restriction_garbage_sentence_is_unclear_not_a_reject():
+    """Case 5: a trigger phrase that accidentally lands in a marketing sentence or unrelated
+    boilerplate must not manufacture a fake place list -- unclear at most."""
+    for desc in (
+            "This is Acme Retail, a leading force in omnichannel merchandising, delivering joy "
+            "nationwide, must be located within our growth footprint.",
+            "Denimwear Co listed on the exchange this year, must be located within our growth "
+            "footprint."):
+        kind, places, phrase = S.residence_restriction(desc)
+        assert kind in ("none", "unclear"), desc
+        assert places == []
+        rec = rules.screen_row(_remote_row(desc))
+        assert rec.verdict != "reject"
+
+
+def test_residence_restriction_validated_true_positives_still_reject_or_stay_unclear():
+    """The ROOT FIX must not swallow real restrictions: a multi-city/state list with no
+    and/or between pairs still reads correctly and still rejects; a bare city with no state
+    validates as 'unclear' (acceptable per the rework), never silently passed as a real match."""
+    desc = ("Applicants must be within a reasonable commuting distance of an office in Windsor, CT, "
+            "Boston, MA, New York/New Jersey.")
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "places" and places == ["Windsor, CT", "Boston, MA", "New York", "New Jersey"]
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+
+    bare_city = "Hybrid role, must live near Fictionville office."
+    assert S.residence_restriction(bare_city)[0] == "unclear"
+
+    shipyard = "Applicants must be within commutable distance to Fiction Naval Shipyard."
+    assert S.residence_restriction(shipyard)[0] == "unclear"
+
+
+def test_residence_restriction_flag_text_is_short():
+    desc = "Applicants must be within commutable distance to Fiction Naval Shipyard."
+    rec = rules.screen_row(_remote_row(desc))
+    flags = [f for f in rec.flags if f.startswith("remote-residence-check")]
+    assert flags and flags[0] == f'remote-residence-check ("{desc.rstrip(".")}")'
+    long_desc = "Applicants must be within commutable distance to " + "Fictionville " * 30 + "office"
+    long_rec = rules.screen_row(_remote_row(long_desc))
+    long_flags = [f for f in long_rec.flags if f.startswith("remote-residence-check")]
+    assert long_flags and len(long_flags[0]) < 170
+
+
 def test_non_us_rule():
     assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]
     assert rules.non_us_rule(None, ["India - Hyderabad"])[0] == ["outside the US (india)"]
@@ -2731,3 +2953,14 @@ def test_rank_score_is_the_one_ordering_and_rank_why_names_the_deciding_facts(tm
     assert why["weak"].startswith("no strong lens")
     assert [x[0] for x in report.top_rows(con, "apply")][:2] == ["bulladj", "stretchup"]       # 87.5 then 85: ordered by the one rank
     con.close()
+
+
+def test_residence_restriction_distance_duty_on_nearby_people_is_not_a_restriction():
+    """An office duty for people who happen to live near an office restricts nobody who lives elsewhere."""
+    assert S.residence_restriction("Candidates that reside within 50 miles of Plano, TX will be required "
+                                   "to be onsite 2 days per week")[0] == "none"
+    assert S.residence_restriction("This role follows a hybrid model for candidates within commuting distance "
+                                   "of the Plano, TX headquarters")[0] == "none"
+    kind, places, _ = S.residence_restriction("Candidates must reside within commuting distance of our office "
+                                              "in Plano, TX")
+    assert kind == "places" and any("TX" in p for p in places)

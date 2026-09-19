@@ -577,8 +577,13 @@ def listing_from_row(row: dict) -> S.Listing:
     if not isinstance(locs, list):
         locs = []
     posted = row.get("posted_at")
+    # screen.py's federal-title rule (section 2) only fires when job.source == "USAJobs" -- true for
+    # sweep.py's older aggregator Listings, never for an ATS-direct row otherwise (source was a flat
+    # "ats" regardless of platform). The USAJobs ATS adapter (backend/ats/adapters.py) needs that rule
+    # reachable, so this is the one narrow exception.
+    source = "USAJobs" if row.get("platform") == "usajobs" else "ats"
     return S.Listing(
-        source="ats", search_pass=row.get("platform") or "", title=row.get("title") or "",
+        source=source, search_pass=row.get("platform") or "", title=row.get("title") or "",
         company=row.get("employer") or "", location=row.get("location_primary") or "", url=row.get("url") or "",
         posted_at=str(posted) if posted else None, description=row.get("description_text") or "",
         salary_min=row.get("pay_min"), salary_max=row.get("pay_max"), salary_predicted=False,

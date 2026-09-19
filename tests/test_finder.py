@@ -54,6 +54,32 @@ def test_listing_from_row():
     assert rules.listing_from_row(_row(locations="not json")).locations == []
 
 
+def test_listing_from_row_flags_usajobs_source_for_the_federal_title_rule():
+    """screen.py's federal-title rule (section 2) only fires when Listing.source == 'USAJobs' --
+    true for sweep.py's older aggregator rows, and now also for the ATS-direct usajobs adapter's
+    rows, platform-gated so every other ATS-direct row keeps the flat 'ats' source."""
+    assert rules.listing_from_row(_row(platform="usajobs")).source == "USAJobs"
+    assert rules.listing_from_row(_row(platform="greenhouse")).source == "ats"
+
+
+def test_screen_row_passes_a_usajobs_shaped_row_via_the_federal_title_rule():
+    """A USAJobs title rarely carries the function (backend/profile.py's FEDERAL_FUNCTION_TITLES
+    comment), so the row only survives when the duties do -- this is the adapter's whole point:
+    the search API's full text is what makes this rule reachable at all."""
+    row = _row(platform="usajobs", employer="U.S. Government (USAJobs)", title="Program Analyst",
+               description_text="Leads process improvement initiatives across the agency.")
+    rec = rules.screen_row(row)
+    assert any("federal analyst title" in f for f in rec.flags)
+    assert "off-function title" not in rec.reasons
+    assert rec.verdict != "reject"
+
+    # The same title/duties on a non-USAJobs platform gets no such pass -- proves the rule is
+    # platform-gated through source, not accidentally satisfied by title/desc alone.
+    other = rules.screen_row(_row(platform="greenhouse", title="Program Analyst",
+                                  description_text="Leads process improvement initiatives across the agency."))
+    assert "off-function title" in other.reasons
+
+
 # ---------------------------------------------------------------- JD rules
 def test_travel_rule_flag_and_reason_branches():
     assert rules.travel_rule("", "Travel up to 30% required.")[:2] == ([], ["travel ceiling 30% (limit 25%)"])

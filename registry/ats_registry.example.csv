@@ -9,3 +9,4 @@ Biblica,bamboohr,biblica,,,,example,BambooHR: subdomain from <sub>.bamboohr.com
 ServiceNow,smartrecruiters,ServiceNow,,,,example,"SmartRecruiters: company id, CASE-SENSITIVE (a wrong id returns 200 with zero jobs)"
 Microsoft,eightfold,https://apply.careers.microsoft.com,microsoft.com,,,example,"Eightfold: careers host URL + company domain (from the site's ?domain= query); ~2,200 postings, 10 per page"
 Logos Bible Software,paylocity,cd6cba65-20a5-4466-b3ba-5debbe12930b,Logos,,,example,"Paylocity: company GUID from the jobs/All/<guid>/<slug> URL; apply links show only a numeric JobId"
+U.S. Government (USAJobs),usajobs,,,,,example,"USAJobs: keyword search, not one employer's board — one row enables it, identifier_* unused. Needs USAJOBS_API_KEY + USAJOBS_EMAIL in .env; missing either skips it."

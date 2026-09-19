@@ -18,7 +18,8 @@ a separate rule engine already decided all of that, and weighing it here corrupt
 GRADES
 - bullseye  : the core of the role is work the candidate has demonstrably done. A different industry is NOT a
               gap: if the JD asks for work they have done, in a domain they have not worked in, it is still a
-              bullseye. Judge the verbs and the objects of the work, not the sector.
+              bullseye. Judge the verbs and the objects of the work, not the sector -- unless the sector's
+              specialist knowledge IS the work (see DOMAIN AS THE SETTING vs DOMAIN AS THE WORK below).
 - adjacent  : substantially overlapping work with one real difference in the object of the work (a different
               function's process, a specialism they have touched but not owned). They could do it; someone with
               direct experience would be preferred.
@@ -32,6 +33,18 @@ RULES
 - Industry tenure requirements ("10+ years in banking") are a blocker to name, not a reason for `wrong`.
 - If the supplied text is too thin to judge, grade `stretch` and set confidence "low".
 - Be decisive. A corpus where everything is `adjacent` is useless.
+
+DOMAIN AS THE SETTING vs DOMAIN AS THE WORK
+- An unfamiliar industry is never a gap when it is the SETTING: the duties would read the same with the
+  industry nouns removed (process ownership inside a health plan is still process ownership).
+- It IS a gap when practitioner knowledge of a specialism is itself the WORK: the duties cannot be performed
+  without it (applying risk-adjustment or actuarial models, interpreting regulatory filing rules, clinical
+  criteria, audit standards, compensation market pricing, front-office investment data), or the Required block
+  asks for that expertise rather than for tenure. A licence or credential that gates practice (CPA, RN,
+  actuarial) signals this.
+- TEST: strike the industry nouns from the duties. If the candidate's kind of work remains, grade that work and
+  name the tenure as the blocker. If little remains beyond leadership and governance vocabulary, the grade is
+  `stretch` at best, and `wrong` when you cannot name the overlapping work.
 
 THREE LENSES. Grade each posting on all three, independently, against the lens descriptions below:
 - grade_process   : how well the role matches the PROCESS / OPERATING-MODEL / CHANGE-MANAGEMENT lens
@@ -72,6 +85,15 @@ LENS 1 — PROCESS / OPERATING MODEL / CHANGE MANAGEMENT (grade_process)
   real job is coordinating across functions, or consulting delivery of the above.
 - `wrong`: plant-floor / manufacturing continuous improvement, product operations, sales or revenue operations,
   IT service-management change control (ITIL change tickets are NOT change management in this sense).
+- ALSO `wrong`: RUNNING one function's operations -- the seat is accountable for that function's own daily
+  output, staffing, vendors and budget (creative or marketing operations, desktop support or a service desk,
+  application / ERP support operations, a compensation or payroll cycle). Intake, workflow, governance,
+  resource-planning and continuous-improvement vocabulary inside such a seat describes how that manager runs
+  the shop; it is not process-excellence work. TEST: is the role accountable for CHANGING how work is done,
+  across teams it does not run (this lens), or for DELIVERING one function's work (`wrong`, or `stretch` when
+  a named improvement mandate is a real share of the duties)? A process-management or transformation team is
+  itself this lens: leading process managers, or owning a framework other teams run on, is not "running a
+  function" in this sense.
 """
 
 RUBRIC_LENS_TECHNICAL = """
@@ -84,6 +106,17 @@ LENS 2 — TECHNICAL / DATA / ANALYTICAL (grade_technical)
 - `wrong`: platform and software engineering as the job -- streaming or distributed infrastructure, cloud
   build-out, CI/CD and data-platform ownership, microservice or API product engineering -- and data-scientist
   seats whose work is building ML / NLP / RAG models.
+- ALSO `wrong`: analytics, reporting or modelling IN SERVICE OF a specialism where the specialist knowledge is
+  the work (DOMAIN AS THE WORK above: risk, compliance, clinical or utilization analytics, actuarial work, an
+  enterprise data-governance programme). The `adjacent` line above covers a different business OBJECT
+  (marketing, product, commercial); it does not cover a specialist discipline's own analytics.
+- FINANCE-PROFESSION SEATS: "budget and financial modelling" is bullseye when it models an OPERATION (its
+  capacity, workforce, cost-to-serve, the business case for a change). A seat inside the finance profession --
+  owning the FP&A planning cycle, finance business-partnering, controllership, investor relations, corporate
+  strategy or M&A evaluation -- is `stretch` at best, and `wrong` when the Required block asks for experience
+  in a finance function.
+- A modelling or reporting duty that is a minor share of a seat accountable for RUNNING one function's
+  operations is `stretch`, not `adjacent` or `bullseye`: grade the centre of gravity of the seat.
 - Judge the STACK and the expectations named in the JD, never the job title.
 """
 
@@ -112,6 +145,17 @@ LENS 3 — APPLIED AI (grade_ai)
   -- a forward-deployed or solutions engineer, however much the duties also mention evaluation suites,
   workflow mapping or adoption. Name that overlap in the rationale; do not credit it as `stretch` or
   `adjacent`. The Required block decides the seat; the duties describe it.
+- ALSO `wrong`: a technologist, architect, scientist or subject-matter-expert seat whose Required block asks
+  for deep AI / ML technical expertise as a core qualification (years in AI / ML technology, NLP, computer
+  vision, deep learning, AI / ML architecture), even when no production code is named and the duties include
+  use-case evaluation or business cases. If your own `blocker` would say that expertise is missing from the
+  record, the grade cannot be `adjacent` or `bullseye`.
+- AI INSIDE A SPECIALIST FUNCTION: DOMAIN AS THE SETTING vs DOMAIN AS THE WORK applies to this lens too. An
+  AI programme, execution or strategy seat that sits inside one specialist function (investment management,
+  marketing, FP&A, risk, security) and whose Required block asks for practitioner experience IN that function
+  is that function's work with AI as its object: `stretch` at best, `wrong` when the AI duties are directed
+  programme management. An enterprise AI adoption, transformation or portfolio seat that merely happens to be
+  at an asset manager, a bank or a health plan is the SETTING and is graded on the AI work as usual.
 - The line is CREATING or ENGINEERING the AI system versus TEACHING an existing model to perform a job:
   skills, procedures, evals, tool calls and adoption around a model are applied AI; writing the production
   application or the model is engineering.

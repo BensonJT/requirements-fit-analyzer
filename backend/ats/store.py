@@ -1256,3 +1256,23 @@ def record_detail_error(con, pid, now):
 def close_posting(con, pid, now):
     con.execute("UPDATE postings SET status = 'closed', closed_at = ?, description_fetched_at = ? "
                 "WHERE posting_id = ? AND status = 'active'", [now, now, pid])
+
+
+# Platforms whose list pull is a keyword result set, not a full board (see
+# adapters.usajobs_jobs's module comment): the adapter always returns a `Truncated` list, so
+# record_board's absence-based close-pass is already a permanent no-op for them. This is the
+# only thing that ever closes one of their postings.
+CLOSE_BY_DATE_PLATFORMS = frozenset({"usajobs"})
+
+
+def close_expired_postings(con, platforms, now):
+    """Closes active postings on a CLOSE_BY_DATE_PLATFORMS platform whose own `posting_end_at`
+    (e.g. USAJobs' ApplicationCloseDate) has passed. A posting with no end date, or one not yet
+    past it, is left alone -- being merely absent from a keyword result never closes it."""
+    if not platforms:
+        return 0
+    return con.execute("""
+        UPDATE postings SET status = 'closed', closed_at = ?
+        WHERE platform IN (SELECT unnest(?::VARCHAR[])) AND status = 'active'
+          AND posting_end_at IS NOT NULL AND posting_end_at < ?
+    """, [now, list(platforms), now.date()]).fetchone()[0]

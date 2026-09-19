@@ -71,6 +71,12 @@ def sweep(con, rows, workers=8, max_pages=None, log=print):
             log(f"  [{done}/{len(rows)}] {employer} ({platform}): {seen} live, {new} new, "
                 f"{reopened} reopened, {closed} taken down — {elapsed:.1f}s{flag}")
 
+    expired = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, _now())
+    if expired:
+        stats["closed"] += expired
+        log(f"  Closed {expired} posting(s) past their own close date "
+            f"({', '.join(sorted(store.CLOSE_BY_DATE_PLATFORMS))}).")
+
     stats["elapsed"] = time.monotonic() - t0
     stats["started"] = started
     return stats

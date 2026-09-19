@@ -695,3 +695,156 @@ def test_workday_pull_stops_when_workday_repeats_page_one(monkeypatch):
 
     out, truncated = adapters._workday_pull(_RepeatClient(), "u", "https://public", {}, None)
     assert len(out) == 20 and truncated is True  # only page 1's postings kept, loop didn't spin forever
+
+
+# ---------------------------------------------------------------- USAJobs
+_USAJOBS_ITEM = {
+    "MatchedObjectId": "812345600",
+    "MatchedObjectDescriptor": {
+        "PositionID": "AGENCY-26-1234567",
+        "PositionTitle": "Program Analyst",
+        "PositionURI": "https://www.usajobs.gov/job/812345600",
+        "OrganizationName": "Department of Example",
+        "PositionLocationDisplay": "Washington DC, District of Columbia",
+        "PositionLocation": [{"LocationName": "Washington DC, District of Columbia", "CountryCode": "US"}],
+        "JobCategory": [{"Name": "Program Management", "Code": "0340"}],
+        "JobGrade": [{"Code": "GS"}],
+        "PositionSchedule": [{"Name": "Full-time"}],
+        "PositionOfferingType": [{"Name": "Permanent"}],
+        "QualificationSummary": "Experience with process improvement and continuous improvement initiatives.",
+        "PositionRemuneration": [{"MinimumRange": "89000.00", "MaximumRange": "115000.00",
+                                  "RateIntervalCode": "Per Year"}],
+        "PublicationStartDate": "2026-09-01",
+        "ApplicationCloseDate": "2026-10-01",
+        "UserArea": {"Details": {
+            "JobSummary": "This position leads process excellence initiatives for the agency.",
+            "MajorDuties": ["Leads Lean Six Sigma projects.", "Coordinates capacity planning."],
+            "Education": "",
+            "Requirements": "Ability to obtain and maintain a Secret clearance.",
+            "Evaluations": "",
+            "SecurityClearance": "Secret",
+            "LowGrade": "9",
+            "HighGrade": "11",
+            "RemoteIndicator": False,
+            "TeleworkEligible": True,
+            "OtherInformation": "",
+        }},
+    },
+}
+
+
+def test_usajobs_position_maps_full_jd_with_no_detail_needed():
+    p = A._usajobs_position(_USAJOBS_ITEM["MatchedObjectDescriptor"], _USAJOBS_ITEM["MatchedObjectId"])
+    assert p["req_id"] == "812345600"                  # the USAJobs control number (MatchedObjectId)
+    assert A._usajobs_position(_USAJOBS_ITEM["MatchedObjectDescriptor"])["req_id"] == "AGENCY-26-1234567"
+    assert p["title"] == "Program Analyst"
+    assert p["url"] == "https://www.usajobs.gov/job/812345600"
+    assert p["location_primary"] == "Washington DC, District of Columbia" and p["country"] == "US"
+    assert p["job_family"] == "Department of Example"        # the hiring agency, not job_family in the tier sense
+    assert p["job_level"] == "GS-9/11"
+    assert (p["pay_min"], p["pay_max"], p["pay_interval"], p["pay_source"]) == (89000, 115000, "year", "ats")
+    assert p["employment_type"] == "full_time"
+    assert p["posted_at"] == date(2026, 9, 1) and p["posting_end_at"] == date(2026, 10, 1)
+    assert "Leads Lean Six Sigma projects." in p["description_text"]
+    assert "ability to obtain and maintain a Secret security clearance" in p["description_text"]
+    from backend import screen as S
+    assert S.clearance_call(p["description_text"])[0] == "sponsored"   # a flag, never a reject
+    assert "usajobs" in A.IMPLEMENTED_PLATFORMS and "usajobs" not in A.DETAIL_PLATFORMS
+
+
+def test_usajobs_clearance_line_skips_no_clearance_values():
+    assert A._usajobs_clearance_line("Not Required") is None
+    assert A._usajobs_clearance_line("None") is None
+    assert A._usajobs_clearance_line("") is None
+    assert A._usajobs_clearance_line(None) is None
+    assert "obtain and maintain a Top Secret/SCI security clearance" in A._usajobs_clearance_line("Top Secret/SCI")
+
+
+def test_usajobs_workplace_remote_indicator_wins_over_location_text():
+    assert A._usajobs_workplace({"RemoteIndicator": True}, "Washington DC") == "remote"
+    assert A._usajobs_workplace({"RemoteIndicator": False}, "Remote - Nationwide") == "remote"
+    assert A._usajobs_workplace({}, "Washington DC, District of Columbia") is None
+
+
+def test_usajobs_jobs_skips_without_credentials_but_never_fails(monkeypatch):
+    monkeypatch.delenv("USAJOBS_API_KEY", raising=False)
+    monkeypatch.delenv("USAJOBS_EMAIL", raising=False)
+    got = A.usajobs_jobs({"employer": "U.S. Government (USAJobs)", "platform": "usajobs"})
+    assert got == [] and getattr(got, "truncated", False) is True
+
+
+def test_usajobs_jobs_paginates_dedupes_and_is_always_truncated(monkeypatch):
+    """A keyword result set is never a full board -- even a clean, single-page pull across every
+    phrase must come back Truncated, so the close-pass never touches it (see store.py)."""
+    monkeypatch.setenv("USAJOBS_API_KEY", "k")
+    monkeypatch.setenv("USAJOBS_EMAIL", "e@example.com")
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A.P, "FUNCTION_PHRASES", ["Process Excellence", "Change Management"])
+    monkeypatch.setattr(A.P, "SEPARATE_PASS_PHRASES", [])
+
+    calls = []
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def request(self, method, url, **kw):
+            calls.append(kw.get("params", {}).get("Keyword"))
+            # Every phrase returns the same one control number -- a real overlap across phrases.
+            payload = {"SearchResult": {"SearchResultCountAll": 1,
+                                        "SearchResultItems": [{"MatchedObjectDescriptor":
+                                                               _USAJOBS_ITEM["MatchedObjectDescriptor"]}]}}
+            return _Resp(payload)
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    got = A.usajobs_jobs({"employer": "U.S. Government (USAJobs)", "platform": "usajobs"})
+    assert len(got) == 1                                   # deduped by control number across both phrases
+    assert calls == ["Process Excellence", "Change Management"]
+    assert getattr(got, "truncated", False) is True
+
+
+# ---------------------------------------------------------------- USAJobs close-by-date exception
+def test_close_expired_postings_leaves_absent_but_unexpired_postings_active(tmp_path):
+    """A posting missing from a USAJobs keyword pull is not evidence it's gone -- record_board's
+    close-pass must already be a no-op (the adapter always returns Truncated), and
+    close_expired_postings must leave anything not yet past its own close date alone."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t1, t2 = datetime(2026, 9, 14), datetime(2026, 9, 15)
+    far_future = N.parse_date("2027-01-01")
+    jobs = [N.base(req_id="R1", title="Program Analyst", posting_end_at=far_future)]
+    store.record_board(con, "U.S. Government (USAJobs)", "usajobs", jobs, t1, truncated=True)
+    # R1 is absent from the next pull, but the pull is truncated so it must not be closed by absence.
+    _, _, _, closed = store.record_board(con, "U.S. Government (USAJobs)", "usajobs", [], t2, truncated=True)
+    assert closed == 0
+    n = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, t2)
+    assert n == 0
+    assert con.execute("SELECT status FROM postings WHERE req_id = 'R1'").fetchone()[0] == "active"
+
+
+def test_close_expired_postings_closes_only_past_its_own_close_date(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t1 = datetime(2026, 9, 14)
+    expired = N.parse_date("2026-09-01")     # already past when we check on t1
+    still_open = N.parse_date("2026-12-01")
+    no_date = None
+    jobs = [N.base(req_id="R1", title="Expired", posting_end_at=expired),
+            N.base(req_id="R2", title="Still open", posting_end_at=still_open),
+            N.base(req_id="R3", title="No date given", posting_end_at=no_date)]
+    store.record_board(con, "U.S. Government (USAJobs)", "usajobs", jobs, t1, truncated=True)
+    n = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, t1)
+    assert n == 1
+    rows = {r[0]: r[1] for r in con.execute("SELECT req_id, status FROM postings").fetchall()}
+    assert rows == {"R1": "closed", "R2": "active", "R3": "active"}
+
+
+def test_close_expired_postings_never_touches_other_platforms(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t1 = datetime(2026, 9, 14)
+    expired = N.parse_date("2026-09-01")
+    store.record_board(con, "Acme", "workday", [N.base(req_id="R1", title="X", posting_end_at=expired)], t1)
+    n = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, t1)
+    assert n == 0
+    assert con.execute("SELECT status FROM postings WHERE req_id = 'R1'").fetchone()[0] == "active"

@@ -855,6 +855,11 @@ def test_required_years_and_level_rule():
     assert rules.level_rule("Process Analyst", junior, 95_000)[:2] == ([], ["few years asked (at most 3) -- pay band says senior"])
     assert rules.level_rule("Principal Process Analyst", junior, None)[1] == ["few years asked (at most 3) -- title says senior"]
     assert rules.level_rule("Summer Associate Internship", "", None)[0] == ["early-career title (summer associate)"]
+    assert rules.level_rule("Strategy & Project Management - Summer 2027", "", None)[0] == \
+        ["early-career title (summer 2027)"]
+    assert rules.level_rule("University Program - Data Analyst", "", None)[0] == \
+        ["early-career title (university program)"]
+    assert rules.level_rule("Summer Concert Series Coordinator", "", None)[0] == []   # "summer" alone doesn't match
     assert rules.level_rule("Associate Director, Operational Excellence", "", None) == \
         ([], [], {"max_years": None, "level": None, "senior": True})
     assert rules.level_rule("Associate, Operations", "", None)[:2] == ([], [])               # "associate" says nothing
@@ -1595,7 +1600,7 @@ def _judge_corpus(tmp_path):
     return con, dict(con.execute("SELECT req_id, posting_id FROM postings").fetchall())
 
 
-def test_judge_queue_interleaves_and_dedupes_only_identical_text(tmp_path):
+def test_judge_queue_interleaves_and_dedupes_only_matched_pairs(tmp_path):
     pytest.importorskip("numpy")
     con, by_req = _judge_corpus(tmp_path)
     pool = {"high": ["a", "b", "c"], "low": ["x", "y"], "reject": ["r"]}
@@ -1607,6 +1612,117 @@ def test_judge_queue_interleaves_and_dedupes_only_identical_text(tmp_path):
     dup = judge.duplicate_map(con, ids)
     assert dup == {by_req["A3"]: by_req["A1"]} or dup == {by_req["A1"]: by_req["A3"]}   # the repost only
     assert by_req["A2"] not in dup and by_req["A2"] not in dup.values()                 # a sibling role survives
+    con.close()
+
+
+def _title_dup_corpus(tmp_path, postings):
+    """`postings` is a list of (req_id, employer, title, text, description_hash). Each distinct employer gets
+    its own `record_board` call (postings.employer is fixed per call), all under one platform/timestamp."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    by_employer = {}
+    for req_id, employer, title, text, dhash in postings:
+        by_employer.setdefault(employer, []).append((req_id, title, text, dhash))
+    for employer, rows in by_employer.items():
+        jobs = [N.base(req_id=req_id, title=title, url=f"https://x/{req_id}", location_primary="Remote - USA",
+                       workplace_type="remote") for req_id, title, _text, _dhash in rows]
+        store.record_board(con, employer, "greenhouse", jobs, now)
+    for req_id, _employer, _title, text, dhash in postings:
+        con.execute("UPDATE postings SET description_text = ?, description_hash = ?, description_fetched_at = ? "
+                    "WHERE req_id = ?", [text, dhash, now, req_id])
+    pipeline.screen(con, log=_quiet)
+    m = _evidence_manifest(tmp_path)
+    evidence.rebuild(con, m, FakeEncoder(), log=_quiet)
+    ids = [r[0] for r in con.execute("SELECT posting_id FROM postings ORDER BY req_id").fetchall()]
+    coverage.cover(con, m, FakeEncoder(), posting_ids=ids, log=_quiet)
+    by_req = dict(con.execute("SELECT req_id, posting_id FROM postings").fetchall())
+    return con, by_req
+
+
+def test_judge_dedupes_same_employer_same_title_country_suffix(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _title_dup_corpus(tmp_path, [
+        ("C1", "Acme", "Director, Process Excellence | Spain | Remote", REQ_JD, "h1"),
+        ("C2", "Acme", "Director, Process Excellence | India | Remote", REQ_JD, "h2")])
+    dup = judge.duplicate_map(con, list(by_req.values()))
+    assert dup == {by_req["C2"]: by_req["C1"]} or dup == {by_req["C1"]: by_req["C2"]}
+    con.close()
+
+
+def test_judge_same_employer_same_title_low_similarity_not_deduped(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _title_dup_corpus(tmp_path, [
+        ("D1", "Acme", "Director, Process Excellence", REQ_JD, "h1"),
+        ("D2", "Acme", "Director, Process Excellence", OFF_REQ_JD, "h2")])
+    dup = judge.duplicate_map(con, list(by_req.values()))
+    assert dup == {}
+    con.close()
+
+
+def test_judge_different_employers_same_title_and_text_not_deduped(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _title_dup_corpus(tmp_path, [
+        ("E1", "Acme", "Director, Process Excellence", REQ_JD, "h1"),
+        ("E2", "Globex", "Director, Process Excellence", REQ_JD, "h2")])
+    dup = judge.duplicate_map(con, list(by_req.values()))
+    assert dup == {}
+    con.close()
+
+
+def test_judge_same_employer_different_titles_near_identical_text_not_deduped(tmp_path):
+    pytest.importorskip("numpy")
+    con, by_req = _title_dup_corpus(tmp_path, [
+        ("F1", "Acme", "Director, Process Excellence", REQ_JD, "h1"),
+        ("F2", "Acme", "Director, Business Transformation", REQ_JD, "h2")])
+    dup = judge.duplicate_map(con, list(by_req.values()))
+    assert dup == {}
+    con.close()
+
+
+def test_title_key_strips_only_location_and_workplace_suffixes():
+    from backend.finder.judge import _title_key
+    assert _title_key("Staff Analyst | Spain | Remote") == "staff analyst"
+    assert _title_key("Staff Analyst (Remote)") == "staff analyst"
+    assert _title_key("Staff Analyst (Remote - US)") == "staff analyst"
+    assert _title_key("Staff Analyst - Remote") == "staff analyst"
+    assert _title_key("  Staff   Analyst  ") == "staff analyst"
+    assert _title_key(None) == ""
+    # Not touched: level, seniority, and non-workplace dash suffixes are real title differences.
+    assert _title_key("Analyst II") != _title_key("Analyst III")
+    assert _title_key("Senior Analyst") != _title_key("Analyst")
+    assert _title_key("Analyst - Team Rocket") != _title_key("Analyst")
+
+
+def test_non_us_primary():
+    from backend.finder.judge import non_us_primary
+    assert non_us_primary("Remote - US & Canada") is False
+    assert non_us_primary("Spain - Remote") is True
+    assert non_us_primary(None) is False
+    assert non_us_primary("") is False
+    assert non_us_primary("Remote") is False
+    assert non_us_primary("United States") is False
+    assert non_us_primary("India") is True
+
+
+def test_pools_skips_non_us_primary_location(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    jobs = [N.base(req_id="G1", title="Process Excellence Lead", url="https://x/G1",
+                   location_primary="Remote - USA", workplace_type="remote"),
+            N.base(req_id="G2", title="Process Excellence Lead", url="https://x/G2",
+                   location_primary="India", workplace_type="remote")]
+    store.record_board(con, "Acme", "greenhouse", jobs, now)
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h1', description_fetched_at = ? "
+                "WHERE req_id = 'G1'", [REQ_JD, now])
+    con.execute("UPDATE postings SET description_text = ?, description_hash = 'h2', description_fetched_at = ? "
+                "WHERE req_id = 'G2'", [REQ_JD, now])
+    pipeline.screen(con, log=_quiet)
+    by_req = dict(con.execute("SELECT req_id, posting_id FROM postings").fetchall())
+    seen = []
+    pool = judge.pools(con, log=seen.append)
+    everyone = {pid for ids in pool.values() for pid in ids}
+    assert by_req["G2"] not in everyone
+    assert any("non-US" in msg for msg in seen)
     con.close()
 
 

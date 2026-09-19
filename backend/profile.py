@@ -206,7 +206,8 @@ LEVEL_YEARS_MID = 5        # below this = junior; between the two = mid
 LEVEL_YEARS_CAP = 25       # larger numbers are company history ("100 years serving clients"), not a requirement
 SENIOR_LEVEL_TITLE_TERMS = ["director", "vice president", "vp", "svp", "evp", "principal", "head of", "chief"]
 EARLY_CAREER_TITLE_TERMS = ["intern", "internship", "summer associate", "co-op", "apprentice", "apprenticeship",
-                            "new grad", "graduate program", "entry level", "entry-level", "junior", "jr"]
+                            "new grad", "graduate program", "entry level", "entry-level", "junior", "jr",
+                            "university program"]
 
 # ---- Level fit (finder sec 20.2). A second, independent level signal alongside level_rule above: it never
 # rejects or flags (verdict/rule_score untouched), it only writes notes["level_fit"] for the report and the

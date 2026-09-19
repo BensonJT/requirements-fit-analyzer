@@ -781,3 +781,80 @@ AI-term subset, then the corpus decision.
 - [x] Lens independence on the pilot: 28/40 (70%) differ from both other lenses (§18.7 bar 67%).
 - [x] AI-term corpus estimate: 1,704 active postings with AI in the title (118 not rejected), 11,929 with an AI term in the JD.
 - [ ] Rubric prose adjusted with the user; then the AI-term subset (+100 control), then the corpus decision, then `train --lens ai`.
+
+## 22. Amendment — how the pipeline flows, and the feedback loop (2026-09-19, user decision; binding)
+Agreed in conversation 2026-09-19 after the user graded a 38-row blind sheet. Items marked BUILT exist today; items marked TO BUILD do not. The README section "How the pipeline flows" is the short form of §22.1.
+
+### 22.1 The ten steps
+
+| # | Step | What it does | Learns from feedback? | State |
+|---|---|---|---|---|
+| 1 | Sweep | Reads whole employer ATS boards. New postings are added once, postings that vanish are closed, nothing is deleted. | No. Boards are added by hand to the registry. | BUILT |
+| 2 | JD details | Fetches the full description for every NEW posting (cap 5,000 per run) and works down the backlog of older postings whose TITLE matches the hot-keyword list. | Only by editing the keyword list. | BUILT; keyword list to be widened (AI, agentic, adoption, enablement, asset, lifecycle, capacity, improvement, knowledge management) and backlog budget raised 300 to 2,000 |
+| 3 | Tracker sync and decision read-back | Mirrors the application tracker and reads build / pass decisions, so applied and decided postings leave the report. | This IS feedback arriving. | BUILT |
+| 4 | Screen | Two parts in one stage. (a) The RULE ENGINE, the light first pass: title, location / remote, pay floor, held clearance, level. (b) The TF-IDF MODELS: three lenses (process, technical, applied AI), `required` (does the user clear the Required block), and `bullseye` (bullseye vs merely adjacent). With a JD, the best lens score decides and a title-only reject is overturned. Without a JD the title reject stands, which is why step 2's keyword list matters. | Rules: by hand, from graded sheets. Models: on retrain. | BUILT (`bullseye`, schema v15, and the level-aware clearance rule and the remote-reading fix landed 9/19) |
+| 5 | Coverage | Splits each survivor's JD into requirement lines and matches them to the evidence record. Its lasting product is the parsed Required lines that step 6 reads. | Calibrated against `pass: function` decisions. | BUILT |
+| 6 | Second layer, `embed_required` | For non-rejected postings with a best TF-IDF lens score of 0.5 or more: embeds the Required block, scores the block and each Required line for "likely unmet", stacks them with the TF-IDF `required` score. Held-out AUC 0.747 against 0.633 for TF-IDF alone. Names the likeliest unmet line in the Why. | On retrain, through the judge's labels. | BUILT 9/19 |
+| 7 | LLM second judge (Gemma, free tier) | Reads the full JD and the full background for the top of the list and returns a stricter Required call plus reasons. Must be scored blind against the human gold rows before it is allowed to move the rank. | Tuned and scored against gold. | TO BUILD (needs the user's go: it sends data to an external API) |
+| 8 | Report | `Jobs_Found`, snapshots and `finder.py top`: every score visible, ONE Rank, ONE Why. | No. | BUILT |
+| 9 | Human review with the application-analysis skill | The user and Claude sift the report, decide which packages to build and which to pass on. | This is where feedback is created. | Skill exists; does NOT yet know this pipeline (it still references the deleted harvester) |
+| 10 | Feedback write-back | The skill records every decision made in step 9 into the database through the CLI, with a reason. | Feeds steps 3, 4, 5, 6, 7. | PARTLY BUILT, see §22.3 |
+
+Outside the automated run: the LLM judge batch (`finder.py judge export / import`), and RETRAINING (`finder.py labels && finder.py train` for each model, then `finder.py required-embed train`). Retraining is manual today. Decision: make it a named weekly step, not something to remember.
+
+**Known gap, found 9/19: the aggregator sources are outside the cascade.** The repo has two sweeps. `sweep_ats.py` (ten ATS platforms) writes to the database, and only database postings get steps 3 to 10. `sweep.py` (Adzuna, Jooble, USAJobs) runs the rule engine only and writes its own file: no TF-IDF models, no second layer, no judge, no Rank, no feedback write-back. The database holds zero USAJobs postings. Decided 9/19: add USAJobs as an eleventh adapter in `backend/ats/adapters.py`. Its search API returns the full duties and qualifications text, so it needs no detail budget; it is a keyword search rather than a whole-board pull, so closing must rely on the posting's own close date rather than on disappearance from a result set; its structured clearance fields should make the held-clearance rule more exact than on commercial JDs.
+
+### 22.2 Where feedback goes today (BUILT)
+
+| Signal | How it enters | What it changes |
+|---|---|---|
+| Applied | `finder.py sync` reads the application tracker | Top-priority positive for the step 4 models at retrain; leaves the report |
+| Build / pass / hold with a reason code | `finder.py mark <posting_id or URL or "employer\|title"> build\|pass\|hold --reason "<code>: detail"`; codes today: function, nuance, logistics, comp, other | Builds are positives. `pass: function` becomes a hard negative for coverage calibration. Decided postings leave the report. Other passes are recorded but train nothing. |
+| Human grades (bullseye / adjacent / stretch / wrong, level, note) | The golden feedback CSV import | Checks the level rule, scores the judge, and as `user_adjudicated` labels outranks every other label source in training |
+| Judge grades | `finder.py judge import` | Trains all step 4 models and step 6 |
+
+### 22.3 The gaps, and the design to close them (TO BUILD)
+
+**Gap 1. The skill does not know the commands.** Step 10 is a build: teach the skill the write-back commands, and have it write back EVERY posting it reviewed in a session, builds and passes alike, because a pass with a reason is as informative as a build.
+
+**Gap 2. A requirements pass trains nothing.** The 38-row blind sheet of 9/19 showed the judge's lane call is sound (it found 8 of 8 of the user's bullseyes) and its Required call is lenient (of 20 postings it marked `meets`, the user found a disqualifying unmet requirement in 11: held clearances, and N+ years in a named function the user has not held). Those are exactly the passes the user will give in step 9, and today they teach nothing. Design:
+
+- New pass reason codes: `requirement` (a hard Required line is not met) and `level` (seat is too senior or too junior). `clearance` is recorded as `requirement`. Existing codes stay.
+- New options on `mark`: `--unmet "<the requirement line, quoted from the JD>"` (repeatable) and `--grade bullseye|adjacent|stretch|wrong`.
+- A `pass --reason "requirement: ..." --unmet "..."` writes a HUMAN `required_fit = fails` with the quoted line. A human Required call outranks the judge's, exactly as human lane grades already do. That feeds the `required` model (step 4) and, through the quoted line, the line model inside step 6, which learns from quoted unmet lines.
+- A `build` writes human `required_fit = meets` unless told otherwise.
+- Batch form for the skill: `finder.py mark --from-file decisions.csv`, one row per reviewed posting, so a review session is one command and one confirmation, not thirty.
+
+**Gap 3. Nothing retrains on its own.** Weekly: `labels`, `train` for each model, `required-embed train`, then a rescreen. Each prints its acceptance numbers; a model that fails its gate is not promoted.
+
+### 22.4 Is review feedback "golden"? Yes for training, no for blind evaluation
+
+This is the subtle part and it must not be blurred.
+
+- **Yes, it is gold for TRAINING.** A decision the user made and confirmed is a human label. It gets `assessor = user`, `confirmed_by_user = true`, and outranks the judge.
+- **It can be BLIND gold too, if the grade comes before the reveal.** The medium (spreadsheet or report) is irrelevant. What matters is what the user has seen when grading. If the Rank, the Why and Claude's analysis are on screen first, the judgement can be anchored, and measuring the judge against an anchored grade flatters the judge. Design rule for step 9: GRADE FIRST, REVEAL SECOND. The skill shows the JD, the user gives a grade and a reason, and only then are the Rank and Why shown. Every row records its `basis`: `blind` (graded before any machine score was visible, whether on a sheet or in a review session) or `seen` (graded after). Evaluation of the judge, the models and any second judge uses `blind` rows only. Training uses both. (Revised 9/19 after the user's challenge: the first draft wrongly treated all report feedback as non-blind.)
+- **Review feedback is top-heavy, which limits what it can prove, not whether it counts.** Only postings that ranked high get reviewed. Blind review rows therefore measure PRECISION at the top of the list (when the pipeline says good, is it), which is the number that matters most day to day. They cannot measure MISSES (good jobs buried or wrongly rejected), because the user never sees those. For that, keep a small occasional blind sheet (about 20 rows a month) with decoys drawn from lower ranks and from rejects. There are 99 blind human-graded rows as of 9/19.
+- **Logistics passes are not fit labels.** "Not commutable" or "pay too low" on a bullseye role must not teach the models that the WORK is wrong. `logistics` and `comp` passes feed the rule engine review only, never the lens, `required` or `bullseye` models. The `--grade` option lets the user say "bullseye work, passed for location" in one command.
+- **Employer outcomes** (rejected, screened, interviewed) stay in the tracker and are recorded, not trained on yet: a rejection says little about fit and much about the applicant pool.
+
+### 22.5 Rulings made on 9/19 that the code must honour
+
+1. Both new layers score the full set of high TF-IDF scorers, judged or not; they move the Rank only for unjudged postings. The judge's own call wins where there is one.
+2. Screen rejects (not remote and not commutable, pay floor, held clearance) are not scored by the expensive layers. The goal is to rank jobs the user can actually apply to.
+3. "Ability to obtain" a clearance passes. A clearance that must already be held is a reject. "TS/SCI with ability to obtain a polygraph" is a held requirement. A required ACTIVE Public Trust is a miss too.
+4. "Remote work will be considered" counts as remote: the employer is willing to entertain a remote application. It is flagged as conditional so the user verifies it, and it costs no points.
+5. No company-level skips. A reviewed posting is judged on its own requirements.
+6. Every score visible, ONE Rank, ONE Why.
+7. A place that is too far to commute to is out even when a posting there was mis-read as remote; the commutable list is the authority.
+
+**Open rule gap, found 9/19: residence-restricted remote.** A posting the ATS flags as remote can still restrict where the person lives ("must live within N miles of", "must be based in one of these hubs or states"). When none of the named places is commutable, the posting should reject, or at least flag. Today it passes as remote. TO BUILD in the rule engine.
+
+### 22.6 Order of work
+
+1. Land the `bullseye` model and the two rule fixes; review the dry run; one rescreen. (DONE 9/19)
+2. Widen the step 2 keyword list, raise the backlog budget, run the backfill.
+3. Publish this document as SPRINT_PLAN §22 and the README flow section.
+4. Build §22.3 (reason codes, `--unmet`, `--grade`, `--from-file`, `basis`), then update the application-analysis skill to use it.
+5. Build the USAJobs adapter (§22.1, known gap), then run the full pipeline end to end and read the report together.
+6. Step 7 (the second judge), scored blind against gold first.
+7. Later: the guide for someone else to configure this for their own search.

@@ -94,11 +94,19 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
     `exclude` drops postings already queued elsewhere; `only` keeps just the named pools.
     `relabel` re-grades postings that ALREADY carry a label, for when the rubric changed rather than the JD:
     0 = every labelled posting, N = a sample of about N drawn evenly across the four grades so the
-    grade-migration matrix is measurable at a fraction of the cost."""
+    grade-migration matrix is measurable at a fraction of the cost.
+
+    `high` (the strong/very_strong band) is ordered by lens_best * required_value(...) DESC rather than
+    final_score DESC: when `--limit` truncates the export, this reads the postings most likely to land in the
+    apply tier first. The other sub-pools (low/content/logistics/random/ai_title/relabel) stay on their
+    existing hash-seeded or diversity orderings deliberately -- they exist to sample the confusable band and a
+    deliberate reject/tail spread, not to rank by desirability, and reordering them by fit would defeat that."""
     high = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
+        JOIN vw_lens_fit f USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('very_strong', 'strong')
-        ORDER BY s.final_score DESC, p.posting_id""")]
+        ORDER BY f.lens_best * required_value(f.required_fit, f.fit_required) DESC, s.final_score DESC,
+                 p.posting_id""")]
     low = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('partial', 'weak')

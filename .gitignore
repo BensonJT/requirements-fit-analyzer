@@ -173,3 +173,5 @@ backend/finder/rubric_local.py
 # Finder Phase 3: personal evidence manifest, LLM batch files
 evidence.local.toml
 db/batches*/
+# Experiment lab: frozen extracts of real JD text and the candidate's evidence record. Never commit.
+db/embed_lab/

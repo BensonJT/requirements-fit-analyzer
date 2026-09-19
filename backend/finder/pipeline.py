@@ -138,6 +138,21 @@ def penalized_flags(flags: list) -> int:
 TITLE_REASONS = ("off-function title", "off-lane title")
 
 
+def content_fit(fit_prob: Optional[float], lens_fits) -> Optional[float]:
+    """The ONE content score that decides what is shown: the BEST of the lens models, never an average.
+
+    The main model trains on the averaged process / technical grade, so a posting that is `bullseye` on one
+    lens and `wrong` on the other is a NEGATIVE to it -- yet that is exactly the single-lens role the lenses
+    exist to surface, and an applied-AI fit of 0.80 is worth reading whatever the other two say. Gating and
+    ranking on the main model alone rejected such rows before the judge ever saw them (measured 2026-09-18:
+    261 active postings with a lens fit >= 0.50 were rejected on main fit < FIT_REJECT, and of the 182 already
+    judged, 60% sat in the apply or review tier against ~23% overall). With no lens score at all (no lens
+    models, or none for this row) the main model stands in.
+    """
+    lens = [x for x in lens_fits if x is not None]
+    return max(lens) if lens else fit_prob
+
+
 def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
     """With a content score, the JD decides function fit and the title stops rejecting: title reasons are
     dropped (an off-lane title stays visible as a flag), fit < FIT_REJECT rejects, fit < FIT_REVIEW flags.
@@ -158,11 +173,11 @@ def apply_content_gate(rec, fit_prob: Optional[float]) -> None:
 # costs ~1 ms per element; one string parameter expanded with json_transform costs almost nothing.
 _BATCH_SHAPE = json.dumps([{"posting_id": "VARCHAR", "verdict": "VARCHAR", "tier": "INTEGER", "rule_score": "INTEGER",
                             "fit_prob": "DOUBLE", "fit_process": "DOUBLE", "fit_technical": "DOUBLE",
-                            "fit_ai": "DOUBLE", "level_fit": "VARCHAR",
+                            "fit_ai": "DOUBLE", "fit_required": "DOUBLE", "level_fit": "VARCHAR",
                             "final_score": "INTEGER", "band": "VARCHAR", "reasons": "JSON",
                             "flags": "JSON", "top_terms": "JSON", "joined": "VARCHAR"}])
 _BATCH_KEYS = ("posting_id", "verdict", "tier", "rule_score", "fit_prob", "fit_process", "fit_technical",
-               "fit_ai", "level_fit", "final_score", "band", "reasons", "flags", "top_terms")
+               "fit_ai", "fit_required", "level_fit", "final_score", "band", "reasons", "flags", "top_terms")
 
 
 def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
@@ -175,10 +190,10 @@ def _write_batch(con, recs: list, rv: str, mv: str, now) -> None:
                     "SELECT unnest(json_transform($1, $2), recursive := true)", [payload, _BATCH_SHAPE])
         con.execute("""
             INSERT OR REPLACE INTO screens (posting_id, rules_version, model_version, screened_at, verdict, tier,
-                                            rule_score, fit_prob, fit_process, fit_technical, fit_ai, level_fit,
-                                            final_score, band, reasons, flags, top_terms)
+                                            rule_score, fit_prob, fit_process, fit_technical, fit_ai, fit_required,
+                                            level_fit, final_score, band, reasons, flags, top_terms)
             SELECT posting_id, $1, $2, $3, verdict, tier, rule_score, fit_prob, fit_process, fit_technical,
-                   fit_ai, level_fit, final_score, band, reasons, flags, top_terms
+                   fit_ai, fit_required, level_fit, final_score, band, reasons, flags, top_terms
             FROM screen_batch""", [rv, mv, now])
         con.execute("""
             UPDATE postings SET screen_verdict = b.verdict, screen_score = b.final_score,
@@ -231,13 +246,36 @@ def lens_scores(lens_models: Optional[dict], rows: list) -> dict:
     return out
 
 
-def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_models=None, encoder=None,
-           log=print) -> dict:
+def required_scores(required_model: Optional[dict], rows: list) -> list:
+    """[prob per row] from the Required-block ranking model (features.train(lens=features.REQUIRED_MODEL)).
+
+    NOT a lens: this is a ranking signal only, stored as screens.fit_required and read by `required_value()` /
+    `breadth_x_required` in SQL and by the judge queue ordering -- it must never be passed to `content_fit`,
+    `combine`, or folded into `lens_scores`'s dict (which is what feeds gating and n_lenses_good-style counts).
+    Kept as its own function, not a `lens_scores` entry, for that reason. No top terms, same rationale as
+    `lens_scores`: explaining a score is the main model's job."""
+    probs = [None] * len(rows)
+    if required_model is None:
+        return probs
+    from . import features
+    idx = [i for i, r in enumerate(rows) if (r.get("description_text") or "").strip()]
+    if idx:
+        texts = [features.doc_text(rows[i]["title"], rows[i]["description_text"], rows[i]["employer"]) for i in idx]
+        for j, prob in zip(idx, features.predict(required_model, texts)):
+            probs[j] = prob
+    return probs
+
+
+def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_models=None, required_model=None,
+           encoder=None, log=print) -> dict:
     """Screens every row that needs it in 500-row transactions. Returns counts by verdict and band.
 
-    `lens_models` ({lens: model}) adds fit_process / fit_technical / fit_ai alongside fit_prob; they are
-    stored and reported only, and never move final_score. `level_fit` (20.2) comes from the level rule inside
-    `rules.screen_row` and is likewise stored and reported only -- it never changes verdict or rule_score."""
+    `lens_models` ({lens: model}) adds fit_process / fit_technical / fit_ai alongside fit_prob, and the BEST of
+    them is the content score that gates the verdict and feeds final_score (`content_fit`); `fit_prob`, the
+    averaged-grade model, is still stored but decides nothing once a lens score exists. `level_fit` (20.2) comes from the level rule inside
+    `rules.screen_row` and is likewise stored and reported only -- it never changes verdict or rule_score.
+    `required_model` (features.REQUIRED_MODEL) adds fit_required, stored and reported only -- NOT a lens, it
+    never reaches `content_fit`/`combine` and never moves verdict, tier or final_score."""
     t0, started = time.monotonic(), _now()
     rv, mv = version.rules_version(), (model or {}).get("version", "none")
     calib = {"fit_weight": (model or {}).get("fit_weight")}
@@ -247,17 +285,21 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
         recs = []
         probs, terms = model_scores(model, rows)
         lens_probs = lens_scores(lens_models, rows)
+        required_probs = required_scores(required_model, rows)
         none_col = [None] * len(rows)
         for i, (row, fit_prob, top) in enumerate(zip(rows, probs, terms)):
             rec = rules.screen_row(row)
-            apply_content_gate(rec, fit_prob)
-            final, band = combine(rec.rule_score, fit_prob, None, None, calib, tier=rec.tier,
+            shown_fit = content_fit(fit_prob, [lens_probs.get(k, none_col)[i] for k in ("process", "technical", "ai")])
+            apply_content_gate(rec, shown_fit)
+            final, band = combine(rec.rule_score, shown_fit, None, None, calib, tier=rec.tier,
                                   rejected=rec.verdict == "reject", flags=penalized_flags(rec.flags))
             recs.append({"posting_id": rec.posting_id, "verdict": rec.verdict, "tier": rec.tier,
                          "rule_score": rec.rule_score, "fit_prob": fit_prob,
                          "fit_process": lens_probs.get("process", none_col)[i],
                          "fit_technical": lens_probs.get("technical", none_col)[i],
                          "fit_ai": lens_probs.get("ai", none_col)[i],
+                         # NOT a lens (features.REQUIRED_MODEL) -- stored and reported only, see required_scores.
+                         "fit_required": required_probs[i],
                          # Agent A's level rule writes this note; until it lands rec.notes has no "level_fit"
                          # key and .get() returns None, same as an unscreened lens probability.
                          "level_fit": rec.notes.get("level_fit"),
@@ -272,7 +314,8 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
             log(f"  screened {done}/{total} ({time.monotonic() - t0:.0f}s)")
     stats = {"screened": done, "started": started, "seconds": round(time.monotonic() - t0, 1),
              "verdict": dict(verdicts), "band": dict(bands), "rules_version": rv, "model_version": mv,
-             "lens_models": {k: v.get("version") for k, v in (lens_models or {}).items()}}
+             "lens_models": {k: v.get("version") for k, v in (lens_models or {}).items()},
+             "required_model": (required_model or {}).get("version")}
     log(f"Screen: {done} rows in {stats['seconds']}s — " +
         ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items())) + " | bands " +
         ", ".join(f"{k} {v}" for k, v in sorted(bands.items())) + f" | rules {rv} · model {mv}")
@@ -318,12 +361,14 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         t = time.monotonic()
         out["read_back"] = report_mod.read_back(con, vault_dir)
         log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")
-    model, lens_models = None, {}
+    model, lens_models, required_model = None, {}, None
     if use_model:
         from . import features
         model = features.load_latest(con, log=log)
         lens_models = features.load_lens_models(con, log=log)
-    out["screen"] = screen(con, since=since, full=full, model=model, lens_models=lens_models, log=log)
+        required_model = features.load_required_model(con, log=log)   # NOT a lens; see features.REQUIRED_MODEL
+    out["screen"] = screen(con, since=since, full=full, model=model, lens_models=lens_models,
+                           required_model=required_model, log=log)
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
     if llm_top:

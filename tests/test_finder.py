@@ -253,6 +253,19 @@ def test_content_gate_replaces_the_title_gate():
     assert "off-function title" in rec.reasons and rec.verdict == "reject"
 
 
+def test_content_fit_is_the_best_lens_never_the_averaged_model():
+    """A single-lens role is a NEGATIVE to the averaged main model by construction; the best lens decides
+    what is shown, and the main model stands in only when no lens score exists."""
+    assert pipeline.content_fit(0.20, [0.83, 0.05, None]) == 0.83          # strong on one lens: shown
+    assert pipeline.content_fit(0.20, [0.10, 0.12, 0.81]) == 0.81          # applied-AI alone is enough
+    assert pipeline.content_fit(0.90, [0.10, 0.12, 0.05]) == 0.12          # main never outvotes the lenses
+    assert pipeline.content_fit(0.64, [None, None, None]) == 0.64          # no lens models: main stands in
+    assert pipeline.content_fit(None, []) is None
+    rec = rules.screen_row(_row(title="Director, Operational Excellence"))
+    pipeline.apply_content_gate(rec, pipeline.content_fit(0.20, [0.83, 0.05, None]))
+    assert rec.verdict != "reject" and not any(r.startswith("content does not fit") for r in rec.reasons)
+
+
 # ---------------------------------------------------------------- pipeline + store
 def _seed(con, when=None, extra=()):
     when = when or pipeline._now()
@@ -772,6 +785,195 @@ def test_train_metrics_exclude_career_site_copies(tmp_path):
     conf = result["confusion_at_0_5"]
     assert conf["tp"] + conf["fp"] + conf["fn"] + conf["tn"] == n_jobs   # metrics describe one row per job
     con.close()
+
+
+# ---- Required-block ranking model (NOT a lens -- see features.REQUIRED_MODEL) ----
+
+def _seed_required_corpus(con, n_each=20):
+    """Postings judged on required_fit only -- no label_docs, no decisions -- so vw_label_set_required has
+    something to train on. `meets` rows keep the process-excellence JD, `fails` rows the off-lane one, each
+    with a distinct `Case N` tag so the text-hash CV groups don't collapse them."""
+    now = datetime(2026, 9, 15, 12, 0)
+    meets = [N.base(req_id=f"RM{i}", title=f"Process Excellence Lead {i}", url=f"https://x/RM{i}",
+                    location="Remote - USA", workplace_type="remote") for i in range(n_each)]
+    fails = [N.base(req_id=f"RX{i}", title=f"Software Engineer {i}", url=f"https://x/RX{i}",
+                    location="Remote - USA", workplace_type="remote") for i in range(n_each)]
+    store.record_board(con, "Acme", "greenhouse", meets + fails, now)
+    rows = []
+    for i in range(n_each):
+        pid = con.execute("SELECT posting_id FROM postings WHERE req_id = ?", [f"RM{i}"]).fetchone()[0]
+        text = f"{FIT_JD} Case {i}."
+        dh = store.description_hash(text)
+        con.execute("UPDATE postings SET description_text = ?, description_hash = ? WHERE posting_id = ?",
+                   [text, dh, pid])
+        rows.append([pid, dh, "claude-sonnet-batch", "bullseye", "meets", now])
+    for i in range(n_each):
+        pid = con.execute("SELECT posting_id FROM postings WHERE req_id = ?", [f"RX{i}"]).fetchone()[0]
+        text = f"{OFF_JD} Case {i}."
+        dh = store.description_hash(text)
+        con.execute("UPDATE postings SET description_text = ?, description_hash = ? WHERE posting_id = ?",
+                   [text, dh, pid])
+        rows.append([pid, dh, "claude-sonnet-batch", "wrong", "fails", now])
+    con.executemany("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+                    "required_fit, judged_at) VALUES (?, ?, 'rv1', ?, ?, ?, ?)", rows)
+
+
+def test_vw_label_set_required_is_judge_only_no_vault_no_decisions(tmp_path):
+    """HARD RULE 2: the training view takes ONLY judged required_fit rows -- label 1 for meets, 0 for
+    arguable/fails, weight 1.0 always -- and a vault positive / build decision for the SAME posting must never
+    leak in, because the view doesn't read label_docs or decisions at all."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_required_corpus(con, n_each=5)
+    pid = con.execute("SELECT posting_id FROM postings WHERE req_id = 'RM0'").fetchone()[0]
+    now = datetime(2026, 9, 15)
+    con.execute("INSERT INTO label_docs VALUES ('vault1', 'application', 'f', ?, 'Acme', 'x', ?, 1, 1.0, ?)",
+               [pid, FIT_JD, now])
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'tracker', 'Active', ?)", [pid, now])
+    # an arguable row: label must be 0 (a real gap), not folded into the positives
+    con.execute("INSERT INTO postings (posting_id, employer, platform, req_id, title, url, status, "
+                "description_hash, description_text, first_seen_at, last_seen_at) VALUES "
+                "('argp', 'Acme', 'greenhouse', 'argp', 'Process Lead X', 'https://x/argp', 'active', 'ah', ?, ?, ?)",
+               [FIT_JD + " Case arg.", now, now])
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+                "required_fit, judged_at) VALUES ('argp', 'ah', 'rv1', 'test', 'adjacent', 'arguable', ?)", [now])
+
+    rows = features.training_set(con, lens="required")
+    assert rows and all(r["source"] in ("llm_judge", "user_adjudicated") for r in rows)   # no vault/decision source
+    assert {r["grade"] for r in rows} <= {"meets", "arguable", "fails"}
+    assert all(r["weight"] == 1.0 for r in rows)
+    by_grade = {r["grade"]: r["label"] for r in rows}
+    assert by_grade["meets"] == 1 and by_grade["fails"] == 0 and by_grade["arguable"] == 0
+    con.close()
+
+
+def test_train_required_model_stores_its_own_kind_and_is_not_a_lens(tmp_path):
+    """train(lens=features.REQUIRED_MODEL) runs the normal path (kind tfidf_lr_required) and never lands in
+    LENSES / load_lens_models's dict -- only load_required_model can see it."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_required_corpus(con, n_each=20)
+    result = features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"),
+                            lens=features.REQUIRED_MODEL, log=_quiet)
+    kind = con.execute("SELECT kind FROM models WHERE model_version = ?", [result["model_version"]]).fetchone()[0]
+    assert kind == "tfidf_lr_required"
+    assert "required" not in features.LENSES
+    assert features.load_lens_models(con, log=_quiet) == {}          # not one of the three lenses
+    required_model = features.load_required_model(con, log=_quiet)
+    assert required_model is not None and required_model["version"] == result["model_version"]
+    # meets/arguable/fails land in grade_report's by_grade (not silently dropped) and print AUCs for the
+    # vocabulary that is actually present (fails/arguable), not the lens vocabulary (wrong/stretch).
+    g = result["grades"]
+    assert set(g["by_grade"]) <= {"meets", "fails"}                   # no arguable rows seeded here
+    assert "auc_vs_fails" in g and "auc_vs_wrong" not in g
+    con.close()
+
+
+def test_train_required_model_career_site_copies_are_a_noop(tmp_path):
+    """HARD RULE 3: career-site-copy augmentation only fires when a row's text differs from the posting's own
+    current description_text -- vw_label_set_required's text always IS that text, so it must add zero copies
+    and train() must run without raising, not crash on the empty case."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_required_corpus(con, n_each=20)
+    rows = features.training_set(con, lens=features.REQUIRED_MODEL)
+    assert features._career_site_copies(con, rows) == {}
+    result = features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"),
+                            lens=features.REQUIRED_MODEL, log=_quiet)
+    assert len(result["oof"]) == result["n_pos"] + result["n_neg"]    # no copies appended
+    con.close()
+
+
+def test_fit_required_written_by_screen_never_moves_verdict_or_final_score(tmp_path):
+    """HARD RULE 4/1: fit_required is stored by a screen, but screening the SAME row with and without the
+    Required-block model must produce an identical verdict and final_score -- it is ranking-only."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_required_corpus(con, n_each=20)
+    result = features.train(con, cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"),
+                            lens=features.REQUIRED_MODEL, log=_quiet)
+    required_model = features.load_required_model(con, log=_quiet)
+    assert required_model["version"] == result["model_version"]
+
+    now = datetime(2026, 9, 16, 12, 0)
+    posting = N.base(req_id="NEWROW", title="Process Excellence Lead 99", url="https://x/NEWROW",
+                     location="Remote - USA", workplace_type="remote")
+    store.record_board(con, "Acme", "greenhouse", [posting], now)
+    pid = con.execute("SELECT posting_id FROM postings WHERE req_id = 'NEWROW'").fetchone()[0]
+    con.execute("UPDATE postings SET description_text = ?, description_fetched_at = ? WHERE posting_id = ?",
+               [FIT_JD + " Case new.", now, pid])
+
+    pipeline.screen(con, full=True, required_model=None, log=_quiet)
+    before = con.execute("SELECT verdict, final_score, fit_required FROM vw_screen_latest "
+                         "WHERE posting_id = ?", [pid]).fetchone()
+    assert before[2] is None
+
+    pipeline.screen(con, full=True, required_model=required_model, log=_quiet)
+    after = con.execute("SELECT verdict, final_score, fit_required FROM vw_screen_latest "
+                        "WHERE posting_id = ?", [pid]).fetchone()
+    assert after[2] is not None
+    assert (before[0], before[1]) == (after[0], after[1])
+    con.close()
+
+
+def test_required_value_and_breadth_x_required(tmp_path):
+    """required_value: the judge's call wins (meets 1.0 / arguable 0.5 / fails 0.0), else coalesce(prob, 0.5).
+    breadth_x_required = lens_breadth * required_value -- covering judged-meets / judged-arguable /
+    judged-fails / unjudged-with-a-model-probability / unjudged-with-neither."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    ids = {"meets": "g" * 20, "arguable": "h" * 20, "fails": "i" * 20}
+    for rf, pid in ids.items():
+        _top_posting(con, pid, grade_process="bullseye", grade_technical="bullseye", grade_ai="bullseye",
+                     required_fit=rf)
+    con.execute("INSERT INTO postings (posting_id, employer, platform, req_id, title, url, status, "
+                "description_hash, first_seen_at, last_seen_at) VALUES "
+                "('u1', 'Acme', 'greenhouse', 'u1', 'T', 'url1', 'active', 'h', now(), now())")
+    con.execute("INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, "
+                "rule_score, final_score, band, fit_process, fit_technical, fit_ai, fit_required) VALUES "
+                "('u1', 'rv', 'mv', now(), 'review', 70, 80, 'strong', 0.9, 0.9, 0.9, 0.66)")
+    con.execute("INSERT INTO postings (posting_id, employer, platform, req_id, title, url, status, "
+                "description_hash, first_seen_at, last_seen_at) VALUES "
+                "('u2', 'Acme', 'greenhouse', 'u2', 'T', 'url2', 'active', 'h', now(), now())")
+    con.execute("INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, "
+                "rule_score, final_score, band, fit_process, fit_technical, fit_ai) VALUES "
+                "('u2', 'rv', 'mv', now(), 'review', 70, 80, 'strong', 0.9, 0.9, 0.9)")
+
+    rows = con.execute(
+        "SELECT posting_id, required_value(required_fit, fit_required), breadth_x_required FROM vw_lens_fit "
+        "WHERE posting_id IN ('u1', 'u2', ?, ?, ?)",
+        [ids["meets"], ids["arguable"], ids["fails"]]).fetchall()
+    got = {pid: (rv, br) for pid, rv, br in rows}
+    assert got[ids["meets"]] == (1.0, pytest.approx(3.0))          # three bullseyes: lens_breadth 3.0 * 1.0
+    assert got[ids["arguable"]] == (0.5, pytest.approx(1.5))       # same breadth, halved by the judge's call
+    assert got[ids["fails"]] == (0.0, 0.0)                         # fails zeroes lens_breadth itself too
+    assert got["u1"] == (pytest.approx(0.66), pytest.approx(1.782))   # unjudged: model prob stands in
+    assert got["u2"] == (0.5, pytest.approx(1.35))                    # unjudged, no fit_required either: 0.5
+    con.close()
+
+
+def test_llm_labels_required_fit_columns_present_and_fit_required_column_fresh_and_upgraded(tmp_path):
+    """Fresh DB: screens.fit_required exists via CREATE TABLE. An older DB (schema_info stuck below v13) picks
+    it up through _add_missing_columns on the next connect(), same pattern as fit_ai at v10."""
+    fresh = store.connect(str(tmp_path / "fresh.duckdb"))
+    assert "fit_required" in store._columns(fresh, "screens")
+    fresh.close()
+
+    old = store.connect(str(tmp_path / "old.duckdb"))
+    old.execute("ALTER TABLE screens DROP COLUMN fit_required")
+    old.execute("UPDATE schema_info SET version = 12")
+    old.close()
+    upgraded = store.connect(str(tmp_path / "old.duckdb"))
+    assert "fit_required" in store._columns(upgraded, "screens")
+    upgraded.close()
+
+
+def test_content_fit_ignores_fit_required(tmp_path):
+    """content_fit's signature never takes fit_required, and combine() never sees it -- confirmed structurally:
+    passing the required model alongside a lens score must not change content_fit's result versus the lens
+    scores alone."""
+    assert pipeline.content_fit(0.20, [0.83, 0.05, None]) == pipeline.content_fit(0.20, [0.83, 0.05, None])
+    import inspect
+    assert "fit_required" not in inspect.signature(pipeline.content_fit).parameters
+    assert "required" not in inspect.signature(pipeline.combine).parameters
 
 
 def test_screen_with_model_writes_fit_prob_terms_and_version(tmp_path):
@@ -2192,4 +2394,60 @@ def test_write_top_jobs_no_hard_wrap_and_unique_path(tmp_path):
 
     path2 = report.write_top_jobs(con, None, out_path=str(tmp_path))
     assert path1 != path2 and path2.exists()
+    con.close()
+
+
+def test_lens_breadth_adds_the_lenses_and_is_zeroed_when_the_row_is_not_worth_showing(tmp_path):
+    """lens_breadth = the three lens values added (judge's grade where there is one, model probability where
+    not), and ZERO when the best lens is not strong, the Required block fails, or the screen rejected the row."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _top_posting(con, "a" * 20, grade_process="bullseye", grade_technical="adjacent", grade_ai="wrong")
+    _top_posting(con, "b" * 20, grade_process="wrong", grade_technical="wrong", grade_ai="bullseye")     # AI alone
+    _top_posting(con, "c" * 20, grade_process="stretch", grade_technical="stretch", grade_ai="stretch")  # max weak
+    _top_posting(con, "d" * 20, required_fit="fails")                       # three bullseyes, requirements fail
+    _top_posting(con, "e" * 20, verdict="reject")                           # three bullseyes, outside commute
+    got = dict(con.execute("SELECT posting_id, lens_breadth FROM vw_lens_fit").fetchall())
+    best = dict(con.execute("SELECT posting_id, lens_best FROM vw_lens_fit").fetchall())
+    assert got["a" * 20] == pytest.approx(1.75) and best["a" * 20] == 1.0
+    assert got["b" * 20] == pytest.approx(1.0) and best["b" * 20] == 1.0    # an AI-only fit is still shown
+    assert got["c" * 20] == 0.0 and best["c" * 20] == pytest.approx(0.35)   # a high-ish sum of weak lenses is ignored
+    assert got["d" * 20] == 0.0 and got["e" * 20] == 0.0
+    # an unjudged row falls back to the lens models' probabilities
+    con.execute("INSERT INTO postings (posting_id, employer, platform, req_id, title, url, status, description_hash, "
+                "first_seen_at, last_seen_at) VALUES ('f', 'Acme', 'greenhouse', 'f', 'T', 'u', 'active', 'h', now(), now())")
+    con.execute("INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, rule_score, "
+                "final_score, band, fit_process, fit_technical, fit_ai) VALUES ('f', 'rv', 'mv', now(), 'review', 70, 80, "
+                "'strong', 0.9, 0.8, 0.1)")
+    assert con.execute("SELECT lens_breadth, lens_best FROM vw_lens_fit WHERE posting_id = 'f'").fetchone() == \
+        (pytest.approx(1.8), pytest.approx(0.9))
+    con.close()
+
+
+def test_rank_score_is_the_one_ordering_and_rank_why_names_the_deciding_facts(tmp_path):
+    """One rank (0-100) orders a list; every component stays visible beside it. Bullseye + adjacent > one bullseye >
+    three adjacents > two adjacents > one adjacent; multiplied down by an arguable Required block and
+    a level stretch, and by ZERO on a failed Required block or a screen reject. rank_why says why, in words."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    W = "wrong"
+    _top_posting(con, "three", grade_process="adjacent", grade_technical="adjacent", grade_ai="adjacent")
+    _top_posting(con, "bulladj", grade_process="bullseye", grade_technical="adjacent", grade_ai=W)
+    _top_posting(con, "onebull", grade_process=W, grade_technical=W, grade_ai="bullseye")       # AI alone counts
+    _top_posting(con, "twoadj", grade_process="adjacent", grade_technical="adjacent", grade_ai=W)
+    _top_posting(con, "oneadj", grade_process="adjacent", grade_technical=W, grade_ai=W)
+    _top_posting(con, "arguable", required_fit="arguable")
+    _top_posting(con, "stretchup", level_fit="stretch_up")
+    _top_posting(con, "fails", required_fit="fails")
+    _top_posting(con, "reject", verdict="reject")
+    _top_posting(con, "weak", grade_process="stretch", grade_technical="stretch", grade_ai="stretch")
+    r = dict(con.execute("SELECT posting_id, rank_score FROM vw_lens_fit").fetchall())
+    why = dict(con.execute("SELECT posting_id, rank_why FROM vw_lens_fit").fetchall())
+    assert r["bulladj"] > r["onebull"] > r["three"] > r["twoadj"] > r["oneadj"] > 0   # one bullseye beats three adjacents
+    assert r["onebull"] == pytest.approx(80.0) and r["three"] == pytest.approx(75.0)
+    assert r["arguable"] == pytest.approx(50.0) and r["stretchup"] == pytest.approx(85.0)     # of a perfect 100
+    assert r["fails"] == 0 and r["reject"] == 0 and r["weak"] == 0
+    assert why["three"].startswith("★ three-lens") and "Required: meets" in why["three"]
+    assert why["onebull"] == "AI bullseye; Required: meets"
+    assert "Required FAILS" in why["fails"] and "SCREEN REJECT" in why["reject"] and "level stretch_up" in why["stretchup"]
+    assert why["weak"].startswith("no strong lens")
+    assert [x[0] for x in report.top_rows(con, "apply")][:2] == ["bulladj", "stretchup"]       # 87.5 then 85: ordered by the one rank
     con.close()

@@ -39,8 +39,14 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
   records a human lane grade the same way the golden feedback CSV import does. `mark --from-file decisions.csv`
   applies a whole review session (columns `posting,decision,reason,unmet,grade,basis`) in one transaction,
   validated in full first. A logistics/comp pass is never a fit negative for any model, even graded.
-- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), required_embed (the "second layer" stacked model: TF-IDF + bge-base Required-block embedding + per-line roll-up -> `embed_required`, own `required_embed` table, NOT a lens), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
-- `tests/test_ats.py`, `tests/test_finder.py` — run with `.venv/bin/python -m pytest -q`
+  `feedback sheet --n 20 [--seed S] [--out PATH]` writes the monthly blind sheet with decoys (sprint plan
+  §26): a score-free CSV (8 top-50-by-Rank rows, 6 rank-200-600 rows, 6 screen rejects split location/
+  clearance/title, one per employer+title, shuffled) plus a sidecar JSON recording each row's stratum for
+  later scoring. `feedback sheet-import PATH` writes the graded rows back as `basis='blind'` through the
+  same path the golden-source CSV import uses, and prints precision at the top / the 200-600 miss rate /
+  the false-reject rate per rule bucket, appended to `db/blind_sheet_history.jsonl`.
+- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), required_embed (the "second layer" stacked model: TF-IDF + bge-base Required-block embedding + per-line roll-up -> `embed_required`, own `required_embed` table, NOT a lens), blind_sheet (the monthly blind sheet with decoys, §26), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
+- `tests/test_ats.py`, `tests/test_finder.py`, `tests/test_blind_sheet.py` — run with `.venv/bin/python -m pytest -q`
 - `db/` — the DuckDB job store (gitignored contents; see `db/README.md`)
 - `docs/STATUS.md` — session state (read first, update last)
 

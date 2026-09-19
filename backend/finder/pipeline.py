@@ -432,6 +432,30 @@ def required_embed_stage(con, *, log=print) -> Optional[dict]:
         return None
 
 
+def judge2_stage(con, *, top_n: int = 0, log=print) -> Optional[dict]:
+    """The LLM second judge (backend/finder/judge2.py, sprint plan §25), wired into the dead `llm_top` hook.
+    Same "logged, never fatal to the sweep" pattern as coverage_stage / required_embed_stage above, PLUS an
+    explicit live-call gate: without `JUDGE2_LIVE_OK=1` in the environment, this logs one line and skips --
+    it never makes the first live call on its own, however the pipeline is scheduled. `top_n <= 0` (the
+    `llm_top` default) also skips outright, same as the old "LLM stage: not built yet" line did."""
+    import os
+    if top_n <= 0:
+        return None
+    if not os.environ.get("JUDGE2_LIVE_OK"):
+        log("Judge2: skipped (JUDGE2_LIVE_OK not set -- the second judge never runs unscheduled; "
+           "run `finder.py judge2 run --dry-run` first, then set JUDGE2_LIVE_OK=1 to allow a live run).")
+        return None
+    t = time.monotonic()
+    try:
+        from . import judge2
+        result = judge2.run(con, top_n=top_n, i_have_approval=True, log=log)
+        log(f"Judge2 stage: {result.get('reviewed', 0)} reviewed ({time.monotonic() - t:.1f}s)")
+        return result
+    except Exception as exc:  # logged, never fatal to the sweep
+        log(f"Judge2: failed ({type(exc).__name__}: {exc}); continuing without it")
+        return None
+
+
 def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: bool = True, full: bool = False,
           use_model: bool = True, use_coverage: bool = True, log=print) -> dict:
     """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage.
@@ -458,7 +482,7 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
         out["required_embed"] = required_embed_stage(con, log=log)
     if llm_top:
-        log("LLM stage: not built yet (Phase 4); skipped.")
+        out["judge2"] = judge2_stage(con, top_n=llm_top, log=log)
     if report and vault_dir:
         t = time.monotonic()
         meta = {"since": since, "screen": out["screen"], "tracker": out.get("tracker"),

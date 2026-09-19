@@ -175,3 +175,7 @@ evidence.local.toml
 db/batches*/
 # Experiment lab: frozen extracts of real JD text and the candidate's evidence record. Never commit.
 db/embed_lab/
+
+# The second judge's user-curated background sheet (sprint plan §25, `background="file"`). The example file
+# ships with placeholder content; the real one never does.
+judge2_background.local.md

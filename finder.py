@@ -32,6 +32,10 @@ Usage:
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
     .venv/bin/python finder.py retrain [--dry-run]             # weekly retrain, gated + ledgered (sprint plan §24)
     .venv/bin/python finder.py retrain --history               # print the model_runs ledger, newest first
+    .venv/bin/python finder.py judge2 run --dry-run --show 3    # print payloads, call nothing (sprint plan §25)
+    .venv/bin/python finder.py judge2 run --eval-set --i-have-approval   # judge the blind human-graded rows
+    .venv/bin/python finder.py judge2 eval                      # the §25 acceptance bar vs blind human rows
+    .venv/bin/python finder.py judge2 status                    # counts, discard/downgrade rates, last eval
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -529,6 +533,27 @@ def cmd_retrain(con, a):
     retrain_mod.run(con, dry_run=a.dry_run)
 
 
+def cmd_judge2(con, a):
+    """The LLM second judge (sprint plan §25, backend/finder/judge2.py). `run` refuses to make a live call
+    without JUDGE2_LIVE_OK=1 or --i-have-approval; `--dry-run` never needs either."""
+    from backend.finder import judge2
+    if a.action == "status":
+        judge2.status(con, background=a.background, background_path=a.background_file)
+        return
+    if a.action == "eval":
+        judge2.evaluate(con, background=a.background, background_path=a.background_file)
+        return
+    # action == "run"
+    try:
+        result = judge2.run(con, top_n=a.top, dry_run=a.dry_run, force=a.force, show=a.show,
+                            background=a.background, background_path=a.background_file,
+                            only_blind=a.eval_set, i_have_approval=a.i_have_approval)
+    except RuntimeError as exc:
+        print(exc)
+        sys.exit(1)
+    print(result)
+
+
 def cmd_setup_check(con, a):
     from backend.finder import setup_check
     sys.exit(0 if setup_check.run(con, manifest=a.manifest) else 1)
@@ -704,6 +729,22 @@ def main():
                         "'dry-run'), promote and rescreen nothing")
     s.add_argument("--history", action="store_true", help="print the model_runs ledger, newest first")
     s.set_defaults(func=cmd_retrain)
+
+    s = sub.add_parser("judge2", parents=[common],
+                       help="LLM second judge on the Required block (sprint plan §25); never live without a go")
+    s.add_argument("action", choices=["run", "eval", "status"])
+    s.add_argument("--top", type=int, default=150, help="run: top N by rank_score (default 150)")
+    s.add_argument("--dry-run", action="store_true", help="run: build and print payloads, call nothing")
+    s.add_argument("--show", type=int, default=1, help="run --dry-run: how many full payloads to print")
+    s.add_argument("--force", action="store_true", help="run: re-review even if already reviewed at this hash")
+    s.add_argument("--eval-set", action="store_true",
+                   help="run: target exactly the blind human-graded rows (vw_report_feedback_blind), "
+                        "ignoring the top-N/decided/screen filters, so evaluate() has something to score")
+    s.add_argument("--background", choices=["public", "file"], default="public")
+    s.add_argument("--background-file", help="path for --background file (default $JUDGE2_BACKGROUND_FILE)")
+    s.add_argument("--i-have-approval", action="store_true",
+                   help="the other half of the live-call gate, alongside JUDGE2_LIVE_OK=1")
+    s.set_defaults(func=cmd_judge2)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

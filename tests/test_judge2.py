@@ -537,3 +537,51 @@ def test_stale_review_has_no_effect_after_jd_changes(tmp_path):
     assert after[0] == "model"
     assert after[1] is None
     con.close()
+
+
+# ---------------------------------------------------------------- audit fixes (2026-09-19)
+def test_preferred_lines_are_never_sent_as_required():
+    """requirements.py's 'required' GROUP is Required + Preferred; the payload must split on SECTION."""
+    payload = judge2.build_payload(title="T", employer="E", jd_text=REALISTIC_JD)
+    assert not any("Black Belt" in l for l in payload["required_lines"])
+    assert any("Black Belt" in l for l in payload["preferred_lines"])
+    assert any("clearance" in l.lower() for l in payload["required_lines"])
+
+
+def test_evaluate_partial_eval_run_is_insufficient_not_a_pass(tmp_path):
+    """Six catch + six agree rows judged perfectly, but a third of the eval set never came back: no pass."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    for i in range(6):
+        _blind_row(con, f"C{i}", human_fit="fails", judge1_fit="meets", judge2_fit="fails")
+        _blind_row(con, f"A{i}", human_fit="meets", judge1_fit="meets", judge2_fit="meets")
+    for i in range(6):
+        _blind_row(con, f"U{i}", human_fit="fails", judge1_fit="meets", judge2_fit=None)
+    out = judge2.evaluate(con, log=lambda *_: None)
+    assert out["n_unjudged"] == 6 and out["catch_rate"] == 1.0 and out["agree_rate"] == 1.0
+    assert out["insufficient"] and not out["passed"]
+    con.close()
+
+
+def test_every_request_is_paced_even_when_it_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
+    monkeypatch.setenv("GEMINI_API_MODEL", "m")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    for i in range(3):
+        pid, _ = _make_posting(con, f"R{i}")
+        _insert_screen(con, pid)
+    sleeps = []
+    result = judge2.run(con, top_n=5, transport=lambda url, headers=None, json=None: _FakeResponse(400, {}),
+                        sleep_fn=sleeps.append, rpm=10, log=lambda *_: None)
+    assert result["reviewed"] == 0 and result["skipped_no_model"] == 3
+    assert sleeps.count(6.0) == 2          # between postings, although none succeeded
+
+
+def test_live_run_refuses_without_a_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
+    monkeypatch.setenv("GEMINI_API_MODEL", "m")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        judge2.run(con, top_n=1, transport=_ExplodingTransport(), sleep_fn=lambda s: None)
+    con.close()

@@ -98,12 +98,13 @@ later row that lacks one, and a row's `basis` never moves from `blind` to `seen`
 reported, not silently resolved. A file whose header carries `proposal_confidence` is a machine-drafted
 proposal, not a confirmed grading sheet, and is refused unless `--accept-proposed` is given. A derived
 train/frozen split (`half`/`baseline_judge_grade` columns) is never ingestible and is always refused. A
-single-lens (Applied-AI) grade sheet parses and validates for the `--dry-run` report but is never written
-live -- `llm_labels.lens_grade_source` is one flag for the whole row, not one per lens, so there is no way to
-record a human `grade_ai` today without either laundering an unasserted overall grade as human-adjudicated or
-overwriting an existing `required_fit`/other lens grade on the same posting; see `gold_ingest.ingest_f4`'s
-docstring for what schema change would fix it. `--dry-run` runs detection, normalization and precedence
-resolution against the DB and writes nothing.
+single-lens (Applied-AI) grade sheet writes into its own `human_lens_grades` table (schema v19), keyed
+`(posting_id, description_hash, lens)` -- NEVER into `llm_labels`, and never touching the posting's overall
+grade, `required_fit`, or the other two lenses. A per-lens training view (`vw_label_set_process` /
+`_technical` / `_ai`) substitutes a human lens grade for the judge's own on that one lens, source
+`user_adjudicated`, only for the posting's CURRENT description_hash; the averaged `vw_label_set` (overall
+grade) is unchanged. See `gold_ingest.ingest_f4` and `store.py`'s `human_lens_grades` table comment.
+`--dry-run` runs detection, normalization and precedence resolution against the DB and writes nothing.
 ### The LLM second judge (§25) -- built, never called live from here
 
 `backend/finder/judge2.py` sends one narrow, strict prompt per posting: the Required lines (parsed by the

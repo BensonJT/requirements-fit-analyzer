@@ -26,7 +26,16 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 18  # v18 (2026-09-19): judge2_reviews / judge2_evals tables -- the LLM "second judge" on the
+SCHEMA_VERSION = 19  # v19 (2026-09-19): human_lens_grades table -- a human grade for ONE lens only (the F4
+                     #                  gold sheet, sprint plan §22.3/§25/§26), keyed (posting_id,
+                     #                  description_hash, lens). NEVER writes to or alters llm_labels: the
+                     #                  overall grade, required_fit and the OTHER lenses stay whatever they
+                     #                  already were. A per-lens training view (vw_label_set_process/technical/
+                     #                  ai) substitutes this grade for the judge's own lens grade, source
+                     #                  'user_adjudicated', ONLY for the posting's current description_hash;
+                     #                  the averaged vw_label_set (overall grade) is unchanged. Additive only
+                     #                  (CREATE TABLE IF NOT EXISTS below is enough, same as v17/v18);
+                     # v18 (2026-09-19): judge2_reviews / judge2_evals tables -- the LLM "second judge" on the
                      #                  Required block (sprint plan §25). Additive only (CREATE TABLE IF NOT
                      #                  EXISTS below is enough, same as v17); NOTHING in this section may be
                      #                  run against a live API without the user's explicit go -- the schema
@@ -417,6 +426,35 @@ CREATE TABLE IF NOT EXISTS report_feedback (
     assessed_at TIMESTAMP NOT NULL, loaded_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, assessor)
 );
+
+-- A human grade for ONE lens only (v19, sprint plan §22.3/§25/§26's F4 sheet): the user graded whether a
+-- posting is process / technical / applied-AI work along a SINGLE axis, not the overall bullseye/adjacent/
+-- stretch/wrong call `report_feedback.human_grade` carries. Separate table, not a report_feedback column,
+-- because report_feedback's PK is (posting_id, description_hash, assessor) -- one row per assessor per JD
+-- text -- and a single-lens grade is a DIFFERENT axis than the overall grade on that same row, not another
+-- assessor's opinion of it. NEVER read by llm_labels or bridge_required_label: this table makes no claim
+-- about required_fit, the overall grade, or the OTHER two lenses. `description_hash` is the posting's hash
+-- AT INGEST TIME (coalesced to '' when unknown), same "graded against THIS text, retired when the JD moves"
+-- shape as report_feedback / llm_labels -- see vw_human_lens_grades_current for how a stale hash is dropped.
+-- `basis` follows report_feedback's own blind|seen distinction (sprint plan §22.4): a 'seen' row must never
+-- silently overwrite an existing 'blind' one for the same (posting_id, description_hash, lens) -- gold_ingest
+-- reports that as a conflict and keeps the existing row, the same precedence _resolve_basis already gives
+-- report_feedback.
+CREATE TABLE IF NOT EXISTS human_lens_grades (
+    posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL,
+    lens              VARCHAR NOT NULL CHECK (lens IN ('process', 'technical', 'ai')),
+    grade             VARCHAR NOT NULL CHECK (grade IN ('bullseye', 'adjacent', 'stretch', 'wrong')),
+    basis             VARCHAR NOT NULL CHECK (basis IN ('blind', 'seen')),
+    level_fit         VARCHAR,             -- in_range|stretch_up|out_of_reach|too_low; NULL = not assessed.
+                                            -- Reported alongside the grade only -- never fed into any level
+                                            -- training (no such training exists anywhere in this repo; the
+                                            -- level rule is a live computation, not a trained model, and every
+                                            -- other sheet format's level_fit is likewise report/agreement-only).
+    note              VARCHAR,
+    source_file       VARCHAR,             -- basename of the sheet this row was ingested from
+    graded_at         TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, lens)
+);
 """
 
 VIEWS = """
@@ -548,6 +586,14 @@ CREATE OR REPLACE VIEW vw_judge2_eval_latest AS
 -- is standing in for, rather than this macro silently inventing a 0.5.
 CREATE OR REPLACE MACRO judge2_value(required_fit) AS
     CASE required_fit WHEN 'meets' THEN 1.0 WHEN 'partial' THEN 0.5 WHEN 'fails' THEN 0.0 ELSE NULL END;
+
+-- human_lens_grades (v19) rows whose description_hash still matches the posting's CURRENT text -- same "a
+-- stale hash is simply absent" shape as vw_coverage_latest / vw_required_embed_latest. Read by the per-lens
+-- training views below (a human single-lens grade REPLACES the judge's own grade for that lens, never touches
+-- llm_labels) and by feedback.export() to print a human lens grade beside the judge's.
+CREATE OR REPLACE VIEW vw_human_lens_grades_current AS
+    SELECT h.* FROM human_lens_grades h JOIN postings p
+      ON p.posting_id = h.posting_id AND coalesce(p.description_hash, '') = h.description_hash;
 
 -- The user's own adjudication always wins over a judge grade for the same posting, whenever it was written;
 -- otherwise the newest grade for the posting's current text.
@@ -956,6 +1002,13 @@ CREATE OR REPLACE VIEW vw_label_set AS
 -- lens grade instead of the averaged one, and only rows judged on that lens take part. The shared sources
 -- (vault documents, decisions) stay in both: they describe the candidate, not a lens, and they anchor what
 -- "his world" looks like while the lens grades do the discriminating.
+-- A human_lens_grades row for this lens (current hash) REPLACES the judge's own grade_process for that
+-- posting, source 'user_adjudicated' -- v19, sprint plan §22.3/§25/§26. The first UNION ALL branch below
+-- keeps its INNER join to vw_llm_labels_latest (one row per judged posting), so a posting with BOTH a judge
+-- row and a human override appears exactly once, with the human grade winning. The final branch adds postings
+-- that have a human lens grade but were never judged at all (no llm_labels row of any kind) -- excluded from
+-- the first branch's join, so no posting can appear twice. llm_labels itself, and the averaged vw_label_set,
+-- are untouched by any of this.
 CREATE OR REPLACE VIEW vw_label_set_process AS
     SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
     FROM label_docs WHERE text IS NOT NULL
@@ -967,15 +1020,25 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           lens_label_source(l.scorer, l.lens_grade_source),
+           CASE WHEN h.lens IS NOT NULL THEN 'user_adjudicated'
+                ELSE lens_label_source(l.scorer, l.lens_grade_source) END,
            p.posting_id, p.employer, p.title, p.description_text,
-           CASE WHEN l.grade_process IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
-           CASE l.grade_process WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+           CASE WHEN coalesce(h.grade, l.grade_process) IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE coalesce(h.grade, l.grade_process) WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                                 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
-           l.grade_process
+           coalesce(h.grade, l.grade_process)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_process IS NOT NULL
-      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
+    LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'process'
+    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_process) IS NOT NULL
+      AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
+    UNION ALL
+    SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN h2.grade IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE h2.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           h2.grade
+    FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
+    LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
+    WHERE h2.lens = 'process' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
 
 CREATE OR REPLACE VIEW vw_label_set_technical AS
     SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
@@ -988,15 +1051,25 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           lens_label_source(l.scorer, l.lens_grade_source),
+           CASE WHEN h.lens IS NOT NULL THEN 'user_adjudicated'
+                ELSE lens_label_source(l.scorer, l.lens_grade_source) END,
            p.posting_id, p.employer, p.title, p.description_text,
-           CASE WHEN l.grade_technical IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
-           CASE l.grade_technical WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+           CASE WHEN coalesce(h.grade, l.grade_technical) IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE coalesce(h.grade, l.grade_technical) WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                                   WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
-           l.grade_technical
+           coalesce(h.grade, l.grade_technical)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_technical IS NOT NULL
-      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
+    LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'technical'
+    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_technical) IS NOT NULL
+      AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
+    UNION ALL
+    SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN h2.grade IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE h2.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           h2.grade
+    FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
+    LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
+    WHERE h2.lens = 'technical' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
 
 -- Applied-AI lens training set (21), same shape as vw_label_set_process / vw_label_set_technical, reading
 -- grade_ai. features.LENS_VIEWS["ai"] points here (Agent C wires the lens name in; this view can exist and
@@ -1014,15 +1087,25 @@ CREATE OR REPLACE VIEW vw_label_set_ai AS
     FROM label_docs WHERE text IS NOT NULL AND label = 0
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           lens_label_source(l.scorer, l.lens_grade_source),
+           CASE WHEN h.lens IS NOT NULL THEN 'user_adjudicated'
+                ELSE lens_label_source(l.scorer, l.lens_grade_source) END,
            p.posting_id, p.employer, p.title, p.description_text,
-           CASE WHEN l.grade_ai IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
-           CASE l.grade_ai WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
+           CASE WHEN coalesce(h.grade, l.grade_ai) IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE coalesce(h.grade, l.grade_ai) WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                            WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
-           l.grade_ai
+           coalesce(h.grade, l.grade_ai)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_ai IS NOT NULL
-      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
+    LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'ai'
+    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_ai) IS NOT NULL
+      AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
+    UNION ALL
+    SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
+           CASE WHEN h2.grade IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
+           CASE h2.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
+           h2.grade
+    FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
+    LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
+    WHERE h2.lens = 'ai' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
 
 -- The Required-block ranking model's training set (features.LENS_VIEWS["required"]). NOT a lens -- it answers
 -- a different question than process/technical/ai (does the candidate clear THIS posting's own Required block,

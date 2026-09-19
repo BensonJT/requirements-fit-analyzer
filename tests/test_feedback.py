@@ -245,6 +245,36 @@ def test_export_needs_you_branches(tmp_path, monkeypatch):
     con.close()
 
 
+def test_export_surfaces_human_lens_grades_beside_judge_grades(tmp_path):
+    """v19: a human_lens_grades row for a posting's current hash shows up in export() as human_grade_<lens>,
+    beside judge_grade_<lens> -- report-only, never written by export() itself."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 19)
+    pid = _seed_posting(con, "H1", now=now, description_hash="h1")
+    con.execute("""INSERT INTO report_feedback
+                    (posting_id, description_hash, verdict, basis, assessor, confirmed_by_user,
+                     human_grade, assessed_at, loaded_at)
+                   SELECT ?, description_hash, 'build', 'jd_read', 'user', TRUE, 'bullseye', ?, ?
+                   FROM postings WHERE posting_id = ?""", [pid, now, now, pid])
+    con.execute("""INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade,
+                   grade_ai, judged_at)
+                   SELECT ?, description_hash, 'rv1', 'claude-sonnet-batch', 'adjacent', 'wrong', ?
+                   FROM postings WHERE posting_id = ?""", [pid, now, pid])
+    con.execute("""INSERT INTO human_lens_grades (posting_id, description_hash, lens, grade, basis,
+                   source_file, graded_at)
+                   SELECT ?, description_hash, 'ai', 'bullseye', 'seen', 'f4.csv', ?
+                   FROM postings WHERE posting_id = ?""", [pid, now, pid])
+
+    out_path = tmp_path / "export.csv"
+    feedback.export(con, out_path, log=_quiet)
+    with out_path.open(newline="", encoding="utf-8") as f:
+        row = next(r for r in csv.DictReader(f) if r["posting_id"] == pid)
+    assert row["judge_grade_ai"] == "wrong"
+    assert row["human_grade_ai"] == "bullseye"
+    assert row["human_grade_process"] == ""
+    con.close()
+
+
 def test_ts_accepts_the_formats_excel_rewrites_a_timestamp_into():
     assert feedback._ts("2026-09-16T10:30:00") == datetime(2026, 9, 16, 10, 30)
     assert feedback._ts("9/16/2026 10:30") == datetime(2026, 9, 16, 10, 30)

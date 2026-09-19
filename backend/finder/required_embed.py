@@ -140,7 +140,25 @@ def _fetch_population(con) -> dict:
     sprint plan §22.3 Gap 2) already outranks the judge's own here -- no separate carve-out for
     scorer='user-adjudicated': that used to be excluded outright, before a human required_fit call quoted its
     own unmet lines, which the line model below (_line_labels) can now learn from like any other quote.
-    Returns posting_id -> row."""
+
+    The inclusion rule is `l.required_fit IS NOT NULL` alone -- explicit, not incidental: it is the ONLY gate
+    on a scorer='user-adjudicated' row here, and it is what makes admitting them safe. It reaches every
+    PRE-EXISTING golden-CSV adjudicated row (loaded by feedback.load_csv, not only rows `finder.py mark`
+    writes) that carries a required_fit, exactly as it reaches a judge row -- there is no way to tell those
+    two producers apart from this query, nor any need to: both are "a human's own Required-block call, at
+    this description_hash", the only thing this module borrows from llm_labels. It does NOT admit a row on
+    the strength of scorer='user-adjudicated' alone: `record_mark()`'s 'placeholder' rows (required_fit set,
+    but the posting was never actually judged, and no lane info exists) still pass this filter -- correctly,
+    since a human required_fit call on a never-judged posting is real information for THIS model's target
+    (required_fit), whatever it does or doesn't say about the lane (`_is_lens_surfaced` reads grade_process/
+    technical/ai, all NULL on a placeholder row, so it never enters the lens-surfaced block/roll-up training
+    population -- see train() below).
+
+    Every posting_id this returns goes through the SAME employer-fold / _broad_oof machinery as an ordinary
+    judge row (`train()` never branches on scorer or `lens_grade_source`), so the "every judged posting gets
+    a held-out value, never an in-sample one" rule (this module's docstring) covers a human-adjudicated
+    required_fit row exactly like a judge one -- confirmed by reading train()/`_broad_oof`, which key
+    entirely on posting_id/fold_of, not on scorer identity. Returns posting_id -> row."""
     cols = ("posting_id", "employer", "title", "description_text", "grade_process", "grade_technical",
             "grade_ai", "required_fit", "required_unmet")
     p_cols = {"employer", "title", "description_text"}

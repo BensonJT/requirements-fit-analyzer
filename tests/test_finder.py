@@ -1994,6 +1994,168 @@ def test_required_embed_population_includes_user_adjudicated_rows(tmp_path):
     con.close()
 
 
+# ---- 2026-09-19 audit fix: a required-only mark must not launder the lane grade (§22.3 Gap 2) ----
+
+def test_lens_label_source_macro(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    row = con.execute("""
+        SELECT lens_label_source('claude-sonnet-batch', NULL),
+               lens_label_source('user-adjudicated', 'human'),
+               lens_label_source('user-adjudicated', 'carried'),
+               lens_label_source('user-adjudicated', 'placeholder'),
+               lens_label_source('user-adjudicated', NULL)
+    """).fetchone()
+    assert row == ("llm_judge", "user_adjudicated", "llm_judge", None, "user_adjudicated")
+    con.close()
+
+
+def test_llm_labels_lens_grade_source_column_and_backfill(tmp_path):
+    """v16 additive column; every pre-existing scorer='user-adjudicated' row is backfilled to 'human' -- the
+    only way such a row could have existed before this column did."""
+    fresh = store.connect(str(tmp_path / "fresh.duckdb"))
+    assert "lens_grade_source" in store._columns(fresh, "llm_labels")
+    fresh.close()
+
+    old = store.connect(str(tmp_path / "old.duckdb"))
+    now = datetime(2026, 9, 15, 12)
+    store.record_board(old, "Acme", "greenhouse", [N.base(req_id="P1", title="Process Excellence Lead",
+                                                           url="https://x/P1", location="Remote - USA",
+                                                           workplace_type="remote")], now)
+    pid = old.execute("SELECT posting_id FROM postings WHERE req_id = 'P1'").fetchone()[0]
+    old.execute("UPDATE postings SET description_hash = 'h1' WHERE posting_id = ?", [pid])
+    old.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "judged_at) VALUES (?, 'h1', 'r1', 'user-adjudicated', 'bullseye', ?)", [pid, now])
+    old.execute("ALTER TABLE llm_labels DROP COLUMN lens_grade_source")
+    old.execute("UPDATE schema_info SET version = 15")
+    old.close()
+
+    upgraded = store.connect(str(tmp_path / "old.duckdb"))
+    assert "lens_grade_source" in store._columns(upgraded, "llm_labels")
+    assert upgraded.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ?",
+                           [pid]).fetchone()[0] == "human"
+    upgraded.close()
+
+
+def test_required_only_mark_on_judged_posting_carries_judges_lens_grade_not_human(tmp_path):
+    """Audit fix scenario 1: a required-only mark on an ALREADY-judged posting must not launder the judge's
+    own lens grade into a human label. The required label set sees the human's fails; the lens label set
+    still attributes the SAME grade to the judge, at the judge's own weight and source name."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "grade_process, grade_technical, required_fit, judged_at) VALUES "
+               "(?, ?, 'rv1', 'claude-sonnet-batch', 'bullseye', 'bullseye', 'adjacent', 'meets', ?)",
+               [pid, dh, now])
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade=None, basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    proc_rows = {r["posting_id"]: r for r in features.training_set(con, lens="process")
+                if r["source"] != "decision"}
+    assert proc_rows[pid]["source"] == "llm_judge" and proc_rows[pid]["grade"] == "bullseye"
+    assert proc_rows[pid]["weight"] == 1.0
+    assert con.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ? "
+                       "AND scorer = 'user-adjudicated'", [pid]).fetchone()[0] == "carried"
+    con.close()
+
+
+def test_required_only_mark_on_never_judged_posting_excluded_from_lens_and_bullseye(tmp_path):
+    """Audit fix scenario 2: a required-only mark on a posting that was NEVER judged makes a required_fit
+    claim only -- it must be absent from every lens and bullseye label set (its placeholder grade is not a
+    lane claim), while still present, as human, in the required label set."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade=None, basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    for lens in (None, "process", "technical", "ai", "bullseye"):
+        rows = features.training_set(con, lens=lens)
+        assert pid not in {r["posting_id"] for r in rows if r["source"] != "decision"}
+    assert con.execute("SELECT lens_grade_source FROM llm_labels WHERE posting_id = ?",
+                       [pid]).fetchone()[0] == "placeholder"
+    con.close()
+
+
+def test_required_mark_with_grade_is_human_in_both(tmp_path):
+    """Audit fix scenario 3: --grade together with a required call makes BOTH claims human."""
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass",
+                                   reason="requirement: needs an active clearance",
+                                   unmet=["Active TS/SCI"], grade="bullseye", basis="seen", from_file=None))
+    req_rows = {r["posting_id"]: r for r in features.training_set(con, lens="required")}
+    assert req_rows[pid]["label"] == 0 and req_rows[pid]["source"] == "user_adjudicated"
+    base_rows = {r["posting_id"]: r for r in features.training_set(con, lens=None) if r["source"] != "decision"}
+    assert base_rows[pid]["source"] == "user_adjudicated" and base_rows[pid]["grade"] == "bullseye"
+    assert con.execute("SELECT lens_grade_source, grade_process FROM llm_labels WHERE posting_id = ?",
+                       [pid]).fetchone() == ("human", None)
+    con.close()
+
+
+def test_judge_agreement_ignores_placeholder_rows(tmp_path):
+    """Audit fix scenario 4: judge.agreement() must not count a required-only mark's fabricated placeholder
+    grade as if the judge had given it."""
+    from backend.finder import judge as J
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    finder.cmd_mark(con, Namespace(target=pid, decision="build", reason=None, unmet=None, grade=None,
+                                   basis="seen", from_file=None))
+    result = J.agreement(con, log=_quiet)
+    assert result["total"] == {}
+    assert result["pursued"] == {}
+    con.close()
+
+
+def test_judge_agreement_still_counts_carried_rows_as_the_judges_own_grade(tmp_path):
+    """A carried row IS the judge's real answer, so it must still be counted (unlike a placeholder)."""
+    from backend.finder import judge as J
+    import finder
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "required_fit, judged_at) VALUES (?, ?, 'rv1', 'claude-sonnet-batch', 'wrong', 'fails', ?)",
+               [pid, dh, now])
+    # "pursued" is keyed off label_docs (application) / tracker / a build decision -- label_docs avoids a
+    # race against cmd_mark's own (real-clock) `decided_at` on the `decisions` table below.
+    con.execute("INSERT INTO label_docs VALUES ('vault1', 'application', 'f', ?, 'Acme', 'x', ?, 1, 1.0, ?)",
+               [pid, FIT_JD, now])
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="requirement: needs a CPA",
+                                   unmet=["CPA license required"], grade=None, basis="seen", from_file=None))
+    result = J.agreement(con, log=_quiet)
+    assert result["total"] == {"wrong": 1}
+    assert result["pursued"] == {"wrong": 1}
+    con.close()
+
+
+def test_feedback_export_judge_grade_ignores_adjudicated_bridge_row(tmp_path):
+    """feedback.export()'s judge_grade column must show the judge's REAL latest grade, not a required-only
+    mark's carried-forward or placeholder bridge row (which now always outranks the judge in
+    vw_llm_labels_latest)."""
+    con, pid = _covered_posting(tmp_path)
+    now = datetime(2026, 9, 15, 12)
+    dh = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    con.execute("INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade, "
+               "judged_at) VALUES (?, ?, 'rv1', 'claude-sonnet-batch', 'wrong', ?)", [pid, dh, now])
+    import finder
+    finder.cmd_mark(con, Namespace(target=pid, decision="pass", reason="requirement: needs a CPA",
+                                   unmet=["CPA license required"], grade=None, basis="seen", from_file=None))
+    # cmd_mark already wrote the report_feedback row (verdict='pass', reason_code='requirement'); export()
+    # is what this test checks, not a second hand-written row.
+    import csv
+    out = feedback.export(con, tmp_path / "export.csv", log=_quiet)
+    with out.open() as f:
+        rows = list(csv.DictReader(f))
+    row = next(r for r in rows if r["posting_id"] == pid)
+    assert row["judge_grade"] == "wrong"
+    con.close()
+
+
 def test_setup_check_passes_on_example_and_fails_on_broken_manifest(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     assert setup_check.run(con, manifest=os.path.join(ROOT, "evidence.example.toml"), log=_quiet)

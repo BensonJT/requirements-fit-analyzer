@@ -12,7 +12,6 @@ import json
 import os
 import random
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -286,8 +285,7 @@ def import_sheet(con, path, *, history_path=None, log=print, now=None) -> dict:
             continue
         graded.append(parsed)
 
-    bridge_rows = []
-    csv_rows = []
+    records = []
     for g in graded:
         hit = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?",
                           [g["posting_id"]]).fetchone()
@@ -295,32 +293,20 @@ def import_sheet(con, path, *, history_path=None, log=print, now=None) -> dict:
         if not description_hash:
             raise ValueError(f"{g['posting_id']} has no description_hash yet -- cannot import its grade")
         required_unmet = g["required_unmet"] if g["required_fit"] == "fails" else (g["required_unmet"] or "")
-        csv_rows.append({
+        records.append({
             "posting_id": g["posting_id"], "description_hash": description_hash, "human_grade": g["human_grade"],
-            "level_fit": g["level_fit"], "basis": "blind", "assessor": "user", "confirmed_by_user": "TRUE",
+            "level_fit": g["level_fit"], "basis": "blind", "assessor": "user", "confirmed_by_user": True,
             # A blind-sheet row is a grade, not a build/pass/hold decision -- report_feedback.verdict is
             # NOT NULL, so it is filled with the neutral 'consider' rather than invented as 'build'/'pass'.
             "verdict": "consider",
             "note": g["note"], "required_fit": g["required_fit"], "required_unmet": required_unmet,
-            "assessed_at": now.isoformat(),
+            "assessed_at": now,
         })
-        if g["required_fit"] is not None:
-            bridge_rows.append((g["posting_id"], description_hash, g["human_grade"], g["required_fit"],
-                               required_unmet))
 
-    if csv_rows:
-        with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", delete=False, encoding="utf-8") as tmp:
-            w = csv.DictWriter(tmp, fieldnames=feedback.FEEDBACK_CSV_COLUMNS, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(csv_rows)
-            tmp_path = tmp.name
-        try:
-            feedback.load_csv(con, tmp_path, log=lambda *_a, **_k: None)
-        finally:
-            os.unlink(tmp_path)
-        for pid, description_hash, human_grade, required_fit, required_unmet in bridge_rows:
-            feedback.bridge_required_label(con, pid, description_hash, human_grade, required_fit,
-                                           required_unmet, now)
+    if records:
+        # Goes through feedback.write_records -- the same INSERT and the same required_fit -> llm_labels
+        # bridge load_csv's golden-source import uses -- instead of round-tripping through a temp CSV file.
+        feedback.write_records(con, records, log=lambda *_a, **_k: None)
 
     stats = _score_against_sidecar({g["posting_id"]: g for g in graded}, sidecar)
     log(f"blind sheet import: {len(graded)} graded, {skipped} ungraded skipped (of {len(raw_rows)} rows)")

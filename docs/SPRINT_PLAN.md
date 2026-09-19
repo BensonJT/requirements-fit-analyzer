@@ -872,7 +872,45 @@ This is the subtle part and it must not be blurred.
 **The ledger.** New table `model_runs` (run_id, model, trained_at, n_pos, n_neg, auc, shuffle_auc, promoted, reason). `finder.py retrain --history` prints it. This is what makes "did last week's feedback help" answerable.
 **Scheduling.** Not a cron job at first: `sweep_ats.py` prints a one-line reminder when the newest promoted model is more than 7 days old or when 25 or more new human labels have arrived since it was trained. Automate only after four clean manual weeks.
 
-## 25. Amendment — the LLM second judge (2026-09-19, Fable; PROPOSED. Nothing in this section may be run without the user's explicit go, because it sends JD text and background text to an external API)
+## 25. Amendment — the LLM second judge (2026-09-19, Fable; BUILT-NOT-RUN. Nothing in this section may be run without the user's explicit go, because it sends JD text and background text to an external API)
+
+**As built (2026-09-19, branch `second-judge`), what differs from the proposal below and why:**
+- **`required_fit` gains a third value, `partial`**, alongside `meets`/`fails` (the proposal's contract listed
+  only `meets | partial | fails` in one place and `meets | fails` implicitly elsewhere). `partial` is load-
+  bearing: it is the hallucination-guard downgrade target (a `fails` call with zero surviving verbatim quotes
+  becomes `partial`, never silently `meets`), and it is what "background silent on a requirement" maps to.
+  Human `required_fit` stays two-valued (`meets | fails`, per `blind_sheet.REQUIRED_FIT_VALUES`) -- the second
+  judge is allowed a middle ground the human golden source is not.
+- **Authority order, precisely.** A human `required_fit` call is bridged into `llm_labels` as
+  `scorer = 'user-adjudicated'` (`feedback.bridge_required_label`), so `vw_llm_labels_latest.required_fit` can
+  already BE the human's call. "First judge" therefore means the latest `llm_labels` row whose scorer is NOT
+  `feedback.USER_SCORER` (read via the pre-existing `vw_llm_labels_latest_judge` view), never a value that
+  might itself be the human's. `vw_lens_fit` computes one `effective_required_value`/`effective_required_source`
+  per row (human > second judge, only when its prompt_version's stored evaluation passed the bar > first judge
+  > models) and every rank-affecting expression (the `lens_breadth` zero gate, `breadth_x_required`,
+  `rank_score`, `rank_why`'s Required clause) reads that single source of truth instead of the bare
+  `required_fit` column.
+- **Evaluation bar, precisely** (per the coordinator's 2026-09-19 correction to this section): CATCH set =
+  blind rows where the FIRST judge (non-user) said `meets` and the human said `fails`; the 70% bar counts a
+  second-judge `fails` OR `partial` as a catch, with `fails`-only reported alongside as informational
+  (`catch_rate_strict`) and a broader, fully-informational `catch_rate_all_fails` over every blind human-`fails`
+  row regardless of the first judge's call (the first-judge-`meets` subset may be tiny). AGREE set = blind rows
+  the human graded `meets`; agreement counts a second-judge `meets` ONLY, so a judge that hedges everything to
+  `partial` fails this bar rather than passing it by courtesy. Minimum-n guard (5 per set): on the live DB as
+  of 2026-09-19 (zero blind rows carry a human `required_fit` yet), `evaluate()` reports "insufficient blind
+  human Required calls" cleanly, exit 0, bar not passed, no rank effect -- not an error.
+- **Ledger table.** `model_runs`'s `auc`/`shuffle_auc` columns don't fit a pair of hand-counted rates, so a
+  dedicated `judge2_evals` table holds the eval history instead (see its column comment in `store.py`).
+- **Pipeline wiring** (`pipeline.judge2_stage`) sits behind BOTH the dead `llm_top` hook's `> 0` check AND
+  `JUDGE2_LIVE_OK=1` -- a `--llm-top N` flag alone still cannot trigger a live call.
+- **Open risks, unverifiable without a live call:** whether Gemma models actually reject `response_mime_type`
+  JSON mode as assumed (the parser is tolerant of fenced/prose-wrapped JSON either way); the exact shape of a
+  429/5xx error body from this endpoint; real token limits per model in the `GEMINI_API_MODEL` list; whether
+  `x-goog-api-key` is accepted for every listed model. `run()`'s RPM throttle is a simple fixed sleep between
+  calls; TPM is estimated (chars/4) and logged, not enforced as a hard gate -- a deliberate simplification
+  flagged here rather than built as an unverifiable rate limiter.
+
+
 **Purpose.** §22.2 Gap 2: the first judge's lane call is sound and its Required call is lenient. The second judge does one narrow thing: read the full JD and the full background and make a strict Required call.
 **Population.** Active, not rejected, not yet decided, top N by Rank (N = 150 to start, a free-tier budget), re-judged only when the JD text hash changes.
 **Contract.** Input: the JD, the background document, and the parsed Required lines from coverage. Output, strict JSON: `required_fit` (meets | partial | fails), `unmet` (list of lines QUOTED from the JD; a line that is not a verbatim substring of the JD is discarded, and a `fails` with no surviving quoted line is downgraded to `partial`), `held_clearance` (bool), `years_gap` (the named function and the years asked, or null), `confidence`. Quoting is the hallucination guard.

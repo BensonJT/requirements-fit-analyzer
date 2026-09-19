@@ -55,6 +55,25 @@ Run b2213154 done in 17.4 min: 124 boards ok, 1 failed, 76431 live postings, 549
 
 `new` on a board's first sweep is every posting on it (McKesson, CVS above). On later runs it is only what appeared since the last run (Wells Fargo). `taken down` is the close pass at work. A board that fails shows up in `vw_board_health`, and nothing on it is closed.
 
+## How the pipeline flows
+
+The sweep above fills the database. The finder then works down it in ten steps. The full design, with the feedback loop and the rulings behind it, is in [`docs/SPRINT_PLAN.md`](docs/SPRINT_PLAN.md) §22.
+
+| # | Step | What it does |
+|---|---|---|
+| 1 | Sweep | Reads whole employer boards. New postings are added once, vanished postings are closed, nothing is deleted. |
+| 2 | JD details | Fetches the full description for every new posting, then works down the backlog of older postings whose title matches a keyword list. |
+| 3 | Tracker sync | Mirrors your application tracker and reads back build / pass decisions, so decided postings leave the report. |
+| 4 | Screen | A rule engine (title, location or remote, pay floor, held clearance, level), then TF-IDF models: three lenses, `required` and `bullseye`. With a JD, the best lens score decides and a title-only reject is overturned. |
+| 5 | Coverage | Splits each survivor's JD into requirement lines and matches them to your evidence record. |
+| 6 | Second layer | Embeds the Required block of the high scorers and names the requirement line most likely to be unmet. |
+| 7 | LLM second judge | Planned. Must be scored blind against human-graded rows before it may move the rank. |
+| 8 | Report | Every score visible, one Rank, one Why. |
+| 9 | Human review | You read the report and decide what to build and what to pass on. |
+| 10 | Feedback write-back | Every decision goes back into the database with a reason, and the models learn from it at the next retrain. |
+
+Two rules keep the loop honest. Grade first, reveal second: a grade given before any machine score is on screen is recorded as `blind`, and only blind rows are used to evaluate the models. And a pass for logistics or pay never trains a fit model, because the work can be right when the location is wrong.
+
 ## Supported platforms
 
 | Platform | List endpoint gives | Detail fetch | Registry identifiers |

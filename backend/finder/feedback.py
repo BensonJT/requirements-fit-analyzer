@@ -218,12 +218,27 @@ def record_mark(con, pid, description_hash, decision, reason_code=None, reason_d
     code can filter to blind rows without a parallel table.
 
     When `required_fit` is given (only `finder.py mark` decides that -- never for a logistics/comp pass, see
-    cmd_mark), this ALSO bridges into `llm_labels` as scorer='user-adjudicated', carrying forward the current
-    latest lens grades (grade/grade_process/grade_technical/grade_ai) so overriding required_fit does not
-    erase a judge's lens call that was never in dispute. `vw_llm_labels_latest` already orders a
-    user-adjudicated row ahead of the judge's own (see store.py) -- this is that SAME existing precedence
-    mechanism, not a new one, so it reaches every view and training set that already reads the judge's call
-    (vw_label_set_required, vw_label_set_bullseye, vw_label_set_process/technical, required_embed.py)."""
+    cmd_mark), this ALSO bridges into `llm_labels` as scorer='user-adjudicated'. `vw_llm_labels_latest`
+    already orders a user-adjudicated row ahead of the judge's own (see store.py) -- this is that SAME
+    existing precedence mechanism, not a new one, so it reaches every view and training set that already
+    reads the judge's `required_fit` call (vw_label_set_required, and the line model inside
+    required_embed.py).
+
+    A required_fit claim is NOT a lane claim -- the user said the JD's Required block isn't met, not that the
+    posting is (or isn't) the RIGHT KIND of work. So the bridge row's own grade/grade_process/grade_technical/
+    grade_ai columns are tagged with `lens_grade_source` (2026-09-19 audit fix, sprint plan §22.3 Gap 2 -- the
+    first version of this function carried the judge's own grade forward, or invented one, UNDER a human
+    label, which would have trained the lens/bullseye models as if the user had graded the lane, and let a
+    judge-vs-human comparison count the judge agreeing with itself):
+      - `human_grade` given (the user ALSO passed --grade): the lane grade IS human -- 'human', and, mirroring
+        load_csv()'s golden-source shape (a single overall human_grade, never a per-lens breakdown),
+        grade_process/technical/ai stay NULL rather than borrowing the judge's lens split.
+      - `human_grade` not given, posting already judged: carry the CURRENT latest lens grades forward
+        verbatim -- 'carried'. store.lens_label_source() reads this exactly like an ordinary judge row (same
+        weight, source name 'llm_judge') in every lens/bullseye view, never as 'user_adjudicated'.
+      - `human_grade` not given, posting never judged at all: llm_labels.grade is NOT NULL, so a placeholder
+        value is still required to satisfy the column -- 'placeholder'. Every lens/bullseye view excludes a
+        placeholder row outright via lens_label_source() returning NULL for it."""
     now = now or _now()
     con.execute("""
         INSERT OR REPLACE INTO report_feedback (
@@ -240,20 +255,26 @@ def record_mark(con, pid, description_hash, decision, reason_code=None, reason_d
     if required_fit is None:
         return
 
-    prior = con.execute(
-        "SELECT grade, grade_process, grade_technical, grade_ai FROM vw_llm_labels_latest WHERE posting_id = ?",
-        [pid]).fetchone()
-    prior_grade, grade_process, grade_technical, grade_ai = prior if prior else (None, None, None, None)
-    # llm_labels.grade is NOT NULL; a required-only mark makes no lens claim, so fall back to the judge's own
-    # grade where one exists, and to a neutral 'adjacent' placeholder only when the posting was never graded.
-    grade = human_grade or prior_grade or "adjacent"
+    if human_grade is not None:
+        grade, grade_process, grade_technical, grade_ai = human_grade, None, None, None
+        lens_grade_source = "human"
+    else:
+        prior = con.execute(
+            "SELECT grade, grade_process, grade_technical, grade_ai FROM vw_llm_labels_latest WHERE posting_id = ?",
+            [pid]).fetchone()
+        if prior:
+            grade, grade_process, grade_technical, grade_ai = prior
+            lens_grade_source = "carried"
+        else:
+            grade, grade_process, grade_technical, grade_ai = "adjacent", None, None, None
+            lens_grade_source = "placeholder"
     con.execute("""
         INSERT OR REPLACE INTO llm_labels (
             posting_id, description_hash, rubric_version, scorer, grade, grade_process, grade_technical,
-            grade_ai, required_fit, required_unmet, judged_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            grade_ai, required_fit, required_unmet, lens_grade_source, judged_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [pid, description_hash, USER_RUBRIC_VERSION, USER_SCORER, grade, grade_process, grade_technical,
-          grade_ai, required_fit, required_unmet, now])
+          grade_ai, required_fit, required_unmet, lens_grade_source, now])
 
 
 def export(con, out_path, log=print) -> Path:
@@ -272,7 +293,7 @@ def export(con, out_path, log=print) -> Path:
                j.grade_ai AS judge_grade_ai, j.grade AS judge_grade
         FROM report_feedback rf
         JOIN postings p USING (posting_id)
-        LEFT JOIN vw_llm_labels_latest j USING (posting_id)
+        LEFT JOIN vw_llm_labels_latest_judge j USING (posting_id)
         ORDER BY rf.posting_id, rf.assessor
     """)
     cols = [d[0] for d in rows.description]

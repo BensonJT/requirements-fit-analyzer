@@ -465,7 +465,10 @@ def status(out_dir: str, log=print) -> dict:
 
 
 def to_csv(con, path: str, log=print) -> str:
-    """Every judged posting as a row to eyeball: grade, rationale, blocker, the score it had, and its URL."""
+    """Every judged posting as a row to eyeball: grade, rationale, blocker, the score it had, and its URL.
+    Reads `vw_llm_labels_latest_judge` (the judge's OWN latest row, 2026-09-19 audit fix to sprint plan
+    §22.3 Gap 2) rather than `vw_llm_labels_latest`, which would show a required-only mark's carried-forward
+    or placeholder grade here as if the judge had said it."""
     con.execute("""COPY (
         SELECT l.grade, l.grade_process, l.grade_technical, l.grade_ai,
                CASE WHEN l.grade_process IS NULL THEN 'single-lens'
@@ -475,7 +478,7 @@ def to_csv(con, path: str, log=print) -> str:
                     THEN 'process' ELSE 'technical' END AS favoured_lens,
                l.lane, l.confidence, s.final_score, s.band, p.employer, p.title, l.blocker, l.rationale,
                l.required_fit, l.required_unmet, p.url, l.posting_id
-        FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+        FROM vw_llm_labels_latest_judge l JOIN postings p USING (posting_id)
         LEFT JOIN vw_screen_latest s USING (posting_id)
         ORDER BY CASE l.grade WHEN 'bullseye' THEN 0 WHEN 'adjacent' THEN 1 WHEN 'stretch' THEN 2 ELSE 3 END,
                  s.final_score DESC) TO ? (HEADER, DELIMITER ',')""", [path])
@@ -605,17 +608,27 @@ def ai_term_estimate(con) -> dict:
 
 def agreement(con, log=print) -> dict:
     """Checks the judge against the user's own behaviour: postings they applied to or marked build should not be
-    graded `wrong`; postings they passed on for function reasons should not be graded `bullseye`."""
+    graded `wrong`; postings they passed on for function reasons should not be graded `bullseye`.
+
+    Every query here filters to `lens_label_source(...) IS NOT NULL` (store.py): a required-only
+    `finder.py mark` bridges a row into llm_labels that makes NO lane claim at all, either carrying the
+    judge's own grade forward ('carried' -- included here, since it IS the judge's real answer) or, on a
+    never-judged posting, a fabricated placeholder ('placeholder' -- excluded, or this would count the user's
+    own guess as the judge's grade). See the 2026-09-19 audit fix to sprint plan §22.3 Gap 2."""
     applied = _rows(con, """
         SELECT l.grade, count(*) FROM vw_llm_labels_latest l
         WHERE l.posting_id IN (SELECT matched_posting_id FROM tracker WHERE matched_posting_id IS NOT NULL
                                UNION SELECT posting_id FROM vw_decisions WHERE decision = 'build'
                                UNION SELECT posting_id FROM label_docs WHERE label = 1 AND posting_id IS NOT NULL)
+          AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL
         GROUP BY 1 ORDER BY 2 DESC""")
     passed = _rows(con, """
         SELECT l.grade, count(*) FROM vw_llm_labels_latest l JOIN vw_decisions d USING (posting_id)
-        WHERE d.decision = 'pass' AND d.reason_code = 'function' GROUP BY 1 ORDER BY 2 DESC""")
-    total = dict(_rows(con, "SELECT grade, count(*) FROM vw_llm_labels_latest GROUP BY 1"))
+        WHERE d.decision = 'pass' AND d.reason_code = 'function'
+          AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL
+        GROUP BY 1 ORDER BY 2 DESC""")
+    total = dict(_rows(con, "SELECT grade, count(*) FROM vw_llm_labels_latest "
+                            "WHERE lens_label_source(scorer, lens_grade_source) IS NOT NULL GROUP BY 1"))
     log(f"Grades over all judged postings: {total}")
     log(f"  on postings the user pursued: {dict(applied)}   (a `wrong` here is a disagreement worth reading)")
     log(f"  on postings the user passed for function: {dict(passed)}")
@@ -623,7 +636,8 @@ def agreement(con, log=print) -> dict:
     # AI-lens independence (§18.7's bar, applied to the third lens): a lens that just echoes the other two
     # would show near-total agreement, which is exactly the anchoring failure mode the pilot was built to catch.
     ai_rows = _rows(con, """SELECT grade_ai, grade_process, grade_technical FROM vw_llm_labels_latest
-                            WHERE grade_ai IS NOT NULL""")
+                            WHERE grade_ai IS NOT NULL
+                              AND lens_label_source(scorer, lens_grade_source) IS NOT NULL""")
     ai_independence = None
     if ai_rows:
         differs = sum(1 for ga, gp, gt in ai_rows if ga != gp and ga != gt)

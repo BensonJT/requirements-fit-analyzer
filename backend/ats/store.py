@@ -32,7 +32,16 @@ SCHEMA_VERSION = 16  # v16 (2026-09-19): report_feedback.required_fit / required
                      #                  beside the CSV import's human_grade/level_fit on the SAME golden-source
                      #                  row, then bridges into llm_labels as scorer='user-adjudicated' so the
                      #                  existing judge-outranking precedence (vw_llm_labels_latest) carries it
-                     #                  everywhere the judge's required_fit is already read;
+                     #                  everywhere the judge's required_fit is already read. ALSO v16:
+                     #                  llm_labels.lens_grade_source -- a required-only mark makes NO claim
+                     #                  about the LANE (grade/grade_process/grade_technical/grade_ai), only
+                     #                  about required_fit, so those columns on its bridge row are either
+                     #                  'carried' (copied from the judge, so lens_label_source() reads it as
+                     #                  the judge's OWN label, never as a human one) or 'placeholder' (a
+                     #                  posting never judged at all, excluded outright from every lens/
+                     #                  bullseye reader). 'human' means the user actually gave --grade.
+                     #                  Existing scorer='user-adjudicated' rows are backfilled to 'human'
+                     #                  (the only way such a row could exist before this column did);
                      # v15 (2026-09-19): screens.fit_bullseye -- the `bullseye` TF-IDF model
                      #                  (features.train(lens="bullseye")). NOT a lens (see features.BULLSEYE_MODEL):
                      #                  answers "is this a BULLSEYE rather than merely ADJACENT", a ranking
@@ -281,6 +290,16 @@ CREATE TABLE IF NOT EXISTS llm_labels (
                                               -- candidate clears the posting's own Required block. NULL = judged
                                               -- before the field existed.
     required_unmet VARCHAR,                  -- the unmet qualification lines, ' ; '-joined, or empty
+    lens_grade_source VARCHAR,                -- human|carried|placeholder on a scorer='user-adjudicated' row
+                                              -- (v16); says whether grade/grade_process/grade_technical/
+                                              -- grade_ai on THIS row are the user's own lane call ('human'),
+                                              -- copied verbatim from the judge because only required_fit was
+                                              -- a human claim ('carried' -- every lens/bullseye reader must
+                                              -- treat this exactly like an ordinary judge row, never as human,
+                                              -- or the judge ends up agreeing with itself), or a NOT-NULL
+                                              -- placeholder because the posting was never judged at all
+                                              -- ('placeholder' -- excluded outright from every lens/bullseye
+                                              -- label set). NULL on every ordinary judge row.
     batch VARCHAR,
     judged_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, description_hash, rubric_version, scorer)
@@ -453,6 +472,34 @@ CREATE OR REPLACE VIEW vw_llm_labels_latest AS
     QUALIFY row_number() OVER (PARTITION BY l.posting_id
                                ORDER BY (l.scorer = 'user-adjudicated') DESC, l.judged_at DESC) = 1;
 
+-- Whether a scorer='user-adjudicated' row's LENS grade (grade/grade_process/grade_technical/grade_ai) is a
+-- real human lane call, the judge's own call carried forward unchanged, or a never-judged placeholder --
+-- separate from required_fit, which is ALWAYS the human's own claim on such a row regardless of this (2026-09-19
+-- audit fix to sprint plan §22.3 Gap 2: `finder.py mark --unmet` used to launder the judge's own carried-forward
+-- grade, or a fabricated 'adjacent' placeholder, into a human label everywhere `scorer = 'user-adjudicated'`
+-- was read as "the user said so" -- training the lens/bullseye models as if the user had graded the lane, and
+-- letting a judge-vs-human comparison count the judge agreeing with itself). Returns 'llm_judge' for an
+-- ordinary judge row OR a 'carried' one (same weight/source name as the judge -- it IS the judge's own value),
+-- 'user_adjudicated' for a real human lane grade ('human', or NULL -- every row written before this column
+-- existed, backfilled to 'human'), and NULL (the sentinel every lens/bullseye reader below filters out) for
+-- 'placeholder'.
+CREATE OR REPLACE MACRO lens_label_source(scorer, lens_grade_source) AS
+    CASE WHEN coalesce(scorer, '') != 'user-adjudicated' THEN 'llm_judge'
+         WHEN coalesce(lens_grade_source, 'human') = 'placeholder' THEN NULL
+         WHEN coalesce(lens_grade_source, 'human') = 'carried' THEN 'llm_judge'
+         ELSE 'user_adjudicated' END;
+
+-- The judge's OWN latest lens grades for the posting's current text, ignoring any user-adjudicated row
+-- entirely (unlike vw_llm_labels_latest, which a human call always outranks). feedback.export()'s
+-- judge_grade* columns read this, not vw_llm_labels_latest -- comparing a human grade to itself (a required-
+-- only mark's carried-forward or placeholder row) is not what "judge_grade" means there (2026-09-19 audit fix,
+-- sprint plan §22.3 Gap 2).
+CREATE OR REPLACE VIEW vw_llm_labels_latest_judge AS
+    SELECT l.* FROM llm_labels l JOIN postings p ON p.posting_id = l.posting_id
+      AND coalesce(p.description_hash, '') = l.description_hash
+    WHERE l.scorer != 'user-adjudicated'
+    QUALIFY row_number() OVER (PARTITION BY l.posting_id ORDER BY l.judged_at DESC) = 1;
+
 -- The user's own read (or override) of a posting always wins over a review row for the SAME text; otherwise
 -- the row confirmed by the user wins; otherwise the newest assessment. A row whose description_hash no longer
 -- matches the posting's CURRENT text is simply absent here -- the JD changed under it and the label expired.
@@ -517,7 +564,9 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
 -- gating stay with the screen (level_fit), not this view -- required_fit answers a different question (does
 -- the candidate clear the posting's own Required block) than level_fit (does the seniority/comp band fit).
 -- A user-adjudicated row carries no required_fit and needs none: his own grade IS the answer, so it tiers
--- on `grade` alone instead of dropping out of the view.
+-- on `grade` alone instead of dropping out of the view. That is only true when the grade IS the human's own
+-- ('human') -- a required-only mark's 'carried'/'placeholder' row makes no lane claim at all, so `adjudicated`
+-- below is keyed off lens_label_source(), not the bare scorer check (2026-09-19 audit fix, §22.3 Gap 2).
 CREATE OR REPLACE VIEW vw_selection AS
     WITH base AS (
         SELECT l.posting_id, p.employer, p.title, p.url, p.status,
@@ -527,7 +576,7 @@ CREATE OR REPLACE VIEW vw_selection AS
              + (l.grade_ai IN ('bullseye', 'adjacent'))::INTEGER AS n_lenses_good,
                'bullseye' IN (l.grade_process, l.grade_technical, l.grade_ai) AS any_bullseye,
                l.required_fit, l.required_unmet, s.level_fit,
-               l.scorer = 'user-adjudicated' AS adjudicated, l.grade
+               lens_label_source(l.scorer, l.lens_grade_source) = 'user_adjudicated' AS adjudicated, l.grade
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         LEFT JOIN vw_screen_latest s USING (posting_id)
         WHERE l.required_fit IS NOT NULL OR l.scorer = 'user-adjudicated'
@@ -602,7 +651,8 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                s.final_score, s.band, s.tier, s.verdict, s.rule_score, s.fit_prob, s.fit_process, s.fit_technical,
                s.fit_ai, s.fit_required, s.fit_bullseye, s.level_fit,
                s.reasons, s.flags,
-               g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit, g.required_unmet,
+               g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit,
+               g.required_unmet, g.lens_grade_source,
                d.posting_id IS NOT NULL AS decided,
                t.matched_posting_id IS NOT NULL AS in_tracker,
                -- The "second layer" (backend/finder/required_embed.py): NOT a lens, never read here except
@@ -635,7 +685,7 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                     ELSE fit_ai >= lens_strong_p() END AS ai_strong,
                CASE WHEN grade_ai IS NOT NULL THEN grade_ai = 'bullseye'
                     ELSE fit_ai >= lens_standout_p() END AS ai_standout,
-               CASE WHEN scorer = 'user-adjudicated' THEN 'user'
+               CASE WHEN lens_label_source(scorer, lens_grade_source) = 'user_adjudicated' THEN 'user'
                     WHEN grade_process IS NOT NULL AND grade_technical IS NOT NULL THEN 'judge'
                     WHEN grade_process IS NOT NULL OR grade_technical IS NOT NULL THEN 'judge+model'
                     ELSE 'model' END AS lens_source
@@ -767,13 +817,13 @@ CREATE OR REPLACE VIEW vw_label_set AS
     -- Graded labels: bullseye / adjacent are positives (1.0 / 0.6), stretch / wrong the hard negatives the
     -- model never had (0.5 / 1.0). A user-adjudicated row is a separate, higher-priority source.
     SELECT 'llm:' || l.posting_id,
-           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           lens_label_source(l.scorer, l.lens_grade_source),
            p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN l.grade IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
            CASE l.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
            l.grade
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800;
+    WHERE length(p.description_text) >= 800 AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
 
 -- Per-lens training sets (sprint plan 18.8). Identical to vw_label_set except that the graded rows carry the
 -- lens grade instead of the averaged one, and only rows judged on that lens take part. The shared sources
@@ -790,14 +840,15 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           lens_label_source(l.scorer, l.lens_grade_source),
            p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN l.grade_process IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
            CASE l.grade_process WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                                 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
            l.grade_process
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_process IS NOT NULL;
+    WHERE length(p.description_text) >= 800 AND l.grade_process IS NOT NULL
+      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
 
 CREATE OR REPLACE VIEW vw_label_set_technical AS
     SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
@@ -810,14 +861,15 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           lens_label_source(l.scorer, l.lens_grade_source),
            p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN l.grade_technical IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
            CASE l.grade_technical WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                                   WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
            l.grade_technical
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_technical IS NOT NULL;
+    WHERE length(p.description_text) >= 800 AND l.grade_technical IS NOT NULL
+      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
 
 -- Applied-AI lens training set (21), same shape as vw_label_set_process / vw_label_set_technical, reading
 -- grade_ai. features.LENS_VIEWS["ai"] points here (Agent C wires the lens name in; this view can exist and
@@ -835,14 +887,15 @@ CREATE OR REPLACE VIEW vw_label_set_ai AS
     FROM label_docs WHERE text IS NOT NULL AND label = 0
     UNION ALL
     SELECT 'llm:' || l.posting_id,
-           CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END,
+           lens_label_source(l.scorer, l.lens_grade_source),
            p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN l.grade_ai IN ('bullseye', 'adjacent') THEN 1 ELSE 0 END,
            CASE l.grade_ai WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6
                            WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
            l.grade_ai
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.grade_ai IS NOT NULL;
+    WHERE length(p.description_text) >= 800 AND l.grade_ai IS NOT NULL
+      AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
 
 -- The Required-block ranking model's training set (features.LENS_VIEWS["required"]). NOT a lens -- it answers
 -- a different question than process/technical/ai (does the candidate clear THIS posting's own Required block,
@@ -875,7 +928,7 @@ CREATE OR REPLACE VIEW vw_label_set_required AS
 CREATE OR REPLACE VIEW vw_label_set_bullseye AS
     WITH best AS (
         SELECT l.posting_id, p.employer AS company, p.title, p.description_text AS text,
-               CASE WHEN l.scorer = 'user-adjudicated' THEN 'user_adjudicated' ELSE 'llm_judge' END AS source,
+               lens_label_source(l.scorer, l.lens_grade_source) AS source,
                -- best across the three lenses: bullseye > adjacent > stretch > wrong
                CASE WHEN 'bullseye' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'bullseye'
                     WHEN 'adjacent' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'adjacent'
@@ -884,6 +937,7 @@ CREATE OR REPLACE VIEW vw_label_set_bullseye AS
                     ELSE NULL END AS best_grade
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         WHERE length(p.description_text) >= 800
+          AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL
     )
     SELECT 'llm:' || posting_id AS label_id, source, posting_id, company, title, text,
            CASE WHEN best_grade = 'bullseye' THEN 1 ELSE 0 END AS label,
@@ -931,12 +985,17 @@ def _add_missing_columns(con):
     comment on `screens` above. v15: screens.fit_bullseye (NULL until the `bullseye` model exists / a rescreen or
     `finder.py bullseye-backfill` fills it) -- also NOT a lens, see features.BULLSEYE_MODEL. v16:
     report_feedback.required_fit / required_unmet (NULL on every row loaded before `finder.py mark --unmet`
-    existed)."""
+    existed); llm_labels.lens_grade_source (see SCHEMA_VERSION's v16 comment) -- every scorer='user-adjudicated'
+    row that predates this column can only have gotten there as a genuine human lane grade (record_mark() is
+    the only writer from now on, and it always sets this explicitly), so it is backfilled to 'human', never
+    left NULL -- a bare scorer check must not go on reading an old row as human by accident once 'carried' and
+    'placeholder' exist as alternatives."""
     for table, column, decl in (("llm_labels", "grade_process", "VARCHAR"),
                                 ("llm_labels", "grade_technical", "VARCHAR"),
                                 ("llm_labels", "grade_ai", "VARCHAR"),
                                 ("llm_labels", "required_fit", "VARCHAR"),
                                 ("llm_labels", "required_unmet", "VARCHAR"),
+                                ("llm_labels", "lens_grade_source", "VARCHAR"),
                                 ("screens", "fit_process", "DOUBLE"),
                                 ("screens", "fit_technical", "DOUBLE"),
                                 ("screens", "fit_ai", "DOUBLE"),
@@ -950,6 +1009,9 @@ def _add_missing_columns(con):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":
                 con.execute("UPDATE postings SET detail_attempts = 0 WHERE detail_attempts IS NULL")
+            if table == "llm_labels" and column == "lens_grade_source":
+                con.execute("UPDATE llm_labels SET lens_grade_source = 'human' "
+                           "WHERE scorer = 'user-adjudicated' AND lens_grade_source IS NULL")
 
 
 def _columns(con, table):

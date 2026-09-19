@@ -439,3 +439,23 @@ def test_manifest_resolves_relative_paths_and_per_file_basis(tmp_path):
     assert con.execute("SELECT basis FROM report_feedback WHERE posting_id = ?", [PID_B]).fetchone() == \
         ("blind",)
     con.close()
+
+
+def test_prior_golden_csv_grade_makes_a_later_blind_sheet_row_seen(tmp_path):
+    """A posting the user already graded through the golden CSV ('human-override', basis jd_read) is a second
+    look when it turns up on a blind sheet: the new row lands as 'seen' and the conflict is reported."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    _posting(con, PID_B)
+    con.execute("""INSERT INTO report_feedback (posting_id, description_hash, human_grade, verdict, basis, assessor,
+                   confirmed_by_user, assessed_at, loaded_at)
+                   VALUES (?, 'older-hash', 'adjacent', 'consider', 'jd_read', 'human-override', TRUE, now(), now())""", [PID_A])
+    sheet = tmp_path / "blind.csv"
+    _write(sheet, ["posting_id", "employer", "title", "url", "human_grade", "level_fit", "note"],
+          [(PID_A, "Acme", "Role", f"https://x/{PID_A}", "bullseye", "in_range", ""),
+           (PID_B, "Acme", "Role", f"https://x/{PID_B}", "bullseye", "in_range", "")])
+    result = gold_ingest.ingest(con, [(sheet, "blind")], log=_quiet)
+    assert len(result["files"][0]["conflicts"]) == 1
+    got = dict(con.execute("SELECT posting_id, basis FROM report_feedback WHERE assessor = 'user'").fetchall())
+    assert got == {PID_A: "seen", PID_B: "blind"}
+    assert [r[0] for r in con.execute("SELECT posting_id FROM vw_report_feedback_blind").fetchall()] == [PID_B]

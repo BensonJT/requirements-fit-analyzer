@@ -196,7 +196,11 @@ UNPENALIZED_FLAG_PATTERNS = [r"^\$[\d,.]+K ask sits above", r"^local/hybrid", r"
                              r"^remote is conditional",
                              # a residence sentence the rule could not resolve to named places: something to
                              # verify, not a defect -- the row was already scored as remote
-                             r"^remote-residence-check"]
+                             r"^remote-residence-check",
+                             # employer-residence-note (private supplement to §23): a commutable hub is a
+                             # reachable posting, same as "clearance is sponsored" above -- worth surfacing,
+                             # not a defect to price; the row was already scored as remote
+                             r"^employer-residence-note"]
 FIT_REJECT = 0.35          # content gate: a scored JD below this is rejected, whatever the title says
 FIT_REVIEW = 0.50          # a scored JD below this is flagged for review
 NO_CONTENT_CAP = 60        # no JD or no model: the profile alone cannot make a posting strong
@@ -344,6 +348,15 @@ HOURLY_ANNUALIZE = 2_000   # hourly x this = annual
 HOME = None                # e.g. "Springfield, IL"; used for local search lanes
 LOCAL_RADIUS_KM = 80
 COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state, "name, st?" also accepts no state
+
+# Per-employer residence knowledge the JD text never states (§23 amendment): some employers restrict
+# remote hires to residents near one of a handful of hub offices without writing that policy into the
+# posting. Keyed by employer name (or the ATS registry's employer slug -- see screen.employer_residence_note
+# for the matching rule); default empty, set only in the gitignored profile_local.py.
+#   EMPLOYER_RESIDENCE_NOTES = {"<employer key>": {"hubs": ["City, ST", ...], "note": "free text"}}
+# `hubs` empty or none commutable -> reject, same family as the §23 text rule; a commutable hub -> pass
+# with an unpenalized flag (employer-residence-note).
+EMPLOYER_RESIDENCE_NOTES = {}
 
 TRAVEL_MAX_PCT = None      # travel percent limit; None skips the travel rule
 MAX_DIRECT_REPORTS = None  # direct-report limit; None skips the team-size rule

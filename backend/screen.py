@@ -664,6 +664,29 @@ def residence_restriction(text: str) -> tuple:
     return "none", [], None
 
 
+# ---------------------------------------------------------------- employer residence note (private)
+# §23's residence_restriction() can only catch a restriction the JD text actually states. Some
+# employers restrict remote hires to residents near one of a handful of hub offices without ever
+# writing that policy into the posting -- the owner's own experience, not something a text rule can
+# discover. backend.profile.EMPLOYER_RESIDENCE_NOTES holds these privately (default empty; set only in
+# the gitignored profile_local.py), keyed by employer name or the ATS registry's employer slug --
+# whichever text the note author used. Matching reuses norm_company/company_matches, the same
+# normalizer the rest of the file already uses for employer names, so 'Acme Payments', 'ACME PAYMENTS
+# INC.' and a registry slug like 'acme-payments' all resolve to one note.
+def employer_residence_note(company: str) -> Optional[dict]:
+    """Returns the EMPLOYER_RESIDENCE_NOTES entry matching `company`, or None."""
+    notes = getattr(P, "EMPLOYER_RESIDENCE_NOTES", None) or {}
+    if not notes or not (company or "").strip():
+        return None
+    key = norm_company(company)
+    if not key:
+        return None
+    for raw_key, note in notes.items():
+        if company_matches(key, company_keys(raw_key)):
+            return note
+    return None
+
+
 def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker: bool = False) -> Listing:
     """Card-level screen. `skip_tracker=True` bypasses section 9 (the finder dedups in SQL)."""
     title = f" {job.title.lower()} "
@@ -768,6 +791,19 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
                 reasons.append(f"remote restricted to: {', '.join(places)}")
         elif kind == "unclear":
             flags.append(f'remote-residence-check ("{(phrase or "")[:140]}")')
+        # Private supplement: only consulted when the JD text itself said nothing (kind == "none") --
+        # an employer note is a fallback for what the text rule cannot catch, never a second vote on a
+        # restriction the text rule already resolved one way or the other. Reason/flag text is
+        # deliberately generic (never the note's hub cities or free text) so nothing personal reaches a
+        # committed artifact if a Why string is ever copied into one.
+        if kind == "none":
+            note = employer_residence_note(job.company)
+            if note:
+                hubs = note.get("hubs") or []
+                if hubs and any(place_matches(h, P.COMMUTABLE_PLACES) for h in hubs):
+                    flags.append("employer-residence-note -- reachable (commutable hub)")
+                else:
+                    reasons.append("remote restricted to: employer residence note (user)")
 
     # 8. Mission signal
     if _has(f"{company} {desc}", P.FAITH_SIGNALS):

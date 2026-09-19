@@ -1559,6 +1559,13 @@ def test_employer_residence_note_name_normalization_variants(monkeypatch):
                                         employer="acme-payments"))
     assert rec.verdict == "reject"
 
+    # a REJECT rule matches the employer exactly: a different company sharing a word is untouched
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"Acmeco": {"hubs": [], "note": "x"}})
+    for other in ("Acmeco Robotics", "Northern Acmeco Health"):
+        rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                            employer=other))
+        assert not any("employer residence note" in r for r in rec.reasons), other
+
 
 def test_non_us_rule():
     assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]

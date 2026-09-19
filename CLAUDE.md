@@ -33,7 +33,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - `backend/ats/store.py` — DuckDB schema v3 (finder tables added), transactional upsert/close, views + macros
 - `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget, then the finder stage)
 - **`finder.py`** — finder CLI: screen, rescreen-all, report, top, mark, sync, shortlist, labels, train, evidence, coverage, setup-check
-- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
+- `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), required_embed (the "second layer" stacked model: TF-IDF + bge-base Required-block embedding + per-line roll-up -> `embed_required`, own `required_embed` table, NOT a lens), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
 - `tests/test_ats.py`, `tests/test_finder.py` — run with `.venv/bin/python -m pytest -q`
 - `db/` — the DuckDB job store (gitignored contents; see `db/README.md`)
 - `docs/STATUS.md` — session state (read first, update last)
@@ -64,12 +64,16 @@ NAT and isn't reachable from the LAN.
 
 ## Full pipeline order (the report is always last)
 `sweep_ats.py` runs the stages in this order and writes the vault report at the end: sweep → JD details → tracker
-sync → decision read-back → screen → **coverage** → (LLM, Phase 4) → **`Jobs_Found_*.md` + snapshots**. Run by hand
-in the same order, and never stop before the report — a run without it leaves the new screens invisible in the vault:
+sync → decision read-back → screen → **coverage** → **required-embed** → (LLM, Phase 4) → **`Jobs_Found_*.md` +
+snapshots**. `required-embed` runs after coverage because it depends on `requirement_units`; it never fails the
+sweep (no trained model / no encoder library = one log line, skipped). Run by hand in the same order, and never
+stop before the report — a run without it leaves the new screens invisible in the vault:
 ```bash
 finder.py labels --report && finder.py train --report && finder.py rescreen-all && finder.py sync \
-  && finder.py evidence --rebuild && finder.py coverage && finder.py report
+  && finder.py evidence --rebuild && finder.py coverage && finder.py required-embed score && finder.py report
 ```
+(`finder.py required-embed train --report` is a separate, occasional step -- retrain only when the judged corpus
+has moved meaningfully, not every run.)
 `finder.py report` excludes postings already surfaced as blocks in the last 14 days (`surfaced` table), so a second
 report the same day shows the next rows down, while its summary table still lists everything at or above the bar.
 

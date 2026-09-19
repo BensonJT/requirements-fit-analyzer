@@ -105,8 +105,8 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         JOIN vw_lens_fit f USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('very_strong', 'strong')
-        ORDER BY f.lens_best * required_value(f.required_fit, f.fit_required) DESC, s.final_score DESC,
-                 p.posting_id""")]
+        ORDER BY f.lens_best * required_value(f.required_fit, coalesce(f.embed_required, f.fit_required)) DESC,
+                 s.final_score DESC, p.posting_id""")]
     low = [r[0] for r in _rows(con, """
         SELECT s.posting_id FROM vw_screen_latest s JOIN postings p USING (posting_id)
         WHERE p.status = 'active' AND s.verdict != 'reject' AND s.band IN ('partial', 'weak')

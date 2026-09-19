@@ -105,7 +105,8 @@ PLANT_DISCIPLINE_TERMS = [
 HARD_AVOID_INDUSTRY_TERMS = ["tobacco", "casino", "gambling", "sportsbook", "betting", "vape"]
 
 # Clearance-gated titles -- flagged, since an active clearance is required.
-CLEARANCE_TERMS = ["ts/sci", "top secret", "secret clearance", "active secret", "security clearance", "polygraph", "clearance required"]
+CLEARANCE_TERMS = ["ts/sci", "top secret", "secret clearance", "active secret", "security clearance", "polygraph",
+                   "clearance required", "public trust"]
 
 # A clearance is only a blocker when it must ALREADY be held. "Ability to obtain" means the employer
 # sponsors and funds it, which is reachable. Measured
@@ -113,13 +114,37 @@ CLEARANCE_TERMS = ["ts/sci", "top secret", "secret clearance", "active secret", 
 # 3,787 say "obtain" and 5,303 matched nothing but boilerplate ("...skill sets, experience, security
 # clearances, licensure..." in a compensation paragraph). The flag was costing real roles: CACI
 # "Business Process Consultant" (93) and Guidehouse "Senior Business Process Analyst" (91) among them.
+#
+# 2026-09-19 fix (blind-grading defects b1a/b1b): "obtain" only counts as sponsorship when it governs the
+# SAME clearance term (backend/screen.py's `clearance_call` checks proximity, ~120 chars / same sentence,
+# not a blob-wide re.search), so "TS/SCI ... with ability to obtain a polygraph" no longer launders the
+# TS/SCI itself into "reachable" just because the polygraph is obtainable. A confidently-held clearance is
+# now a screen REJECT reason (it leaves the rank), not merely a flag -- the two roles this rule rescued on
+# 2026-09-16 (CACI "Business Process Consultant", Guidehouse "Senior Business Process Analyst") both say
+# "ability to obtain" governing their own clearance term, so they still pass through as sponsored/reachable.
 CLEARANCE_OBTAIN_RE = (r"(ability|able|eligible|willing|capable)\s+to\s+(obtain|acquire|secure)"
                        r"|must\s+be\s+able\s+to\s+obtain|obtain\s+and\s+maintain")
 CLEARANCE_HELD_RE = (r"active\s+(secret|top\s*secret|ts/sci|dod|security)?\s*clearance"
                      r"|current(ly)?\s+(hold|possess)|must\s+(possess|hold)\s+(an?\s+)?(active|current)"
-                     r"|existing\s+clearance|currently\s+active")
-# Levels that are a blocker even without the word "active", unless the JD offers to sponsor one.
+                     r"|existing\s+clearance|currently\s+active"
+                     # "An ACTIVE and MAINTAINED "SECRET" ... security clearance": allow a short run of
+                     # words (not crossing a sentence boundary) between "active" and "clearance" rather than
+                     # requiring them adjacent.
+                     r"|active\b(?:(?!\.).){0,60}?\bclearance\b")
+# Levels that are a blocker even without the word "active", unless the JD offers to sponsor one. "polygraph"
+# never anchors a "held" call on its own (see clearance_call's PROXIMITY_ANCHOR_SKIP) -- a poly is routinely
+# the obtainable half of "TS/SCI ... with ability to obtain a polygraph", so treating it as its own hard
+# anchor is exactly bug (b).
 CLEARANCE_HARD_LEVELS = ["ts/sci", "top secret", "secret clearance", "active secret", "polygraph"]
+# Levels that are a blocker ONLY when paired with "active" nearby (~40 chars) -- unlike the hard levels
+# above, a bare mention of "public trust" is common, everyday and usually reachable, so it
+# needs the same "confidently held" signal the hard levels get for free.
+CLEARANCE_CONDITIONAL_LEVELS = ["public trust"]
+CLEARANCE_PROXIMITY = 120     # chars either side of a clearance term an "obtain" phrase must sit within
+CLEARANCE_CONDITIONAL_PROXIMITY = 40
+# A hard/conditional term stated as merely preferred/nice-to-have is a real gap, not a confident "must
+# already hold" fact -- kept a flag, never a reject (screen.py's clearance_call -> 'ambiguous').
+CLEARANCE_SOFT_RE = r"\b(?:preferred|a\s+plus|nice\s+to\s+have|desired|desirable|advantageous|bonus)\b"
 
 # Hard skips -- fraud / assessment-gated / AI-data gig posters. Match on company name.
 BLOCKED_POSTERS = {
@@ -163,7 +188,12 @@ FLAG_PENALTY_CAP = 25
 # almost a no-op -- 3,858 postings traded one 5-point flag for another and none of them moved.
 UNPENALIZED_FLAG_PATTERNS = [r"^\$[\d,.]+K ask sits above", r"^local/hybrid", r"^nationwide listing", r"^mid level",
                              r"^few years asked", r"^content fit borderline", r"^faith-based signal",
-                             r"^clearance is sponsored"]
+                             r"^clearance is sponsored",
+                             # "remote is conditional" (2026-09-19 amendment): the posting itself says remote
+                             # "will/may be considered", a genuine possible-remote fact worth surfacing, not a
+                             # defect to price -- pricing it would double-count against LOCATION_POINTS, which
+                             # already scored the row as remote.
+                             r"^remote is conditional"]
 FIT_REJECT = 0.35          # content gate: a scored JD below this is rejected, whatever the title says
 FIT_REVIEW = 0.50          # a scored JD below this is flagged for review
 NO_CONTENT_CAP = 60        # no JD or no model: the profile alone cannot make a posting strong

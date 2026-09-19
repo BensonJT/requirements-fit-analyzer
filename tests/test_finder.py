@@ -1121,6 +1121,113 @@ def test_is_remote_reads_the_full_jd_and_the_jd_beats_a_generic_or_stale_ats_fla
     assert not S.is_remote(unflagged)
 
 
+# --- B2 (2026-09-19): non-commutable on-site postings mistakenly read as remote --------------------
+# Three blind-graded rows (RTX/Tucson hybrid, Booz Allen/Atlanta, T. Rowe Price/Baltimore) were all plain
+# `candidate` with the user's note "not remote" -- each trips a different boilerplate shape below. Amended
+# same day: conditional phrasing ("remote work may be considered") is a GENUINE possible-remote fact, not
+# boilerplate, and must still read remote (with a visible flag), never a reject.
+
+def test_generic_workplace_enumeration_is_not_a_remote_statement():
+    """RTX case: 'regardless of whether the role is designated as on-site, hybrid or remote' classifies the
+    CONCEPT, it does not commit to one -- must not read as remote."""
+    text = ("Employees may be asked to work at one of our office locations, regardless of whether the role "
+           "is designated as on-site, hybrid or remote. The salary range for this role is $107,500-$204,500.")
+    assert not S._remote_in_context(text)
+
+
+def test_remote_policy_glossary_is_not_a_remote_statement():
+    """Booz Allen case: 'If this position is listed as remote, ...' explains a policy generically -- it does
+    not itself assert this posting is remote."""
+    text = ("Remote: If this position is listed as remote, there may still be occasions when you are "
+           "required to work in person at a Booz Allen or customer facility.")
+    assert not S._remote_in_context(text)
+
+
+def test_pay_transparency_band_is_not_a_remote_statement():
+    """T. Rowe Price case: 'for the location of: ... and remote workers' is a compensation-band disclosure
+    naming several possible geographies, not a statement about where THIS role sits."""
+    text = "$122,000.00 - $209,000.00 for the location of: Maryland, Colorado, Washington and remote workers"
+    assert not S._remote_in_context(text)
+
+
+def test_explicit_remote_negation_is_not_remote():
+    for text in ("This is not a remote position. On-site required.",
+                 "Telework Eligible: No.",
+                 "This role offers no remote work option."):
+        assert not S._remote_in_context(text), text
+
+
+def test_virtual_teams_and_remote_sensing_are_duty_vocabulary_not_location():
+    assert not S._remote_in_context("Lead virtual teams across five regions from our Austin office.")
+    assert not S._remote_in_context("Experience with remote sensing data is a plus.")
+
+
+def test_bare_remote_heading_is_not_a_remote_statement():
+    """Splitting a JD on '[\\n.]+' can separate a policy-glossary heading ('Remote') from the sentence
+    that explains it ('If this position is listed as remote, ...') -- the bare heading alone must not
+    count as a location statement (Booz Allen case, full residual bug)."""
+    text = "Remote\n: If this position is listed as remote, there may still be occasions when you work on-site."
+    assert not S._remote_in_context(text)
+
+
+def test_virtual_meeting_mode_is_not_a_remote_statement():
+    """'virtually'/'virtual interview' describes HOW people communicate, not WHERE the job sits."""
+    for text in ("Our culture prioritizes collaboration, whether in person or virtually.",
+                 "Employees working virtually are expected to have cameras on during meetings.",
+                 "The use of AI during virtual interviews is prohibited."):
+        assert not S._remote_in_context(text), text
+
+
+def test_eeo_boilerplate_mentioning_remote_is_not_a_remote_statement():
+    text = ("Our Equal Employment Opportunity policy provides reasonable accommodation regardless of "
+           "national origin; some accommodations may include remote arrangements case by case.")
+    assert not S._remote_in_context(text)
+
+
+def test_true_remote_signals_still_read_as_remote():
+    """The rescued cases from the 2026-09-16/17 fixes must not regress: Blue Yonder's `Location: US-REMOTE`,
+    an `#LI-Remote` footer, `US Off-Site`, and a flat 'this role is fully remote' statement."""
+    assert S._remote_in_context("Location: US-REMOTE with the ability to travel up to 30%.")
+    assert S._remote_in_context("Great team culture. #LI-Remote")
+    assert S._remote_in_context("This role is fully remote.")
+
+
+def test_conditional_remote_phrasing_is_genuine_not_boilerplate():
+    """User amendment 2026-09-19: 'will/may be considered' / 'considered for the right candidate' is a real
+    possible-remote fact -- it must still count as remote (is_remote True, no reject) and must be visible
+    via conditional_remote_phrase, distinct from the excluded boilerplate above."""
+    for text in ("Remote work may be considered for the right candidate.",
+                 "This role is on-site; remote will be considered for exceptional candidates.",
+                 "Remote considered for the right candidate."):
+        assert S._remote_in_context(text), text
+        assert S.conditional_remote_phrase(text), text
+
+
+def test_conditional_remote_phrase_none_for_flat_or_negated_text():
+    assert S.conditional_remote_phrase("This role is fully remote.") is None
+    assert S.conditional_remote_phrase("This is not a remote position.") is None
+
+
+def test_screen_row_flags_conditional_remote_without_rejecting():
+    row = _row(location_primary="Atlanta, GA", workplace_type=None,
+              description_text="This is an on-site role in Atlanta. Remote work may be considered for the "
+                                "right candidate.")
+    rec = rules.screen_row(row)
+    flags = [f for f in rec.flags if "conditional" in f]
+    assert flags and "considered" in flags[0]
+    assert "not remote and outside the commute area" not in "; ".join(rec.reasons)
+
+
+def test_screen_row_rtx_style_enumeration_still_rejects_when_not_commutable():
+    """The RTX-shaped posting (enumeration boilerplate, no genuine remote signal, non-commutable location)
+    must be rejected on location, not waved through as remote."""
+    row = _row(location_primary="US-AZ-TUCSON-807A", workplace_type=None,
+              description_text="Employees may be asked to work at one of our office locations, regardless "
+                                "of whether the role is designated as on-site, hybrid or remote.")
+    rec = rules.screen_row(row)
+    assert "not remote and outside the commute area (per listing)" in rec.reasons
+
+
 def test_non_us_rule():
     assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]
     assert rules.non_us_rule(None, ["India - Hyderabad"])[0] == ["outside the US (india)"]
@@ -2147,36 +2254,171 @@ def _clearance_flags(text):
     return [f for f in rules.screen_row(_row(description_text=text)).flags if "clearance" in f]
 
 
+def _clearance_reasons(text):
+    return [r for r in rules.screen_row(_row(description_text=text)).reasons if "clearance" in r]
+
+
 def test_obtainable_clearance_is_not_a_blocker():
     f = _clearance_flags("Clearance Required : Ability to Obtain Public Trust. U.S. Citizenship with the "
                          "ability to obtain and maintain a federal Public Trust clearance.")
     assert f and "reachable" in f[0], f
+    assert _clearance_reasons("Clearance Required : Ability to Obtain Public Trust. U.S. Citizenship with the "
+                              "ability to obtain and maintain a federal Public Trust clearance.") == []
 
 
 def test_sponsored_hard_clearance_is_also_reachable():
-    """Even TS/SCI is not a blocker when the employer offers to sponsor it."""
+    """Even TS/SCI is not a blocker when the employer offers to sponsor it -- the two roles this rule
+    rescued on 2026-09-16 (CACI, Guidehouse) both read this way and must still pass through."""
     f = _clearance_flags("Must be eligible to obtain a TS/SCI security clearance; we sponsor.")
     assert f and "reachable" in f[0], f
+    assert _clearance_reasons("Must be eligible to obtain a TS/SCI security clearance; we sponsor.") == []
 
 
-def test_clearance_that_must_be_held_is_a_blocker():
+def test_clearance_that_must_be_held_is_now_a_reject_reason():
+    """2026-09-19 fix (b1a): a CONFIDENTLY held clearance is a screen REJECT reason, not merely a flag --
+    it must leave the rank, like the commute and pay-floor reasons."""
     for text in ("Requires an active TS/SCI clearance with polygraph.",
                  "Candidate must currently hold a Top Secret security clearance.",
                  "An active secret clearance is required on day one."):
-        f = _clearance_flags(text)
-        assert f and "already be held" in f[0], (text, f)
+        rec = rules.screen_row(_row(description_text=text))
+        reasons = [r for r in rec.reasons if "clearance" in r]
+        assert reasons and "already be held" in reasons[0], (text, reasons)
+        assert rec.verdict == "reject", (text, rec.verdict)
+        assert not [f for f in rec.flags if "clearance" in f]   # not double-counted as a flag too
 
 
-def test_hard_level_without_sponsorship_is_a_blocker():
-    f = _clearance_flags("TS/SCI security clearance required for this position.")
-    assert f and "already be held" in f[0], f
+def test_hard_level_without_sponsorship_is_now_a_reject_reason():
+    rec = rules.screen_row(_row(description_text="TS/SCI security clearance required for this position."))
+    reasons = [r for r in rec.reasons if "clearance" in r]
+    assert reasons and "already be held" in reasons[0], reasons
+    assert rec.verdict == "reject"
 
 
-def test_compensation_boilerplate_raises_no_clearance_flag():
+def test_obtain_governs_only_the_clearance_it_sits_near_bug_b1b():
+    """A TS/SCI stated as required, with only the POLYGRAPH said to be obtainable, must not launder the
+    TS/SCI itself into 'reachable' -- the old blob-wide re.search bug."""
+    text = "A TS/SCI is required to start, with the ability to obtain a polygraph."
+    rec = rules.screen_row(_row(description_text=text))
+    reasons = [r for r in rec.reasons if "clearance" in r]
+    assert reasons and "already be held" in reasons[0], reasons
+    assert rec.verdict == "reject"
+    assert not [f for f in rec.flags if "reachable" in f]
+
+
+def test_minimum_clearance_required_to_start_structured_field():
+    held = rules.screen_row(_row(description_text="Minimum Clearance Required to Start: TS/SCI with Polygraph."))
+    assert [r for r in held.reasons if "clearance" in r] and held.verdict == "reject"
+    # a None/Not Applicable value must not create a held call at all
+    none_val = rules.screen_row(_row(description_text="Minimum Clearance Required to Start: None."))
+    assert not [r for r in none_val.reasons if "clearance" in r]
+    assert not [f for f in none_val.flags if "clearance" in f]
+
+
+def test_active_and_maintained_quoted_level_is_a_reject():
+    text = 'An ACTIVE and MAINTAINED "SECRET" DoD security clearance is required.'
+    rec = rules.screen_row(_row(description_text=text))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_clearance_required_colon_active_top_secret_is_a_reject():
+    rec = rules.screen_row(_row(description_text="Clearance Required : Active Top Secret."))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_ts_sci_with_poly_required_is_a_reject():
+    rec = rules.screen_row(_row(description_text="TS/SCI with Poly required for this role."))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_clearance_required_after_day_one_is_sponsored_not_a_reject():
+    text = ("The ability to obtain and maintain a U.S. government issued security clearance is required. "
+            "Security Clearance Type: DoD Clearance: Secret\nSecurity Clearance Status: Active and existing "
+            "security clearance required after day 1")
+    rec = rules.screen_row(_row(description_text=text))
+    assert not [r for r in rec.reasons if "clearance" in r]
+    assert [f for f in rec.flags if f.startswith("clearance is sponsored")]
+
+
+def test_clearance_required_on_day_one_is_a_reject():
+    text = ("Security Clearance Type: DoD Clearance: Secret\nSecurity Clearance Status: Active and existing "
+            "security clearance required on day 1")
+    rec = rules.screen_row(_row(description_text=text))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_obtain_same_level_beats_a_footer_mention_of_that_level():
+    text = ("Basic Qualifications:\nAbility to obtain a Secret clearance\nBachelor's degree\n\nClearance:\n"
+            "Applicants selected will be subject to a security investigation; Secret clearance is required.")
+    rec = rules.screen_row(_row(description_text=text))
+    assert not [r for r in rec.reasons if "clearance" in r]
+
+
+def test_higher_level_under_nice_if_you_have_is_not_a_reject():
+    text = ("You Have:\nAbility to obtain a Secret clearance\nBachelor's degree\n\nNice If You Have:\n"
+            "Experience with federal clients\nTop Secret clearance\nMaster's degree")
+    rec = rules.screen_row(_row(description_text=text))
+    assert not [r for r in rec.reasons if "clearance" in r]
+
+
+def test_ts_sci_held_with_obtainable_polygraph_is_still_a_reject():
+    text = "Required: Top Secret/Sensitive Compartmented Information (TS/SCI) with ability to obtain a polygraph."
+    rec = rules.screen_row(_row(description_text=text))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_obtain_a_certification_does_not_launder_a_required_secret_clearance():
+    text = "You Have:\nSecret clearance\nHS diploma\nAbility to obtain Security+ certification within 6 months"
+    rec = rules.screen_row(_row(description_text=text))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_self_contradicting_clearance_posting_is_flagged_not_rejected():
+    text = ("Active and transferable U.S. government issued security clearance is required prior to start date.\n"
+            "Security Clearance Status: Ability to obtain interim U.S. government issued security clearance is "
+            "required prior to start date")
+    rec = rules.screen_row(_row(description_text=text))
+    assert not [r for r in rec.reasons if "clearance" in r]
+    assert [f for f in rec.flags if "clearance" in f]
+
+
+def test_able_to_obtain_public_trust_passes():
+    rec = rules.screen_row(_row(description_text="Required: Must be able to obtain and maintain a Public Trust clearance."))
+    assert not [r for r in rec.reasons if "clearance" in r]
+
+
+def test_secret_clearance_is_required_is_a_reject():
+    rec = rules.screen_row(_row(description_text="Secret clearance is required for this position."))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_active_public_trust_required_is_a_reject():
+    """'public trust' is a CONDITIONAL hard level (profile.CLEARANCE_CONDITIONAL_LEVELS): a bare mention is
+    reachable/everyday, but paired with 'active' nearby it reads as confidently held."""
+    rec = rules.screen_row(_row(description_text="Must maintain an active Public Trust (required) clearance."))
+    assert [r for r in rec.reasons if "clearance" in r] and rec.verdict == "reject"
+
+
+def test_bare_public_trust_without_active_is_not_a_reject():
+    rec = rules.screen_row(_row(description_text="A Public Trust clearance may be required for this role."))
+    assert not [r for r in rec.reasons if "clearance" in r]
+
+
+def test_preferred_clearance_is_ambiguous_flag_not_reject():
+    """A hard level stated as merely preferred/nice-to-have is a real gap, not a confident 'must already
+    hold' fact -- stays a flag, never a reject."""
+    rec = rules.screen_row(_row(description_text="An active Secret clearance is preferred but not required."))
+    assert not [r for r in rec.reasons if "clearance" in r]
+    flags = [f for f in rec.flags if "clearance" in f]
+    assert flags and "unclear" in flags[0]
+    assert rec.verdict != "reject"
+
+
+def test_compensation_boilerplate_raises_no_clearance_flag_or_reason():
     """'...skill sets, experience, security clearances, licensure...' is a pay paragraph, not a requirement."""
-    assert _clearance_flags(
-        "Compensation decisions depend on skill sets, experience and training, security clearances, "
-        "licensure and certifications, and other business needs.") == []
+    text = ("Compensation decisions depend on skill sets, experience and training, security clearances, "
+           "licensure and certifications, and other business needs.")
+    assert _clearance_flags(text) == []
+    assert _clearance_reasons(text) == []
 
 
 # --- Domain tenure: a disjunctive list is not a gate (user catch 2026-09-16) ------------------------

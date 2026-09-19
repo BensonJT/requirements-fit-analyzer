@@ -163,8 +163,8 @@ def test_write_lens_lists_level_column_and_applied_ai_bucket(tmp_path):
     assert f"## {report.AI_LIST[1]}" in text
     ai_header, *ai_rows = _decode_rows(text, f"## {report.AI_LIST[1]}", None)
     assert [c.lower() for c in ai_header] == ["posting id", "rank", "company", "title", "why", "score", "band",
-                                              "level", "ai", "required", "embed", "placed by", "pay", "location",
-                                              "age"]
+                                              "level", "ai", "required", "embed", "bull", "placed by", "pay",
+                                              "location", "age"]
     ai_pids = [r[0] for r in ai_rows]
     assert extra["AIBOTH"] in ai_pids and extra["AIONLY"] in ai_pids
     # Neither the level rule's in_range/out_of_reach postings nor `neither`-bucket rows leak into this list.

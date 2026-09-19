@@ -298,7 +298,7 @@ def test_rollup_stats_shape_and_values():
 
 def test_v14_migration_adds_required_embed_table_and_view(tmp_path):
     con = store.connect(str(tmp_path / "db.duckdb"))
-    assert store.SCHEMA_VERSION == 14
+    assert store.SCHEMA_VERSION >= 14
     assert con.execute("SELECT count(*) FROM required_embed").fetchone()[0] == 0
     cols = {r[0] for r in con.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_name = 'vw_lens_fit'").fetchall()}

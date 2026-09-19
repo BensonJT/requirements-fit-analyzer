@@ -321,7 +321,7 @@ def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bo
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_process, fit_process, grade_technical, fit_technical, lens_source,
                days_since_first_seen, blocker, level_fit, required_fit, fit_required, embed_required,
-               rank_score, rank_why
+               fit_bullseye, rank_score, rank_why
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
         ORDER BY rank_score DESC, final_score DESC,
@@ -339,7 +339,7 @@ def ai_lens_rows(con, *, cap: int = LENS_LIST_CAP, include_decided: bool = False
     return con.execute(f"""
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_ai, fit_ai, lens_source, days_since_first_seen, blocker, level_fit,
-               required_fit, fit_required, embed_required, rank_score, rank_why
+               required_fit, fit_required, embed_required, fit_bullseye, rank_score, rank_why
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
         ORDER BY rank_score DESC, final_score DESC,
@@ -402,13 +402,14 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
             w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
             continue
         w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | Process | Technical | Required | "
-                 "Embed | Placed by | Pay | Location | Age |\n"
-                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                 "Embed | Bull | Placed by | Pay | Location | Age |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, gp, fp, gt, ft, src, age,
-             blocker, level_fit, rf, freq, embed_req, rank, why) in rows:
+             blocker, level_fit, rf, freq, embed_req, fit_bull, rank, why) in rows:
             w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
                      f"{level_fit or '—'} | {_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {_lens_cell(rf, freq)} | "
                      f"{'~' + format(embed_req, '.2f') if embed_req is not None else '—'} | "
+                     f"{'~' + format(fit_bull, '.2f') if fit_bull is not None else '—'} | "
                      f"{src} | {_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
 
@@ -419,13 +420,14 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
     if not ai_rows:
         w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
     else:
-        w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | AI | Required | Embed | "
-                 "Placed by | Pay | Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | AI | Required | Embed | Bull | "
+                 "Placed by | Pay | Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, ga, fa, src, age, blocker,
-             level_fit, rf, freq, embed_req, rank, why) in ai_rows:
+             level_fit, rf, freq, embed_req, fit_bull, rank, why) in ai_rows:
             w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
                      f"{level_fit or '—'} | {_lens_cell(ga, fa)} | {_lens_cell(rf, freq)} | "
-                     f"{'~' + format(embed_req, '.2f') if embed_req is not None else '—'} | {src} | "
+                     f"{'~' + format(embed_req, '.2f') if embed_req is not None else '—'} | "
+                     f"{'~' + format(fit_bull, '.2f') if fit_bull is not None else '—'} | {src} | "
                      f"{_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
     path.write_text("\n".join(w) + "\n", encoding="utf-8")

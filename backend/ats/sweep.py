@@ -221,3 +221,8 @@ def _run_finder(con, stats, report=True, llm_top=0, full_screen=False, log=print
         except Exception:  # noqa: BLE001 — no open transaction
             pass
         log(f"Finder stage FAILED: {type(e).__name__}: {e}")
+    try:
+        from backend.finder import retrain
+        retrain.staleness_reminder(con, log=log)
+    except Exception as e:  # noqa: BLE001 — the reminder must never fail the sweep (sprint plan §24)
+        log(f"Retrain staleness check FAILED: {type(e).__name__}: {e}")

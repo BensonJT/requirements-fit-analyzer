@@ -80,6 +80,14 @@ finder.py labels --report && finder.py train --report && finder.py rescreen-all 
 ```
 (`finder.py required-embed train --report` is a separate, occasional step -- retrain only when the judged corpus
 has moved meaningfully, not every run.)
+
+**Weekly retrain (sprint plan §24):** `finder.py retrain [--dry-run]` replaces hand-running `labels` + `train`
+per lens/`required`/`bullseye` + `required-embed train`. Each candidate is gated (employer-grouped held-out
+AUC vs. the previous PROMOTED run, a shuffled-label leak check, label count not falling) before it can
+replace the live artifact; a failure keeps the old one and names the failed gate with numbers. Rescreen /
+coverage / `required-embed score` only run if something was promoted. `finder.py retrain --history` reads
+the `model_runs` ledger back, newest first. `sweep_ats.py` prints (never fails on) a one-line reminder when
+the newest promoted run is stale (see README).
 `finder.py report` excludes postings already surfaced as blocks in the last 14 days (`surfaced` table), so a second
 report the same day shows the next rows down, while its summary table still lists everything at or above the bar.
 

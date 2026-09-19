@@ -28,6 +28,8 @@ Usage:
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
+    .venv/bin/python finder.py retrain [--dry-run]             # weekly retrain, gated + ledgered (sprint plan §24)
+    .venv/bin/python finder.py retrain --history               # print the model_runs ledger, newest first
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -46,7 +48,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(REPO, ".env"))
 from backend.ats import store  # noqa: E402
-from backend.finder import features, labels, pipeline, report, rubric, tracker_sync, version  # noqa: E402
+from backend.finder import features, labels, pipeline, report, retrain as retrain_mod, rubric, tracker_sync, version  # noqa: E402
 
 # 'requirement' and 'level' (sprint plan §22.3, Gap 2): a hard Required line not met, or a seat too senior /
 # too junior. 'clearance' is accepted at the CLI as an alias for 'requirement' (see store.vw_decisions) --
@@ -506,6 +508,15 @@ def cmd_feedback(con, a):
         print(feedback.export(con, a.export))
 
 
+def cmd_retrain(con, a):
+    """The weekly retrain, as one named command (sprint plan §24): backend/finder/retrain.py owns the logic
+    (candidate-vs-live artifacts, the promotion gate, the `model_runs` ledger); this is a thin CLI wrapper."""
+    if a.history:
+        retrain_mod.print_history(con)
+        return
+    retrain_mod.run(con, dry_run=a.dry_run)
+
+
 def cmd_setup_check(con, a):
     from backend.finder import setup_check
     sys.exit(0 if setup_check.run(con, manifest=a.manifest) else 1)
@@ -661,6 +672,14 @@ def main():
                    help="print the rule's level_fit vs confirmed human rows")
     s.add_argument("--export", help="re-export every report_feedback row with the rule's answer and needs_you")
     s.set_defaults(func=cmd_feedback)
+
+    s = sub.add_parser("retrain", parents=[common],
+                       help="the weekly retrain, gated and ledgered (sprint plan §24)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="train and evaluate every model, write ledger rows (promoted=false, reason "
+                        "'dry-run'), promote and rescreen nothing")
+    s.add_argument("--history", action="store_true", help="print the model_runs ledger, newest first")
+    s.set_defaults(func=cmd_retrain)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

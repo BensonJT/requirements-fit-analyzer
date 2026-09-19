@@ -2915,3 +2915,14 @@ def test_rank_score_is_the_one_ordering_and_rank_why_names_the_deciding_facts(tm
     assert why["weak"].startswith("no strong lens")
     assert [x[0] for x in report.top_rows(con, "apply")][:2] == ["bulladj", "stretchup"]       # 87.5 then 85: ordered by the one rank
     con.close()
+
+
+def test_residence_restriction_distance_duty_on_nearby_people_is_not_a_restriction():
+    """An office duty for people who happen to live near an office restricts nobody who lives elsewhere."""
+    assert S.residence_restriction("Candidates that reside within 50 miles of Plano, TX will be required "
+                                   "to be onsite 2 days per week")[0] == "none"
+    assert S.residence_restriction("This role follows a hybrid model for candidates within commuting distance "
+                                   "of the Plano, TX headquarters")[0] == "none"
+    kind, places, _ = S.residence_restriction("Candidates must reside within commuting distance of our office "
+                                              "in Plano, TX")
+    assert kind == "places" and any("TX" in p for p in places)

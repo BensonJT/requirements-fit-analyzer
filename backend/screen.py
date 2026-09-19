@@ -464,6 +464,9 @@ _RESIDENCE_TRIGGER_RES = (
 # A sentence naming a "hub" must also carry a residence-obligation word ("must"/"required") somewhere in
 # it -- a bare list of hub offices offered as an option ("or work from any of our hub offices") is not a
 # restriction on its own; see _RESIDENCE_OPTION_RE below, which excludes that shape outright.
+_RESIDENCE_LIVE_OBLIGATION_RE = re.compile(
+    r"\b(?:must|required\s+to|needs?\s+to|have\s+to|expected\s+to)\s+(?:currently\s+)?"
+    r"(?:live|reside|be\s+located|be\s+based|be\s+within|be\s+in)\b", re.I)
 _RESIDENCE_HUB_OBLIGATION_RE = re.compile(r"\b(?:must|required|require)\b", re.I)
 
 # Exclusions -- false-reject guards found 9/19 and in the 9/20 dry-run audit (§23 rework):
@@ -633,6 +636,12 @@ def residence_restriction(text: str) -> tuple:
             m = rx.search(line)
             if not m:
                 continue
+            if "distance" in rx.pattern or "miles" in rx.pattern:
+                # A distance phrase restricts residence only when the sentence obliges the person to LIVE
+                # there. "Candidates within 50 miles of X will be required to be onsite 2 days a week" puts
+                # an office duty on people who happen to live nearby and nothing on anyone else.
+                if not _RESIDENCE_LIVE_OBLIGATION_RE.search(line):
+                    continue
             if "hub" in rx.pattern and not _RESIDENCE_HUB_OBLIGATION_RE.search(line):
                 continue   # a hub list with no obligation word is an office menu, not a restriction
             matches.append(m)

@@ -660,11 +660,12 @@ def smartrecruiters_detail(row, posting):
 USAJOBS_HOST = "https://data.usajobs.gov/api/search"
 USAJOBS_PAGE = 500   # API's documented ResultsPerPage ceiling
 
-# Values meaning "no clearance required" -- everything else becomes a
-# "Minimum Clearance Required to Start: <value>." line so screen.clearance_call's existing
-# structured-field regex (backend/screen.py's _CLEARANCE_START_FIELD_RE / _CLEARANCE_EMPTY_VALUE_RE)
-# reads it exactly as it would a private-sector posting that states the field itself. The rule is
-# never touched -- only fed text in the form it already understands.
+# Values meaning "no clearance required". Anything else becomes one sentence in the OBTAINABLE form
+# ("ability to obtain and maintain a Secret security clearance"): a federal agency sponsors the
+# investigation as a condition of employment, so the structured field states the position's level,
+# not something the applicant must already hold. screen.clearance_call reads that as `sponsored`
+# (a flag, never a reject). A posting that truly needs a clearance held on day one says so in its
+# Requirements text, which is also in description_text, and the rule rejects on that.
 _USAJOBS_NO_CLEARANCE = {"", "none", "not required", "not applicable", "n/a", "none required"}
 
 
@@ -679,7 +680,8 @@ def _usajobs_clearance_line(value):
     v = (value or "").strip()
     if not v or v.lower() in _USAJOBS_NO_CLEARANCE:
         return None
-    return f"Minimum Clearance Required to Start: {v}."
+    return (f"Security clearance: the agency sponsors the investigation; ability to obtain and maintain "
+            f"a {v} security clearance is a condition of employment.")
 
 
 def _usajobs_workplace(details, *locs):
@@ -699,8 +701,9 @@ def _usajobs_grade(m, details):
     return f"{code}-{lo}/{hi}".strip("-/")
 
 
-def _usajobs_position(m):
-    """One SearchResultItem's MatchedObjectDescriptor -> normalized posting."""
+def _usajobs_position(m, control_number=None):
+    """One SearchResultItem's MatchedObjectDescriptor -> normalized posting. `control_number` is the
+    item's MatchedObjectId (the USAJobs control number, unique per announcement)."""
     details = (m.get("UserArea") or {}).get("Details") or {}
     locs = [l.get("LocationName") for l in (m.get("PositionLocation") or []) if l.get("LocationName")]
     pay = (m.get("PositionRemuneration") or [{}])[0]
@@ -721,7 +724,7 @@ def _usajobs_position(m):
     text = "\n\n".join(p for p in parts if p) or None
     country = (m.get("PositionLocation") or [{}])[0].get("CountryCode") or "US"
     return N.base(
-        req_id=str(m.get("PositionID") or m.get("MatchedObjectId") or ""),
+        req_id=str(control_number or m.get("PositionID") or ""),
         title=m.get("PositionTitle"),
         url=m.get("PositionURI"),
         location_primary=m.get("PositionLocationDisplay") or (locs[0] if locs else None),
@@ -769,7 +772,7 @@ def usajobs_jobs(row, max_pages=None):
                 items = result.get("SearchResultItems") or []
                 for item in items:
                     m = item.get("MatchedObjectDescriptor") or {}
-                    p = _usajobs_position(m)
+                    p = _usajobs_position(m, item.get("MatchedObjectId"))
                     if p["req_id"] and p["req_id"] not in seen:
                         seen[p["req_id"]] = True
                         out.append(p)

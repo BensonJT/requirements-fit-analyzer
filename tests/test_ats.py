@@ -734,8 +734,9 @@ _USAJOBS_ITEM = {
 
 
 def test_usajobs_position_maps_full_jd_with_no_detail_needed():
-    p = A._usajobs_position(_USAJOBS_ITEM["MatchedObjectDescriptor"])
-    assert p["req_id"] == "AGENCY-26-1234567"          # the announcement's own control number (PositionID)
+    p = A._usajobs_position(_USAJOBS_ITEM["MatchedObjectDescriptor"], _USAJOBS_ITEM["MatchedObjectId"])
+    assert p["req_id"] == "812345600"                  # the USAJobs control number (MatchedObjectId)
+    assert A._usajobs_position(_USAJOBS_ITEM["MatchedObjectDescriptor"])["req_id"] == "AGENCY-26-1234567"
     assert p["title"] == "Program Analyst"
     assert p["url"] == "https://www.usajobs.gov/job/812345600"
     assert p["location_primary"] == "Washington DC, District of Columbia" and p["country"] == "US"
@@ -745,7 +746,9 @@ def test_usajobs_position_maps_full_jd_with_no_detail_needed():
     assert p["employment_type"] == "full_time"
     assert p["posted_at"] == date(2026, 9, 1) and p["posting_end_at"] == date(2026, 10, 1)
     assert "Leads Lean Six Sigma projects." in p["description_text"]
-    assert "Minimum Clearance Required to Start: Secret." in p["description_text"]
+    assert "ability to obtain and maintain a Secret security clearance" in p["description_text"]
+    from backend import screen as S
+    assert S.clearance_call(p["description_text"])[0] == "sponsored"   # a flag, never a reject
     assert "usajobs" in A.IMPLEMENTED_PLATFORMS and "usajobs" not in A.DETAIL_PLATFORMS
 
 
@@ -754,7 +757,7 @@ def test_usajobs_clearance_line_skips_no_clearance_values():
     assert A._usajobs_clearance_line("None") is None
     assert A._usajobs_clearance_line("") is None
     assert A._usajobs_clearance_line(None) is None
-    assert A._usajobs_clearance_line("Top Secret/SCI") == "Minimum Clearance Required to Start: Top Secret/SCI."
+    assert "obtain and maintain a Top Secret/SCI security clearance" in A._usajobs_clearance_line("Top Secret/SCI")
 
 
 def test_usajobs_workplace_remote_indicator_wins_over_location_text():

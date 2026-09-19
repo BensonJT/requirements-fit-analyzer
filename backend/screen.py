@@ -447,6 +447,123 @@ def is_commutable(job: Listing) -> bool:
     return any(place_matches(loc, P.COMMUTABLE_PLACES) for loc in [job.location, *job.locations] if loc)
 
 
+# ---------------------------------------------------------------- §23: residence-restricted remote
+# `screen.is_remote` trusts an ATS remote flag or a remote phrase in the JD. Some employers flag a
+# posting remote and then restrict where the person may live: "must live within 50 miles of a hub
+# office", "must be based in one of the following states". Anchored on a residence verb plus a
+# restriction, or an explicit hub/eligible-place list. Reuses the boilerplate exclusion windows the
+# 9/19 remote fix already carries (pay-transparency, EEO, policy glossaries) rather than new ones.
+_RESIDENCE_TRIGGER_RES = (
+    re.compile(r"must\s+(?:live|reside|be\s+located|be\s+based)\s+(?:in|within|near)", re.I),
+    re.compile(r"within\s+\d+\s*(?:miles?|mi\.?)\s+of", re.I),
+    re.compile(r"commutable\s+distance\s+(?:to|of)", re.I),
+    re.compile(r"remote\s+(?:in|within|from)\s+the\s+following\s+(?:states|locations)", re.I),
+    re.compile(r"eligible\s+(?:states|locations)\b", re.I),
+    re.compile(r"\bhub\s+(?:city|cities|office|offices|location|locations)\b", re.I),
+)
+# A sentence naming a "hub" must also carry a residence-obligation word ("must"/"required") somewhere in
+# it -- a bare list of hub offices offered as an option ("or work from any of our hub offices") is not a
+# restriction on its own; see _RESIDENCE_OPTION_RE below, which excludes that shape outright.
+_RESIDENCE_HUB_OBLIGATION_RE = re.compile(r"\b(?:must|required|require)\b", re.I)
+
+# Exclusions -- false-reject guards found 9/19: a pay-transparency clause naming a location for
+# comp-band purposes, a "states we cannot hire in" (exclude) list, an office list offered as an
+# alternative, and time-zone wording phrased as merely "preferred".
+_RESIDENCE_PAY_TRANSPARENCY_RE = re.compile(
+    r"for\s+(?:the\s+location\s+of|candidates?\s+(?:located|based)\s+in|employees?\s+(?:located|based)\s+in)",
+    re.I)
+_RESIDENCE_CANNOT_HIRE_RE = re.compile(
+    r"(?:we\s+)?(?:are\s+unable|cannot|can\s*not|do\s+not|don.t|not\s+able)\s+to\s+hire\s+(?:in|from)|"
+    r"unable\s+to\s+hire\s+(?:in|from)|(?:not|no)\s+(?:currently\s+)?hiring\s+in", re.I)
+_RESIDENCE_OPTION_RE = re.compile(
+    r"\bor\s+work\s+from\s+(?:any\s+of\s+|one\s+of\s+)?(?:our\s+|the\s+)?offices?\b|"
+    r"\bwork\s+from\s+any\s+of\s+our\s+offices\b", re.I)
+_RESIDENCE_TIMEZONE_PREFERRED_RE = re.compile(r"time\s*zone.{0,30}\bpreferred\b|\bpreferred\b.{0,30}time\s*zone", re.I)
+_RESIDENCE_EXCLUSION_RES = (_RESIDENCE_PAY_TRANSPARENCY_RE, _RESIDENCE_CANNOT_HIRE_RE, _RESIDENCE_OPTION_RE,
+                            _RESIDENCE_TIMEZONE_PREFERRED_RE, *_REMOTE_BOILERPLATE_RES)
+
+# Generic words that show up in the tail of a restriction sentence but never name a place -- filtered out
+# of the extracted place list ("one of our hubs: A, B, C" -> "A, B, C", not "one of our hubs A B C").
+_RESIDENCE_FILLER_WORDS = {
+    "one", "of", "our", "the", "a", "an", "these", "those", "following", "hub", "hubs", "office",
+    "offices", "location", "locations", "state", "states", "and", "or", "must", "be", "in", "within",
+    "near", "distance", "to", "commutable", "commuting", "miles", "mi", "eligible", "based", "live",
+    "reside", "residing", "located", "headquarters", "hq", "area", "region", "vicinity", "team", "company",
+}
+
+
+def _split_or_and(text: str) -> list:
+    return re.split(r"\s*;\s*|\s+(?:or|and)\s+", text)
+
+
+def _extract_places(tail: str) -> list:
+    """Named places in the tail of a residence-restriction sentence (the text from the trigger phrase
+    to the end of the sentence). A colon introduces the list when present ("hubs: Austin, TX; Denver,
+    CO"); a "City, ST" pair is kept whole so the state stays pinned to its own city, while a bare list
+    of names/states ("Texas, Colorado, Arizona") is split on commas."""
+    if ":" in tail:
+        tail = tail.split(":", 1)[1]
+    tail = re.sub(r"\(.*?\)", "", tail).strip(" .")
+    if not tail:
+        return []
+    places = []
+    for segment in _split_or_and(tail):
+        segment = segment.strip(" .")
+        if not segment:
+            continue
+        m = re.match(r"^(.+?),\s*([A-Za-z]{2})$", segment)
+        if m and m.group(2).upper() in _STATES:
+            places.append(segment)
+            continue
+        for part in segment.split(","):
+            words = [w for w in re.findall(r"[A-Za-z][A-Za-z.]*", part) if w.lower() not in _RESIDENCE_FILLER_WORDS]
+            cleaned = " ".join(words).strip()
+            if cleaned:
+                places.append(cleaned)
+    return places
+
+
+def residence_restriction(text: str) -> tuple:
+    """The residence-restriction question for a posting already read as remote (§23). Takes the
+    ORIGINAL-CASE title/location/description text (like `conditional_remote_phrase`), not the
+    lowercased `blob` screen() builds for the other rules -- `place_matches`/`states_in` need a real
+    "City, ST" case to pin a two-letter state code, which a lowercased "st" can never match.
+
+    Returns (kind, places, phrase):
+        'none'   -- no restriction language found; (places=[], phrase=None).
+        'places' -- a parseable list of required places; `places` holds them, `phrase` is the
+                    triggering sentence (quoted in the Why when it does not resolve to a pass).
+        'unclear' -- restriction language with no parseable place list; `phrase` is the sentence,
+                     quoted verbatim so the user can verify -- never a reject (same pass-through
+                     principle as `clearance_call`'s ambiguous verdict).
+    """
+    for sentence in re.split(r"[\n.]+", text or ""):
+        line = sentence.strip()
+        if not line:
+            continue
+        if any(rx.search(line) for rx in _RESIDENCE_EXCLUSION_RES):
+            continue
+        matches = []
+        for rx in _RESIDENCE_TRIGGER_RES:
+            m = rx.search(line)
+            if not m:
+                continue
+            if "hub" in rx.pattern and not _RESIDENCE_HUB_OBLIGATION_RE.search(line):
+                continue   # a hub list with no obligation word is an office menu, not a restriction
+            matches.append(m)
+        if not matches:
+            continue
+        # The rightmost-ending trigger anchors the tail, so a more specific phrase further into the
+        # sentence ("within 50 miles of") wins over a broader one earlier in it ("must live within"),
+        # keeping the extracted tail free of the words between them.
+        anchor = max(matches, key=lambda m: m.end())
+        places = _extract_places(line[anchor.end():])
+        if places:
+            return "places", places, line
+        return "unclear", [], line
+    return "none", [], None
+
+
 def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker: bool = False) -> Listing:
     """Card-level screen. `skip_tracker=True` bypasses section 9 (the finder dedups in SQL)."""
     title = f" {job.title.lower()} "
@@ -540,6 +657,17 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
     cond = conditional_remote_phrase(f"{job.title}\n{job.location}\n{job.description}")
     if cond:
         flags.append(f'remote is conditional ("{cond}") -- verify')
+    # §23: a posting read as remote can still restrict where the person lives. Applies only when the
+    # posting was already read as remote -- an on-site/hybrid posting is handled by the commute rule above.
+    if remote:
+        home_states = states_in(P.HOME or "")
+        kind, places, phrase = residence_restriction(f"{job.title}\n{job.location}\n{job.description}")
+        if kind == "places":
+            matched = any(place_matches(p, P.COMMUTABLE_PLACES) or (states_in(p) & home_states) for p in places)
+            if not matched:
+                reasons.append(f"remote restricted to: {', '.join(places)}")
+        elif kind == "unclear":
+            flags.append(f'remote-residence-check ("{phrase}")')
 
     # 8. Mission signal
     if _has(f"{company} {desc}", P.FAITH_SIGNALS):

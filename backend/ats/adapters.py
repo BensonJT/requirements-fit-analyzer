@@ -15,11 +15,14 @@ Design (see DESIGN_ats_registry.md §6a / §14):
 """
 import inspect
 import json
+import os
 import re
 import time
 from urllib.parse import quote
 
 import httpx
+
+from backend import profile as P
 
 from . import normalize as N
 
@@ -638,6 +641,152 @@ def smartrecruiters_detail(row, posting):
     )
 
 
+# ================================================================ USAJobs
+# Not a whole-board pull like every adapter above: it is a KEYWORD search (the same phrases
+# backend/profile.py already holds for sweep.py's older aggregator pass, so nothing is
+# duplicated), paged over data.usajobs.gov. Sprint plan §22.1 "Known gap": sweep.py's own
+# usajobs() only feeds the rule engine and never reaches DuckDB, so federal postings skipped
+# the whole cascade (coverage, models, rank, report). This adapter puts them in it.
+#
+# The search API returns the full duties/qualifications text inline, so description_text is
+# complete from the list call alone -- this platform is deliberately absent from _DETAIL and
+# never spends detail budget.
+#
+# CLOSING: a keyword result set never enumerates the board, so a posting missing from it is
+# never evidence it's gone -- the list call always comes back `Truncated`, which already makes
+# record_board's absence-based close-pass a no-op for this platform (see backend/ats/store.py's
+# CLOSE_BY_DATE_PLATFORMS / close_expired_postings, called from backend/ats/sweep.py). The
+# posting's own ApplicationCloseDate (-> posting_end_at) is the only thing that ever closes it.
+USAJOBS_HOST = "https://data.usajobs.gov/api/search"
+USAJOBS_PAGE = 500   # API's documented ResultsPerPage ceiling
+
+# Values meaning "no clearance required". Anything else becomes one sentence in the OBTAINABLE form
+# ("ability to obtain and maintain a Secret security clearance"): a federal agency sponsors the
+# investigation as a condition of employment, so the structured field states the position's level,
+# not something the applicant must already hold. screen.clearance_call reads that as `sponsored`
+# (a flag, never a reject). A posting that truly needs a clearance held on day one says so in its
+# Requirements text, which is also in description_text, and the rule rejects on that.
+_USAJOBS_NO_CLEARANCE = {"", "none", "not required", "not applicable", "n/a", "none required"}
+
+
+def _usajobs_creds():
+    key, email = os.getenv("USAJOBS_API_KEY"), os.getenv("USAJOBS_EMAIL")
+    if not key or not email:
+        return None
+    return key, email
+
+
+def _usajobs_clearance_line(value):
+    v = (value or "").strip()
+    if not v or v.lower() in _USAJOBS_NO_CLEARANCE:
+        return None
+    return (f"Security clearance: the agency sponsors the investigation; ability to obtain and maintain "
+            f"a {v} security clearance is a condition of employment.")
+
+
+def _usajobs_workplace(details, *locs):
+    remote = details.get("RemoteIndicator")
+    if isinstance(remote, str):
+        remote = remote.strip().lower() in ("true", "yes", "1")
+    if remote:
+        return "remote"
+    return N.workplace_type(None, *locs)
+
+
+def _usajobs_grade(m, details):
+    code = (m.get("JobGrade") or [{}])[0].get("Code") or ""
+    lo, hi = details.get("LowGrade") or "", details.get("HighGrade") or ""
+    if not (code or lo or hi):
+        return None
+    return f"{code}-{lo}/{hi}".strip("-/")
+
+
+def _usajobs_position(m, control_number=None):
+    """One SearchResultItem's MatchedObjectDescriptor -> normalized posting. `control_number` is the
+    item's MatchedObjectId (the USAJobs control number, unique per announcement)."""
+    details = (m.get("UserArea") or {}).get("Details") or {}
+    locs = [l.get("LocationName") for l in (m.get("PositionLocation") or []) if l.get("LocationName")]
+    pay = (m.get("PositionRemuneration") or [{}])[0]
+    lo, hi = pay.get("MinimumRange"), pay.get("MaximumRange")
+    rate = (pay.get("RateIntervalCode") or "").lower()
+    interval = "hour" if "hour" in rate else ("year" if (lo or hi) else None)
+    duties = [d for d in (details.get("MajorDuties") or []) if d]
+    parts = [
+        details.get("JobSummary"),
+        m.get("QualificationSummary"),
+        ("Duties\n" + "\n".join(f"- {d}" for d in duties)) if duties else None,
+        details.get("Education"),
+        details.get("Requirements"),
+        details.get("Evaluations"),
+        _usajobs_clearance_line(details.get("SecurityClearance")),
+        details.get("OtherInformation"),
+    ]
+    text = "\n\n".join(p for p in parts if p) or None
+    country = (m.get("PositionLocation") or [{}])[0].get("CountryCode") or "US"
+    return N.base(
+        req_id=str(control_number or m.get("PositionID") or ""),
+        title=m.get("PositionTitle"),
+        url=m.get("PositionURI"),
+        location_primary=m.get("PositionLocationDisplay") or (locs[0] if locs else None),
+        locations=N.locations_json(locs),
+        country=country,
+        workplace_type=_usajobs_workplace(details, *locs, m.get("PositionLocationDisplay") or ""),
+        employment_type=N.employment_type(
+            (m.get("PositionSchedule") or [{}])[0].get("Name")
+            or (m.get("PositionOfferingType") or [{}])[0].get("Name")),
+        # `employer` is fixed for the whole board (see usajobs_jobs); the real hiring agency is
+        # kept here so it isn't lost, not in `employer` -- see the registry note in the README.
+        job_family=m.get("OrganizationName") or (m.get("JobCategory") or [{}])[0].get("Name"),
+        job_level=_usajobs_grade(m, details),
+        pay_min=int(float(lo)) if lo else None, pay_max=int(float(hi)) if hi else None,
+        pay_currency="USD" if (lo or hi) else None,
+        pay_interval=interval, pay_source="ats" if (lo or hi) else None,
+        posted_at=N.parse_date(m.get("PublicationStartDate")),
+        posting_end_at=N.parse_date(m.get("ApplicationCloseDate")),
+        description_text=text,
+        raw_json=N.raw(m),
+    )
+
+
+def usajobs_jobs(row, max_pages=None):
+    """Pages every phrase in backend/profile.py's FUNCTION_PHRASES + SEPARATE_PASS_PHRASES
+    through the USAJobs search API, de-duplicated by control number. Always returns a
+    `Truncated` list -- see the module comment above; this is a keyword result set, never a
+    full board, so it must never be close-passed on absence."""
+    creds = _usajobs_creds()
+    if creds is None:
+        print("USAJobs: USAJOBS_API_KEY/USAJOBS_EMAIL not set -- skipping "
+              "(set both in .env to enable; see .env.template)")
+        return Truncated([])
+    key, email = creds
+    headers = {"Host": "data.usajobs.gov", "User-Agent": email, "Authorization-Key": key}
+    phrases = P.FUNCTION_PHRASES + P.SEPARATE_PASS_PHRASES
+    seen, out = {}, []
+    with client() as c:
+        for phrase in phrases:
+            page, pages = 1, 0
+            while True:
+                params = {"Keyword": phrase, "ResultsPerPage": USAJOBS_PAGE, "Page": page}
+                data = _request(c, "GET", USAJOBS_HOST, params=params, headers=headers).json()
+                result = data.get("SearchResult") or {}
+                items = result.get("SearchResultItems") or []
+                for item in items:
+                    m = item.get("MatchedObjectDescriptor") or {}
+                    p = _usajobs_position(m, item.get("MatchedObjectId"))
+                    if p["req_id"] and p["req_id"] not in seen:
+                        seen[p["req_id"]] = True
+                        out.append(p)
+                pages += 1
+                total = result.get("SearchResultCountAll") or 0
+                if len(items) < USAJOBS_PAGE or page * USAJOBS_PAGE >= total:
+                    break
+                if max_pages and pages >= max_pages:
+                    break
+                page += 1
+                time.sleep(PAGE_DELAY)
+    return Truncated(out)
+
+
 # ================================================================ dispatch
 
 # ================================================================ Eightfold
@@ -879,6 +1028,7 @@ _LIST = {
     "smartrecruiters": smartrecruiters_jobs,
     "eightfold": eightfold_jobs,
     "paylocity": paylocity_jobs,
+    "usajobs": usajobs_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,

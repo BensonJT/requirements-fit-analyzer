@@ -88,6 +88,9 @@ Two rules keep the loop honest. Grade first, reveal second: a grade given before
 | SmartRecruiters | title, location, remote/hybrid, date, level | yes | company ID (case-sensitive) |
 | Eightfold | title, locations, workplace flag, date, department | yes | host URL, domain |
 | Paylocity | title, location, remote flag, department, date (from the JSON block embedded in the all-jobs page) | yes | company GUID, slug |
+| USAJobs | everything, including full duties/qualifications, clearance, grade, pay | not needed | none — one registry row; needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` in `.env` |
+
+USAJobs is the one adapter that is not a whole-board pull: it's a keyword search over `backend/profile.py`'s title phrases, so a posting missing from a run's results is never taken as evidence it's gone — only its own `ApplicationCloseDate` closes it. Missing credentials skip the adapter (one log line), they never fail the sweep. One registry row enables it regardless of `identifier_*` values (leave them blank).
 
 **Not supported:**
 - **iCIMS** answers scripted requests with a human-verification page.
@@ -107,7 +110,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q          # unit tests, no network
 ```
 
-A fresh clone runs against `registry/ats_registry.example.csv`, eight example boards covering every supported platform. The ATS sweep needs no API keys. To use your own list, copy the example to `registry/ats_registry.csv`, or point `JOBSEARCH_REGISTRY_DIR` at a directory holding one. Settings go in a `.env` file in the repo root; copy `.env.template` to start, since it documents every setting both sweeps read:
+A fresh clone runs against `registry/ats_registry.example.csv`, one example row per supported platform. Ten of the eleven need no API keys; the USAJobs row needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` and is skipped, not failed, without them. To use your own list, copy the example to `registry/ats_registry.csv`, or point `JOBSEARCH_REGISTRY_DIR` at a directory holding one. Settings go in a `.env` file in the repo root; copy `.env.template` to start, since it documents every setting both sweeps read:
 
 ```env
 JOBSEARCH_REGISTRY_DIR=/path/to/your/registry

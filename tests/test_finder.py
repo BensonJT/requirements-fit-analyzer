@@ -1351,6 +1351,105 @@ def test_residence_restriction_bare_hub_list_with_no_obligation_word_is_not_a_tr
     assert S.residence_restriction(desc)[0] == "none"
 
 
+# ---- §23 rework (9/20 dry-run audit): the ~8/49 false rejects and the ROOT FIX (validated places only)
+def test_residence_restriction_country_only_is_none_not_a_reject():
+    """Case 1: a bare country reference names no place at all -- kind 'none', never a reject, even
+    when it rides along with unrelated eligibility-to-work boilerplate ('US Citizen')."""
+    for desc in ("Applicants must reside in the United States.",
+                 "Employees must be based in the United States.",
+                 "Candidates must be located within the United States and US Citizen."):
+        assert S.residence_restriction(desc) == ("none", [], None), desc
+        rec = rules.screen_row(_remote_row(desc))
+        assert not [r for r in rec.reasons if r.startswith("remote restricted to:")]
+        assert rec.verdict != "reject"
+
+
+def test_residence_restriction_country_prefix_before_colon_does_not_swallow_the_real_list():
+    """The country mention before the colon must not turn the sentence into 'none' -- the list after
+    the colon is the actual restriction and must still be read (and reject when none of its states
+    is commutable or the home state)."""
+    desc = "Must reside in the United States: Rhode Island, Vermont or Arizona."
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "places" and places == ["Rhode Island", "Vermont", "Arizona"]
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+    assert any(r.startswith("remote restricted to:") for r in rec.reasons)
+
+
+def test_residence_restriction_registered_entity_boilerplate_is_none():
+    """Case 2: 'a state where <employer> has a registered entity' is company boilerplate covering
+    most of the country and names no real place -- must not reject."""
+    desc = "You must live in a state where Denimwear Holdings, Inc has a registered entity."
+    assert S.residence_restriction(desc)[0] == "none"
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict != "reject"
+
+
+def test_residence_restriction_conditional_clause_is_none():
+    """Case 3: a sentence that opens on a condition binds only people who already meet it -- it is a
+    hybrid-cadence/perk clause, not a residence gate."""
+    for desc in (
+            "If you live within 50 miles of one of our hub locations, the expectation is twice a "
+            "week in office.",
+            "If you are within 50 miles of Denver, Austin or Chicago you will be required to work a "
+            "hybrid schedule.",
+            "For those who live within commuting distance of Denver, CO, a hybrid schedule applies."):
+        assert S.residence_restriction(desc)[0] == "none", desc
+
+
+def test_residence_restriction_preference_language_is_none():
+    """Case 4: a preference, not a requirement -- 'preference will be given', 'preferred', 'ideally',
+    'a plus' must never turn into a reject."""
+    for desc in ("Preference will be given to candidates residing within 50 miles of Denver, CO.",
+                 "Living within 50 miles of Austin, TX is preferred but not required.",
+                 "Ideally the candidate would live within 50 miles of Denver, CO."):
+        assert S.residence_restriction(desc)[0] == "none", desc
+
+
+def test_residence_restriction_garbage_sentence_is_unclear_not_a_reject():
+    """Case 5: a trigger phrase that accidentally lands in a marketing sentence or unrelated
+    boilerplate must not manufacture a fake place list -- unclear at most."""
+    for desc in (
+            "This is Acme Retail, a leading force in omnichannel merchandising, delivering joy "
+            "nationwide, must be located within our growth footprint.",
+            "Denimwear Co listed on the exchange this year, must be located within our growth "
+            "footprint."):
+        kind, places, phrase = S.residence_restriction(desc)
+        assert kind in ("none", "unclear"), desc
+        assert places == []
+        rec = rules.screen_row(_remote_row(desc))
+        assert rec.verdict != "reject"
+
+
+def test_residence_restriction_validated_true_positives_still_reject_or_stay_unclear():
+    """The ROOT FIX must not swallow real restrictions: a multi-city/state list with no
+    and/or between pairs still reads correctly and still rejects; a bare city with no state
+    validates as 'unclear' (acceptable per the rework), never silently passed as a real match."""
+    desc = ("Applicants must be within a reasonable commuting distance of an office in Windsor, CT, "
+            "Boston, MA, New York/New Jersey.")
+    kind, places, phrase = S.residence_restriction(desc)
+    assert kind == "places" and places == ["Windsor, CT", "Boston, MA", "New York", "New Jersey"]
+    rec = rules.screen_row(_remote_row(desc))
+    assert rec.verdict == "reject"
+
+    bare_city = "Hybrid role, must live near Fictionville office."
+    assert S.residence_restriction(bare_city)[0] == "unclear"
+
+    shipyard = "Applicants must be within commutable distance to Fiction Naval Shipyard."
+    assert S.residence_restriction(shipyard)[0] == "unclear"
+
+
+def test_residence_restriction_flag_text_is_short():
+    desc = "Applicants must be within commutable distance to Fiction Naval Shipyard."
+    rec = rules.screen_row(_remote_row(desc))
+    flags = [f for f in rec.flags if f.startswith("remote-residence-check")]
+    assert flags and flags[0] == f'remote-residence-check ("{desc.rstrip(".")}")'
+    long_desc = "Applicants must be within commutable distance to " + "Fictionville " * 30 + "office"
+    long_rec = rules.screen_row(_remote_row(long_desc))
+    long_flags = [f for f in long_rec.flags if f.startswith("remote-residence-check")]
+    assert long_flags and len(long_flags[0]) < 170
+
+
 def test_non_us_rule():
     assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]
     assert rules.non_us_rule(None, ["India - Hyderabad"])[0] == ["outside the US (india)"]

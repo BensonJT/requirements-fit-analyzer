@@ -1488,6 +1488,85 @@ def test_residence_restriction_flag_text_is_short():
     assert long_flags and len(long_flags[0]) < 170
 
 
+# ---------------------------------------------------------------- §23 amendment: employer residence note
+def test_employer_residence_note_no_note_is_unchanged(monkeypatch):
+    """No EMPLOYER_RESIDENCE_NOTES entry for the employer -- the row is untouched by this rule."""
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {})
+    rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                        employer="Acme Payments"))
+    assert rec.verdict != "reject"
+    assert not [f for f in rec.flags if f.startswith("employer-residence-note")]
+
+
+def test_employer_residence_note_empty_hubs_rejects(monkeypatch):
+    """A note with no hubs at all can never be commutable -- reject, same reason family as §23."""
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme payments": {"hubs": [], "note": "hub-only remote, not in their postings"}})
+    rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                        employer="Acme Payments"))
+    assert rec.verdict == "reject"
+    assert any(r == "remote restricted to: employer residence note (user)" for r in rec.reasons)
+
+
+def test_employer_residence_note_commutable_hub_passes_with_flag(monkeypatch):
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme payments": {"hubs": ["Springfield, IL"], "note": "hub-only remote"}})
+    rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                        employer="Acme Payments"))
+    assert rec.verdict != "reject"
+    assert any(f.startswith("employer-residence-note") for f in rec.flags)
+
+
+def test_employer_residence_note_non_commutable_hubs_rejects(monkeypatch):
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme payments": {"hubs": ["Austin, TX", "Denver, CO"], "note": "hub-only remote"}})
+    rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                        employer="Acme Payments"))
+    assert rec.verdict == "reject"
+    assert any(r == "remote restricted to: employer residence note (user)" for r in rec.reasons)
+
+
+def test_employer_residence_note_onsite_posting_untouched(monkeypatch):
+    """An on-site posting for a noted employer is already handled by the commute rule -- this rule
+    only applies when the posting was already read as remote."""
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme payments": {"hubs": [], "note": "hub-only remote"}})
+    row = _row(employer="Acme Payments", location_primary="Austin, TX",
+              workplace_type="onsite", description_text="Standard on-site role in our Austin office.")
+    rec = rules.screen_row(row)
+    assert not [f for f in rec.flags if f.startswith("employer-residence-note")]
+    assert not [r for r in rec.reasons if r == "remote restricted to: employer residence note (user)"]
+
+
+def test_employer_residence_note_yields_to_jd_text_rule_when_text_already_resolved(monkeypatch):
+    """kind != 'none' (the JD text rule already found and resolved a restriction) means the employer
+    note is never consulted -- no double reason, no overriding a text-rule pass."""
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme payments": {"hubs": ["Austin, TX"], "note": "hub-only remote"}})
+    desc = "This role is remote but must be located within commuting distance of one of our hubs: Springfield, IL."
+    rec = rules.screen_row(_remote_row(desc, employer="Acme Payments"))
+    assert rec.verdict != "reject"
+    assert not [f for f in rec.flags if f.startswith("employer-residence-note")]
+    assert rec.reasons.count("remote restricted to: employer residence note (user)") == 0
+
+
+def test_employer_residence_note_name_normalization_variants(monkeypatch):
+    """Matches the display name, a suffix/punctuation variant, and the ATS registry's employer slug
+    -- the same normalizer company_matches/norm_company already use elsewhere in screen.py."""
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"Acme Payments": {"hubs": [], "note": "hub-only remote"}})
+    for name in ("Acme Payments", "ACME PAYMENTS, INC.", "Acme Payments (formerly Acme Corp)"):
+        rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                            employer=name))
+        assert rec.verdict == "reject", name
+
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"acme-payments": {"hubs": [], "note": "registry slug form"}})
+    rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                        employer="acme-payments"))
+    assert rec.verdict == "reject"
+
+    # a REJECT rule matches the employer exactly: a different company sharing a word is untouched
+    monkeypatch.setattr(P, "EMPLOYER_RESIDENCE_NOTES", {"Acmeco": {"hubs": [], "note": "x"}})
+    for other in ("Acmeco Robotics", "Northern Acmeco Health"):
+        rec = rules.screen_row(_remote_row("This role is fully remote, work from anywhere in the US.",
+                                            employer=other))
+        assert not any("employer residence note" in r for r in rec.reasons), other
+
+
 def test_non_us_rule():
     assert rules.non_us_rule("IN", ["Bengaluru"])[0] == ["outside the US (country IN)"]
     assert rules.non_us_rule(None, ["India - Hyderabad"])[0] == ["outside the US (india)"]

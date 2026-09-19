@@ -28,6 +28,8 @@ Usage:
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
     .venv/bin/python finder.py feedback sheet --n 20 [--seed S] [--out PATH]  # monthly blind sheet w/ decoys (§26)
     .venv/bin/python finder.py feedback sheet-import PATH                    # import it; basis='blind'
+    .venv/bin/python finder.py feedback ingest --manifest gold_manifest.csv  # ingest every gold sheet at once
+    .venv/bin/python finder.py feedback ingest PATH --basis seen [--dry-run] # one narrow/blind sheet
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
     .venv/bin/python finder.py retrain [--dry-run]             # weekly retrain, gated + ledgered (sprint plan §24)
@@ -503,6 +505,19 @@ def cmd_feedback(con, a):
     (any combination of --load/--agreement/--export, always in that order) -- or, with a nested
     `sheet` / `sheet-import` subcommand, the monthly blind sheet with decoys (sprint plan §26)."""
     action = getattr(a, "feedback_action", None)
+    if action == "ingest":
+        from backend.finder import gold_ingest
+        targets = []
+        if a.manifest:
+            for path, basis, _notes in gold_ingest.load_manifest(a.manifest):
+                targets.append((path, basis or a.basis))
+        for p in a.paths or []:
+            targets.append((p, a.basis))
+        if not targets:
+            print("feedback ingest: nothing to do -- give a PATH or --manifest")
+            sys.exit(1)
+        result = gold_ingest.ingest(con, targets, accept_proposed=a.accept_proposed, dry_run=a.dry_run)
+        sys.exit(0 if result["ok"] else 1)
     if action == "sheet":
         from backend.finder import blind_sheet
         blind_sheet.generate_sheet(con, n=a.n, seed=a.seed, out_path=a.out)
@@ -696,6 +711,19 @@ def main():
     fs.add_argument("path")
     fs.add_argument("--history", help="history JSONL path (default db/blind_sheet_history.jsonl)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet-import")
+
+    fs = fsub.add_parser("ingest", help="ingest gold-standard sheets in any of the vault's header formats")
+    fs.add_argument("paths", nargs="*", metavar="PATH", help="one or more gold-sheet CSVs")
+    fs.add_argument("--manifest", help="a path,basis,notes CSV listing every file to ingest in one run")
+    fs.add_argument("--basis", choices=MARK_BASIS_VALUES,
+                    help="required for a narrow (F2/F3) sheet with no basis column of its own, unless the "
+                         "manifest gives that file its own basis")
+    fs.add_argument("--accept-proposed", action="store_true",
+                    help="ingest a machine-drafted 'proposed required calls' file (header carries "
+                         "proposal_confidence) once the user has reviewed and confirmed it")
+    fs.add_argument("--dry-run", action="store_true",
+                    help="detect, normalize and resolve precedence against the DB; write nothing")
+    fs.set_defaults(func=cmd_feedback, feedback_action="ingest")
 
     s = sub.add_parser("retrain", parents=[common],
                        help="the weekly retrain, gated and ledgered (sprint plan §24)")

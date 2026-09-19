@@ -578,6 +578,19 @@ def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="override the DuckDB path")
     common.add_argument("--vault", default=os.getenv("JOBSEARCH_VAULT_DIR"), help="vault / Job_Search directory")
+    # For a command with its OWN nested sub-subparsers (today: `feedback`'s sheet/sheet-import/ingest), the
+    # outer `--db`/`--vault` (parents=[common]) is parsed against the `feedback` parser, but argparse then
+    # parses the sub-subparser's OWN arguments into the SAME namespace -- so `--db` must also be accepted at
+    # that inner level for `finder.py feedback ingest --db X ...` (given AFTER the sub-action) to work at all,
+    # not just `finder.py feedback --db X ingest ...` (given before). The trap: a plain `parents=[common]` at
+    # the inner level would carry `common`'s own defaults (None / $JOBSEARCH_VAULT_DIR), and argparse APPLIES
+    # every parser's defaults into the namespace even when that parser's own arguments were not given on the
+    # command line -- so the inner parser's default would silently overwrite a value the outer `--db` already
+    # set. `default=argparse.SUPPRESS` makes the inner parser set nothing at all when its own `--db`/`--vault`
+    # is absent, leaving whatever the outer parser (or its own default) already put in the namespace alone.
+    common_inner = argparse.ArgumentParser(add_help=False)
+    common_inner.add_argument("--db", default=argparse.SUPPRESS, help="override the DuckDB path")
+    common_inner.add_argument("--vault", default=argparse.SUPPRESS, help="vault / Job_Search directory")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -726,18 +739,18 @@ def main():
     s.set_defaults(func=cmd_feedback, feedback_action=None)
     fsub = s.add_subparsers(dest="feedback_action")
 
-    fs = fsub.add_parser("sheet", help="write a blind grading CSV with decoys (sprint plan §26)")
+    fs = fsub.add_parser("sheet", parents=[common_inner], help="write a blind grading CSV with decoys (sprint plan §26)")
     fs.add_argument("--n", type=int, default=20)
     fs.add_argument("--seed", type=int, help="seeds the sample/shuffle for a reproducible sheet")
     fs.add_argument("--out", help="CSV output path (default db/blind_sheets/blind_sheet_<date>.csv)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet")
 
-    fs = fsub.add_parser("sheet-import", help="import a graded blind sheet (basis='blind')")
+    fs = fsub.add_parser("sheet-import", parents=[common_inner], help="import a graded blind sheet (basis='blind')")
     fs.add_argument("path")
     fs.add_argument("--history", help="history JSONL path (default db/blind_sheet_history.jsonl)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet-import")
 
-    fs = fsub.add_parser("ingest", help="ingest gold-standard sheets in any of the vault's header formats")
+    fs = fsub.add_parser("ingest", parents=[common_inner], help="ingest gold-standard sheets in any of the vault's header formats")
     fs.add_argument("paths", nargs="*", metavar="PATH", help="one or more gold-sheet CSVs")
     fs.add_argument("--manifest", help="a path,basis,notes CSV listing every file to ingest in one run")
     fs.add_argument("--basis", choices=MARK_BASIS_VALUES,

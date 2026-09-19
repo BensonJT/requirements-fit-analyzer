@@ -394,20 +394,97 @@ def test_f1_dry_run_counts_without_writing(tmp_path):
 
 # ---------------------------------------------------------------- F4 (single-lens AI grade)
 
-def test_f4_parses_but_never_writes(tmp_path):
+def _f4_write(path, rows):
+    _write(path, ["row", "posting_id", "employer", "title", "url", "posting_status", "human_grade_ai",
+                 "level_fit", "confidence", "note"], rows)
+
+
+def test_f4_writes_human_lens_grades_never_touches_llm_labels(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     _posting(con, PID_A)
     path = tmp_path / "ai_lens.csv"
-    _write(path, ["row", "posting_id", "employer", "title", "url", "posting_status", "human_grade_ai",
-                 "level_fit", "confidence", "note"],
-          [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "wrong", "out_of_reach", "high", "")])
+    _f4_write(path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "wrong", "out_of_reach",
+                      "high", "a note")])
     result = gold_ingest.ingest(con, [(path, "seen")], log=_quiet)
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["files"][0]["format"] == "f4"
-    assert result["files"][0]["would_write"] == 1  # parsed and validated
-    assert "schema change" in result["files"][0]["refused"]
+    assert result["files"][0]["refused"] is None
+    assert result["files"][0]["would_write"] == 1
+    assert result["lens_grades_written"] == 1
+    row = con.execute("SELECT posting_id, description_hash, lens, grade, basis, level_fit, note, source_file "
+                      "FROM human_lens_grades").fetchone()
+    assert row == (PID_A, "h", "ai", "wrong", "seen", "out_of_reach", "a note", "ai_lens.csv")
     assert con.execute("SELECT count(*) FROM report_feedback").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM llm_labels").fetchone()[0] == 0
+    con.close()
+
+
+def test_f4_dry_run(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "ai_lens.csv"
+    _f4_write(path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "bullseye", "in_range",
+                      "high", "")])
+    result = gold_ingest.ingest(con, [(path, "seen")], dry_run=True, log=_quiet)
+    assert result["ok"] is True
+    assert result["files"][0]["would_write"] == 1
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+    con.close()
+
+
+def test_f4_without_basis_is_refused(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "ai_lens.csv"
+    _f4_write(path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "bullseye", "", "", "")])
+    result = gold_ingest.ingest(con, [(path, None)], log=_quiet)
+    assert result["ok"] is False
+    assert "no basis declared" in result["files"][0]["refused"]
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+    con.close()
+
+
+def test_f4_invalid_lens_grade_rejected(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "ai_lens.csv"
+    _f4_write(path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "not-a-grade", "", "", "")])
+    result = gold_ingest.ingest(con, [(path, "seen")], log=_quiet)
+    assert result["ok"] is False
+    assert result["files"][0]["rejected"][0]["field"] == "human_grade_ai"
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+    con.close()
+
+
+def test_f4_reingest_is_idempotent(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "ai_lens.csv"
+    _f4_write(path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "adjacent", "in_range",
+                      "high", "")])
+    gold_ingest.ingest(con, [(path, "seen")], log=_quiet)
+    gold_ingest.ingest(con, [(path, "seen")], log=_quiet)
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 1
+    assert con.execute("SELECT grade FROM human_lens_grades").fetchone() == ("adjacent",)
+    con.close()
+
+
+def test_f4_blind_not_overwritten_by_seen(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    blind_path = tmp_path / "blind.csv"
+    _f4_write(blind_path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "bullseye",
+                            "in_range", "high", "")])
+    gold_ingest.ingest(con, [(blind_path, "blind")], log=_quiet)
+    seen_path = tmp_path / "seen.csv"
+    _f4_write(seen_path, [(1, PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "wrong",
+                           "out_of_reach", "high", "")])
+    result = gold_ingest.ingest(con, [(seen_path, "seen")], log=_quiet)
+    assert len(result["files"][0]["conflicts"]) == 1
+    basis, grade = con.execute("SELECT basis, grade FROM human_lens_grades WHERE posting_id = ?",
+                               [PID_A]).fetchone()
+    assert basis == "blind"
+    assert grade == "bullseye"  # the blind row is kept whole: a seen grade never lands under a blind basis
     con.close()
 
 

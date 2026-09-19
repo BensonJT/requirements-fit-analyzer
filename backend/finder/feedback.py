@@ -346,10 +346,14 @@ def export(con, out_path, log=print) -> Path:
                rf.assessor, rf.confirmed_by_user, rf.note, rf.grade_before_split, rf.needs_confirm,
                rf.split_reason, rf.required_fit, rf.required_unmet, rf.assessed_at,
                j.grade_process AS judge_grade_process, j.grade_technical AS judge_grade_technical,
-               j.grade_ai AS judge_grade_ai, j.grade AS judge_grade
+               j.grade_ai AS judge_grade_ai, j.grade AS judge_grade,
+               hp.grade AS human_grade_process, ht.grade AS human_grade_technical, ha.grade AS human_grade_ai
         FROM report_feedback rf
         JOIN postings p USING (posting_id)
         LEFT JOIN vw_llm_labels_latest_judge j USING (posting_id)
+        LEFT JOIN vw_human_lens_grades_current hp ON hp.posting_id = rf.posting_id AND hp.lens = 'process'
+        LEFT JOIN vw_human_lens_grades_current ht ON ht.posting_id = rf.posting_id AND ht.lens = 'technical'
+        LEFT JOIN vw_human_lens_grades_current ha ON ha.posting_id = rf.posting_id AND ha.lens = 'ai'
         ORDER BY rf.posting_id, rf.assessor
     """)
     cols = [d[0] for d in rows.description]

@@ -28,6 +28,7 @@ Usage:
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -257,6 +258,17 @@ def _manifest(a):
     return evidence.load_manifest(str(path))
 
 
+def cmd_required_embed(con, a):
+    from backend.finder import required_embed
+    if a.action == "train":
+        result = required_embed.train(con)
+        if a.report:
+            print(json.dumps({k: v for k, v in result.items() if k != "oof_stack"}, indent=2, default=str))
+    else:
+        stats = required_embed.score(con, all_rows=a.all)
+        print(stats)
+
+
 def cmd_evidence(con, a):
     from backend.finder import embed, evidence
     manifest = _manifest(a)
@@ -418,6 +430,13 @@ def main():
     s.add_argument("--pseudo", type=int, default=300, help="pseudo-negatives for the sanity AUC (default 300)")
     s.add_argument("--hard-top", type=int, default=200, help="highest-fit unlabeled postings used as hard negatives")
     s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("required-embed", parents=[common],
+                       help="the second-layer stacked model (backend/finder/required_embed.py): NOT a lens")
+    s.add_argument("action", choices=["train", "score"])
+    s.add_argument("--report", action="store_true", help="train: print the full metrics dict")
+    s.add_argument("--all", action="store_true", help="score: re-score every population row, not only new ones")
+    s.set_defaults(func=cmd_required_embed)
 
     s = sub.add_parser("judge", parents=[common], help="LLM labeling run: export batches, import graded labels")
     s.add_argument("action", choices=["export", "import", "status", "report", "exclude"])

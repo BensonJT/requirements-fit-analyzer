@@ -26,7 +26,11 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 13  # v13 (2026-09-19): screens.fit_required -- the Required-block ranking model's probability
+SCHEMA_VERSION = 14  # v14 (2026-09-19): required_embed table -- the "second layer" stacked model's
+                     #                  embed_required (backend/finder/required_embed.py). NOT a lens, NOT on
+                     #                  screens (a rescreen rewrites screens; these scores live in their own
+                     #                  table, keyed by model_version + description_hash, see vw_required_embed_latest);
+                     # v13 (2026-09-19): screens.fit_required -- the Required-block ranking model's probability
                      #                  (features.train(lens="required")). NOT a lens: ranking signal only,
                      #                  never read by pipeline.content_fit / combine;
                      # v12 (2026-09-18): llm_labels.required_fit / required_unmet (the judge's Required-block
@@ -207,6 +211,26 @@ CREATE TABLE IF NOT EXISTS requirement_units (
     weight DOUBLE NOT NULL, klass VARCHAR NOT NULL, spec DOUBLE, model VARCHAR NOT NULL, vector FLOAT[384],
     embedded_at TIMESTAMP NOT NULL, PRIMARY KEY (posting_id, description_hash, splitter, ord)
 );
+-- The "second layer" stacked model's score (backend/finder/required_embed.py): embed_required is a SECOND,
+-- independent estimate of the same question fit_required answers (does the candidate clear THIS posting's
+-- Required block), stacking TF-IDF + a bge-base Required-block embedding classifier + a per-line roll-up.
+-- NOT a lens, and NEVER written to `screens` -- a rescreen rewrites screens wholesale, so a score that must
+-- survive one lives in its own table, keyed by (posting_id, description_hash, model_version) like coverage.
+-- is_oof marks a training-set row scored with its held-out fold value (never an in-sample score).
+CREATE TABLE IF NOT EXISTS required_embed (
+    posting_id      VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, model_version VARCHAR NOT NULL,
+    embed_required  DOUBLE,                    -- the stacked P(meets); NOT a lens, never in content_fit/lens_best
+    block_p         DOUBLE,                    -- component: bge-base Required-block embedding classifier
+    line_p          DOUBLE,                    -- component: roll-up-classifier probability from the per-line model
+    tfidf_p         DOUBLE,                    -- component: screens.fit_required at scoring time (OOF at training time)
+    n_lines         INTEGER,                   -- Required-group lines the roll-up was computed over
+    worst_line      VARCHAR,                   -- the Required line with the highest P(unmet)
+    worst_line_p    DOUBLE,
+    is_oof          BOOLEAN NOT NULL,          -- true = this posting was in the training fold set; held-out score
+    scored_at       TIMESTAMP NOT NULL,
+    PRIMARY KEY (posting_id, description_hash, model_version)
+);
+
 CREATE TABLE IF NOT EXISTS coverage (
     posting_id VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, evidence_version VARCHAR NOT NULL,
     model VARCHAR NOT NULL, calibration VARCHAR NOT NULL,
@@ -389,6 +413,15 @@ CREATE OR REPLACE VIEW vw_coverage_latest AS
     SELECT c.* FROM coverage c JOIN postings p ON p.posting_id = c.posting_id AND coalesce(p.description_hash, '') = c.description_hash
     QUALIFY row_number() OVER (PARTITION BY c.posting_id ORDER BY c.scored_at DESC) = 1;
 
+-- Newest required_embed MODEL VERSION's row for the posting's CURRENT description_hash -- same two-part
+-- "latest" as vw_coverage_latest (newest scored_at is not enough on its own: a stale model version could have
+-- scored more recently than a fresh retrain's first pass). Absent for a posting never scored, or scored only
+-- under a hash the JD has since moved past.
+CREATE OR REPLACE VIEW vw_required_embed_latest AS
+    SELECT r.* FROM required_embed r JOIN postings p
+      ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
+    QUALIFY row_number() OVER (PARTITION BY r.posting_id ORDER BY r.model_version DESC, r.scored_at DESC) = 1;
+
 -- The user's own adjudication always wins over a judge grade for the same posting, whenever it was written;
 -- otherwise the newest grade for the posting's current text.
 CREATE OR REPLACE VIEW vw_llm_labels_latest AS
@@ -541,12 +574,17 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                s.reasons, s.flags,
                g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit, g.required_unmet,
                d.posting_id IS NOT NULL AS decided,
-               t.matched_posting_id IS NOT NULL AS in_tracker
+               t.matched_posting_id IS NOT NULL AS in_tracker,
+               -- The "second layer" (backend/finder/required_embed.py): NOT a lens, never read here except
+               -- through the coalesce(embed_required, fit_required) calls below, which only ever stand in for
+               -- fit_required -- the judge's own required_fit call still wins over both.
+               re.embed_required, re.worst_line AS embed_worst_line, re.worst_line_p AS embed_worst_line_p
         FROM postings p
         JOIN vw_screen_latest s USING (posting_id)
         LEFT JOIN vw_llm_labels_latest g USING (posting_id)
         LEFT JOIN vw_decisions d USING (posting_id)
         LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
+        LEFT JOIN vw_required_embed_latest re USING (posting_id)
         WHERE p.status = 'active'
     ), placed AS (
         SELECT *,
@@ -600,10 +638,11 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                 ELSE lens_value(grade_process, fit_process) + lens_value(grade_technical, fit_technical)
                      + lens_value(grade_ai, fit_ai) END AS lens_breadth,
            -- The soft version of "multiply by zero if I don't meet the requirements": a judged row gets the
-           -- hard 0 / 0.5 / 1 the judge assigned (required_value), an unjudged row gets the ranking model's
-           -- probability. fit_required is NOT a lens and never touches lens_breadth itself -- only this
+           -- hard 0 / 0.5 / 1 the judge assigned (required_value), an unjudged row gets the second-layer stack's
+           -- probability where it exists, else the first-layer (TF-IDF) probability -- coalesce(embed_required,
+           -- fit_required). Neither is a lens and neither ever touches lens_breadth itself -- only this
            -- product, which exists for ranking (the judge queue, ad hoc reads), never for content_fit.
-           lens_breadth * required_value(required_fit, fit_required) AS breadth_x_required,
+           lens_breadth * required_value(required_fit, coalesce(embed_required, fit_required)) AS breadth_x_required,
            -- THE rank: the one number a list is ordered by (0-100). Every component stays visible beside it;
            -- this is only their combination. Best lens carries it (0.8), breadth beyond the best lens adds to
            -- it (0.2 x the other two lenses' share). The best-lens weight must stay ABOVE 0.75: three adjacents
@@ -614,7 +653,7 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- (three bullseyes > bullseye + adjacent > one bullseye), then breadth among adjacent-only rows (three > two > one). PROVISIONAL v1 weights, chosen to reproduce the user's stated
            -- ordering; to be re-fit to his gold grades and build / pass decisions once there are enough.
            round(100.0 * (0.8 * lens_best + 0.2 * greatest(0.0, lens_breadth - lens_best) / 2.0)
-                 * required_value(required_fit, fit_required) * level_value(level_fit)
+                 * required_value(required_fit, coalesce(embed_required, fit_required)) * level_value(level_fit)
                  * CASE WHEN verdict = 'reject' OR lens_best < lens_strong_p() THEN 0.0 ELSE 1.0 END, 1) AS rank_score,
            -- WHY it sits there, in words: the deciding facts, not the numbers again.
            concat_ws('; ',
@@ -626,7 +665,12 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                     WHEN 'meets' THEN 'Required: meets'
                     WHEN 'arguable' THEN 'Required arguable: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
                     WHEN 'fails' THEN 'Required FAILS: ' || coalesce(nullif(left(required_unmet, 140), ''), 'see posting')
-                    ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)' END,
+                    ELSE CASE WHEN embed_required IS NOT NULL
+                              THEN 'Required ~' || printf('%.2f', embed_required) || ' (embed model, not judged)'
+                                   || CASE WHEN embed_worst_line_p >= 0.5
+                                           THEN '; likeliest gap: ' || left(embed_worst_line, 110) ELSE '' END
+                              ELSE 'Required ~' || coalesce(printf('%.2f', fit_required), '?') || ' (model, not judged)'
+                         END END,
                CASE WHEN coalesce(level_fit, 'unknown') != 'in_range' THEN 'level ' || coalesce(level_fit, 'unknown') END,
                CASE WHEN verdict = 'reject' THEN 'SCREEN REJECT: ' || coalesce(reasons ->> 0, 'see reasons') END
            ) AS rank_why

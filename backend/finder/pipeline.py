@@ -348,6 +348,24 @@ def coverage_stage(con, *, since=None, log=print) -> Optional[dict]:
         return None
 
 
+def required_embed_stage(con, *, log=print) -> Optional[dict]:
+    """The "second layer" stack (backend/finder/required_embed.py) scoring pass, run AFTER coverage_stage
+    because it depends on `requirement_units`. Never fatal: no trained model, no encoder library, or any other
+    failure prints one log line and the sweep continues, same pattern as coverage_stage."""
+    t = time.monotonic()
+    try:
+        from . import required_embed
+        if required_embed.load_latest(con, log=log) is None:
+            log("Required-embed: skipped (no trained model; run `finder.py required-embed train`)")
+            return None
+        stats = required_embed.score(con, log=log)
+        log(f"Required-embed stage: {stats.get('scored', 0)} postings ({time.monotonic() - t:.1f}s)")
+        return stats
+    except Exception as exc:  # logged, never fatal to the sweep
+        log(f"Required-embed: failed ({type(exc).__name__}: {exc}); continuing without it")
+        return None
+
+
 def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: bool = True, full: bool = False,
           use_model: bool = True, use_coverage: bool = True, log=print) -> dict:
     """tracker sync -> decision read-back -> screen -> (LLM) -> Jobs_Found -> snapshots, one log line per stage.
@@ -371,6 +389,7 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
                            required_model=required_model, log=log)
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
+        out["required_embed"] = required_embed_stage(con, log=log)
     if llm_top:
         log("LLM stage: not built yet (Phase 4); skipped.")
     if report and vault_dir:

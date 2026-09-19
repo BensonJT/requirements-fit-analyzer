@@ -324,7 +324,7 @@ def _seed_human_lens_from_db(con, pid, description_hash, lens):
 def _merge_human_lens(existing, incoming):
     """Same basis precedence _merge gives report_feedback rows (via _resolve_basis): a 'seen' row never
     overwrites an existing 'blind' one for the same (posting_id, description_hash, lens) -- the mismatch is
-    reported as a conflict, the existing row is kept. `grade` is required and non-blank by the time a row
+    reported as a conflict, the existing row is kept WHOLE (grade included). `grade` is required and non-blank by the time a row
     reaches here (a blank grade is skipped before this is called), so a later file's row always supersedes an
     earlier one's grade/level_fit/note/source_file within a run, same "last one in a run wins the non-basis
     fields" shape _merge gives report_feedback."""
@@ -333,6 +333,11 @@ def _merge_human_lens(existing, incoming):
     merged = dict(existing)
     basis, conflict = _resolve_basis(existing.get("basis"), incoming.get("basis"))
     merged["basis"] = basis
+    if conflict and existing.get("basis") == "blind":
+        # Audit fix: a grade made AFTER seeing the scores must never land under the existing row's 'blind'
+        # basis -- that would put a seen grade into the blind evaluation set. Keep the blind row whole. (The
+        # other direction, a blind sheet over an existing 'seen' row, stores the new grade as 'seen': safe.)
+        return merged, True
     for field in ("grade", "level_fit", "note", "source_file"):
         v = incoming.get(field)
         if v not in (None, ""):

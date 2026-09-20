@@ -72,7 +72,9 @@ def test_v18_migrates_cleanly_from_v17(tmp_path):
 
     con = store.connect(db_path)
     version = con.execute("SELECT version FROM schema_info").fetchone()[0]
-    assert version == 18
+    # Asserts the CURRENT version, not a literal 18: v19 (human_lens_grades) is additive, same as v17/v18
+    # were, so a v17 DB reconnecting today lands on whatever SCHEMA_VERSION is now, not frozen at 18.
+    assert version == store.SCHEMA_VERSION
     assert con.execute("SELECT count(*) FROM judge2_reviews").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM judge2_evals").fetchone()[0] == 0
     con.close()

@@ -13,7 +13,11 @@ FINDER = os.path.join(ROOT, "finder.py")
 
 
 def _run(args, cwd):
-    return subprocess.run([sys.executable, FINDER] + args, cwd=cwd, capture_output=True, text=True, timeout=60)
+    # JOBSEARCH_DB points the no-`--db` default at a throwaway file: a test must never open the live database
+    # (it would migrate it, and fails outright while another process holds the write lock).
+    env = dict(os.environ, JOBSEARCH_DB=os.path.join(str(cwd), "default_fallback.duckdb"))
+    return subprocess.run([sys.executable, FINDER] + args, cwd=cwd, capture_output=True, text=True, timeout=60,
+                          env=env)
 
 
 def _db_used(res, expected_path):
@@ -45,6 +49,7 @@ def test_feedback_db_given_at_neither_falls_back_to_default(tmp_path):
     res = _run(["feedback", "ingest", "nofile.csv", "--basis", "seen", "--dry-run"], tmp_path)
     assert "unrecognized arguments" not in res.stderr
     assert "error" not in res.stderr.lower() or "refused" in res.stdout.lower()
+    assert os.path.exists(tmp_path / "default_fallback.duckdb")   # the default path was used, not the live DB
 
 
 def test_feedback_db_given_at_outer_only_reaches_the_inner_command(tmp_path):

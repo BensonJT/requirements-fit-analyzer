@@ -42,7 +42,9 @@ API_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:
 DEFAULT_JD_CAP = 12_000
 BACKOFF_SECONDS = (2, 8)          # §25 / §10: back off, then fall to the next model
 DEFAULT_RPM = 10                  # sane conservative default when GEMINI_RPM is unset
-DEFAULT_TPM = 200_000
+DEFAULT_TPM = 12_000               # free tier is ~14K tokens/minute PER MODEL; stay under it (GEMINI_TPM overrides)
+THINKING_LEVEL = "minimal"         # Gemma 4 is a thinking model: at "minimal" it emits no thought part, so the
+                                   # per-minute token budget is spent on the posting, not on reasoning tokens
 CHARS_PER_TOKEN = 4               # crude estimate ("tokens ~ chars/4"), logging/throttle only
 REQUIRED_FIT_VALUES = ("meets", "partial", "fails")
 CONFIDENCE_VALUES = ("low", "medium", "high")
@@ -310,14 +312,18 @@ def default_transport():
     already passed. Constructing the client makes no network call by itself; `httpx` is an existing
     dependency (requirements.txt)."""
     import httpx
-    return httpx.Client(timeout=30.0)
+    return httpx.Client(timeout=120.0)
 
 
 def _gemini_text(response_json: dict) -> Optional[str]:
+    # A thinking model returns its reasoning as parts marked `thought: true` AHEAD of the answer; taking
+    # parts[0] would parse the reasoning, not the answer. Join every non-thought text part.
     try:
-        return response_json["candidates"][0]["content"]["parts"][0]["text"]
+        parts = response_json["candidates"][0]["content"]["parts"]
+        texts = [p["text"] for p in parts if isinstance(p, dict) and p.get("text") and not p.get("thought")]
     except (KeyError, IndexError, TypeError):
         return None
+    return "".join(texts) if texts else None
 
 
 def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_text: str, *,
@@ -328,7 +334,8 @@ def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_
     itself (`default_transport()` builds an `httpx.Client(timeout=30.0)`), not here."""
     headers = {"content-type": "application/json", "x-goog-api-key": api_key}
     body = {"contents": [{"parts": [{"text": prompt_text}]}],
-            "generationConfig": {"temperature": temperature}}
+            "generationConfig": {"temperature": temperature, "response_mime_type": "application/json",
+                                 "thinkingConfig": {"thinkingLevel": THINKING_LEVEL}}}
     last_reason = "no models configured"
     for model in models:
         url = API_URL_TMPL.format(model=model)
@@ -459,10 +466,19 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         transport = default_transport()
     reviewed, unparseable, skipped_no_model = 0, 0, 0
     pace = (60.0 / rpm) if rpm > 0 else 0.0   # paid on EVERY request (a failed or re-asked one too), never only on success
+    tpm = int(os.environ.get("GEMINI_TPM", DEFAULT_TPM) or DEFAULT_TPM)
+
+    def _wait(prompt_text: str) -> float:
+        # Token-aware pacing: the free tier's binding limit is tokens per minute, not requests. Wait long
+        # enough AFTER a request of N estimated tokens that the rolling minute stays under `tpm`.
+        est = len(prompt_text) / CHARS_PER_TOKEN + 400   # + a small allowance for the JSON answer
+        return max(pace, 60.0 * est / tpm) if tpm > 0 else pace
+    last_prompt = ""
     for i, (pid, description_hash, title, employer, payload) in enumerate(candidates):
         prompt_text = render_prompt(payload)
-        if i and pace:
-            sleep_fn(pace)
+        if i and _wait(last_prompt):
+            sleep_fn(_wait(last_prompt))
+        last_prompt = prompt_text
         model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
         if data is None:
             skipped_no_model += 1
@@ -471,8 +487,8 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         review = parse_response(raw_text, payload["jd_text"], log=log)
         if review is None:
             # at most one re-ask per posting
-            if pace:
-                sleep_fn(pace)
+            if _wait(prompt_text):
+                sleep_fn(_wait(prompt_text))
             model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
             raw_text = _gemini_text(data) if data else ""
             review = parse_response(raw_text or "", payload["jd_text"], log=log) if raw_text else None

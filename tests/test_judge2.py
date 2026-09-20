@@ -576,7 +576,19 @@ def test_every_request_is_paced_even_when_it_fails(tmp_path, monkeypatch):
     result = judge2.run(con, top_n=5, transport=lambda url, headers=None, json=None: _FakeResponse(400, {}),
                         sleep_fn=sleeps.append, rpm=10, log=lambda *_: None)
     assert result["reviewed"] == 0 and result["skipped_no_model"] == 3
+    assert len(sleeps) == 2 and all(x > 6.0 for x in sleeps)   # token pacing (default TPM) outlasts 60/rpm
+    monkeypatch.setenv("GEMINI_TPM", "0")                       # token pacing off: the plain 60/rpm pace
+    sleeps.clear()
+    judge2.run(con, top_n=5, transport=lambda url, headers=None, json=None: _FakeResponse(400, {}),
+               sleep_fn=sleeps.append, rpm=10, log=lambda *_: None)
     assert sleeps.count(6.0) == 2          # between postings, although none succeeded
+
+
+def test_answer_is_read_from_the_non_thought_parts():
+    data = {"candidates": [{"content": {"parts": [{"text": "let me reason...", "thought": True},
+                                                  {"text": '{"required_fit": "meets"}'}]}}]}
+    assert judge2._gemini_text(data) == '{"required_fit": "meets"}'
+    assert judge2._gemini_text({"candidates": [{"content": {"parts": [{"text": "x", "thought": True}]}}]}) is None
 
 
 def test_live_run_refuses_without_a_key(tmp_path, monkeypatch):

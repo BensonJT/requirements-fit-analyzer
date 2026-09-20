@@ -792,7 +792,7 @@ def main():
     s.set_defaults(func=cmd_setup_check)
 
     a = ap.parse_args()
-    con = store.connect(a.db)
+    con = store.connect(a.db or os.environ.get("JOBSEARCH_DB") or None)   # JOBSEARCH_DB: default-path override (tests)
     try:
         a.func(con, a)
     finally:

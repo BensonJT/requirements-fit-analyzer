@@ -566,8 +566,10 @@ def cmd_judge2(con, a):
         if a.compare:
             judge2.compare(con, a.compare[0], a.compare[1])
         else:
-            judge2.evaluate(con, background=a.background, background_path=a.background_file)
-            judge2.line_level_report(con, background=a.background, background_path=a.background_file)
+            judge2.evaluate(con, background=a.background, background_path=a.background_file,
+                            prompt_version_override=a.prompt_version)
+            judge2.line_level_report(con, background=a.background, background_path=a.background_file,
+                                     prompt_version_override=a.prompt_version)
         return
     # action == "run"
     try:
@@ -803,6 +805,8 @@ def main():
     s.add_argument("--background-file", help="path for --background file (default $JUDGE2_BACKGROUND_FILE)")
     s.add_argument("--i-have-approval", action="store_true",
                    help="the other half of the live-call gate, alongside JUDGE2_LIVE_OK=1")
+    s.add_argument("--prompt-version", help="eval: evaluate this stored prompt_version (e.g. a --run-tag "
+                                            "repeat, base_pv:TAG) instead of the one the current flags hash to")
     s.add_argument("--compare", nargs=2, metavar=("PROMPT_VERSION_A", "PROMPT_VERSION_B"),
                    help="eval: print postings whose required_fit differs between two stored prompt_versions "
                         "(sprint plan §29.4), instead of running the posting-level bar")

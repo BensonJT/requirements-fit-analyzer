@@ -1029,7 +1029,12 @@ unit-tested table-style; only `section == required` lines count):
   the line itself asks for N+ years in that one tool (then the model should have typed it `years_function`;
   code double-checks with a years regex on the line). Otherwise a `tool` line is a soft line.
 - Soft lines (`tool`, `skill`, `degree`): more than half of all required lines `unmet` -> `fails`.
-- `meets`: no hard gate `unmet` or `unclear`, and at most ONE soft line not `met` (the lone learnable gap).
+- `meets`: no hard gate `unmet` or `unclear`, at most ONE soft line `unmet` (the lone learnable gap), and at
+  most HALF the soft lines `unclear`. (Audit amendment: the first draft counted every soft `unclear` as a gap.
+  A background sheet is silent on generic lines such as communication skills, and the evidence guard turns an
+  unsupported `met` into `unclear`, so that draft would have made `meets` unreachable for ordinary postings.)
+- A review with one or more entries DROPPED by validation can be at most `partial`: the dropped entry may
+  have been an unmet hard gate the model misquoted, so `meets` cannot be confirmed (§25's guard, kept).
 - Everything else -> `partial`. A hard gate that is `unclear` is `partial`, never `meets`.
 - Zero surviving required lines -> no call (`required_fit` NULL, counted as unjudged; §25's 10% unjudged cap
   in `evaluate` applies unchanged).
@@ -1037,6 +1042,17 @@ unit-tested table-style; only `section == required` lines count):
   Why column is a later, separate step.)
 `why` is a short machine string naming the deciding line(s), stored with the review. Thresholds are module
 constants, so tuning them re-derives calls from stored lines with NO new API call: `finder.py judge2 rederive`.
+
+**Orchestrator audit of the build (2026-09-20), all fixed on the branch before merge:** (1) the "tool is
+the job" title check matched any capitalized word as a SUBSTRING of the title, so "Data visualization tools"
+gated every "Data Analyst" and "AI" matched inside "Retail": now whole-word, with a list of generic title
+words excluded; (2) soft `unclear` lines blocked `meets` (my spec's flaw, amended above); (3) a dropped entry
+vanished silently, so a misquoted unmet gate could leave `meets` standing: capped at `partial`; (4)
+`evaluate` read `vw_judge2_latest`, which keeps only the NEWEST review per posting, so evaluating round 5
+after round 6 would have found every row unjudged: it now reads `judge2_reviews` by prompt_version, and
+`judge2 eval --prompt-version` evaluates a tagged repeat; (5) a `--run-tag` repeat, being newest, would have
+become the review the rank reads: `vw_judge2_latest` now excludes tagged versions. Gold unmet lines are
+stored joined by " ; " (not pipes, as §29.4 first said); the report splits on that.
 
 **29.3 Storage (schema v20; back up the live DB first).** New table `judge2_lines` (posting_id,
 description_hash, prompt_version, line_no, line, section, kind, verdict, evidence, years JSON,

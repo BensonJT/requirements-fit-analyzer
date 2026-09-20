@@ -301,7 +301,7 @@ def test_derive_lone_soft_gap_meets():
 
 def test_derive_two_soft_gaps_partial():
     # 4 required lines, 2 unmet (exactly half -- NOT "more than half", so the majority-unmet rule does not
-    # fire); 2 soft gaps exceeds SOFT_GAP_MEETS_MAX(1) -> partial, not meets.
+    # fire); 2 soft gaps exceeds SOFT_UNMET_MEETS_MAX(1) -> partial, not meets.
     lines = [_line(kind="years_function", verdict="met", line="L1"),
             _line(kind="skill", verdict="met", line="L2"),
             _line(kind="tool", verdict="unmet", line="L3"),
@@ -895,3 +895,60 @@ def test_thinking_level_joins_prompt_version(monkeypatch):
     assert judge2.thinking_level() == "high"
     pv_high = judge2.prompt_version(bg)
     assert pv_default != pv_high
+
+
+# ---------------------------------------------------------------- orchestrator audit fixes (2026-09-20)
+def test_derive_generic_capitalized_word_in_title_is_not_a_tool_gate():
+    # "Data" opens the line and sits in the title; it is not a tool name, so the lone gap stays soft -> meets.
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="tool", verdict="unmet", line="Data visualization tools such as Tableau")]
+    fit, _why = judge2.derive_required_fit(lines, title="Senior Data Analyst")
+    assert fit == "meets"
+
+
+def test_derive_title_match_is_whole_word_not_substring():
+    # "Go" must not match inside "Category"; the tool is not the job.
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="tool", verdict="unmet", line="Exposure to Go")]
+    fit, _why = judge2.derive_required_fit(lines, title="Category Planning Analyst")
+    assert fit == "meets"
+
+
+def test_derive_soft_unclear_lines_do_not_block_meets_until_a_majority():
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="skill", verdict="met", line="L2"), _line(kind="skill", verdict="met", line="L3"),
+            _line(kind="skill", verdict="unclear", line="Strong communication skills")]
+    assert judge2.derive_required_fit(lines, title="Analyst")[0] == "meets"
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="skill", verdict="met", line="L2"),
+            _line(kind="skill", verdict="unclear", line="L3"), _line(kind="skill", verdict="unclear", line="L4")]
+    assert judge2.derive_required_fit(lines, title="Analyst")[0] == "partial"
+
+
+def test_derive_discarded_lines_cap_meets_at_partial():
+    lines = [_line(kind="years_function", verdict="met", line="L1"), _line(kind="skill", verdict="met", line="L2")]
+    assert judge2.derive_required_fit(lines, title="Analyst")[0] == "meets"
+    fit, why = judge2.derive_required_fit(lines, title="Analyst", lines_discarded=1)
+    assert fit == "partial" and "dropped" in why
+    # a hard-gate fail is still a fail, never softened by the cap
+    lines.append(_line(kind="clearance", verdict="unmet", line="L3"))
+    assert judge2.derive_required_fit(lines, title="Analyst", lines_discarded=1)[0] == "fails"
+
+
+def test_evaluate_reads_an_earlier_run_after_a_later_one(tmp_path):
+    """A `--run-tag` repeat is NEWER than the run it repeats. evaluate() must still find the earlier run's rows
+    (it reads judge2_reviews by prompt_version, not the newest-per-posting view), and the tagged repeat must
+    never become the review the rank reads."""
+    db = str(tmp_path / "t.duckdb")
+    con = store.connect(db)
+    pids = []
+    for i in range(5):
+        pids.append(_blind_row(con, f"C{i}", human_fit="fails", judge1_fit="meets", judge2_fit="fails", pv="pvold"))
+        pids.append(_blind_row(con, f"A{i}", human_fit="meets", judge1_fit="meets", judge2_fit="meets", pv="pvold"))
+    con.execute("""INSERT INTO judge2_reviews SELECT * REPLACE ('pvold:round6' AS prompt_version,
+                   reviewed_at + INTERVAL 1 DAY AS reviewed_at) FROM judge2_reviews""")
+    out = judge2.evaluate(con, prompt_version_override="pvold", log=lambda *a: None)
+    assert out["n_unjudged"] == 0 and out["passed"] is True
+    assert con.execute("SELECT count(*) FROM vw_judge2_latest WHERE prompt_version LIKE '%:%'").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM vw_judge2_latest").fetchone()[0] == 10
+    con.close()

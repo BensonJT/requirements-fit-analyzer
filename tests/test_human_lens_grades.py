@@ -65,8 +65,10 @@ def _human_lens(con, pid, dh, lens, grade, *, basis="seen", level_fit=None, note
 
 def test_schema_version_is_19_and_table_exists(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
-    assert store.SCHEMA_VERSION == 19
-    assert con.execute("SELECT version FROM schema_info").fetchone()[0] == 19
+    # Asserts the CURRENT version, not a literal 19: v20 (judge2_lines, sprint plan §29) is additive on top
+    # of v19's human_lens_grades table, same as test_judge2.py's v18 migration test does for its own version.
+    assert store.SCHEMA_VERSION >= 19
+    assert con.execute("SELECT version FROM schema_info").fetchone()[0] == store.SCHEMA_VERSION
     cols = {r[0] for r in con.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_name = 'human_lens_grades'").fetchall()}
     assert {"posting_id", "description_hash", "lens", "grade", "basis", "level_fit", "note", "source_file",
@@ -91,7 +93,7 @@ def test_older_schema_version_row_migrates_forward(tmp_path):
     con.execute("UPDATE schema_info SET version = 18")
     con.close()
     con = store.connect(path)
-    assert con.execute("SELECT version FROM schema_info").fetchone()[0] == 19
+    assert con.execute("SELECT version FROM schema_info").fetchone()[0] == store.SCHEMA_VERSION
     assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
     con.close()
 

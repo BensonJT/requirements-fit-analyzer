@@ -80,6 +80,55 @@ def test_v18_migrates_cleanly_from_v17(tmp_path):
     con.close()
 
 
+def test_v20_migrates_cleanly_from_v19_keeping_old_rows_valid(tmp_path):
+    """§29.3: a v19 DB (judge2_reviews exists in its §25 shape -- required_fit NOT NULL, no derive_why/
+    lines_discarded/evidence_downgraded/contract columns) migrates to v20 without losing its old rows, which
+    read back as `contract='overall'`; the NEW `judge2_lines` table exists and is empty; and required_fit is
+    nullable so a 'lines' contract row with zero surviving required lines can be inserted."""
+    db_path = str(tmp_path / "v19.duckdb")
+    con = store.connect(db_path)
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    # a §25-era ("overall" contract) row, written before v20's per-line columns existed
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at)
+                   VALUES (?, ?, 'old-pv', 'gemini', 'm', 'meets', '[]', 0, false, false, NULL, 'high', '', 0, ?)""",
+               [pid, dh, NOW])
+    con.close()
+
+    import duckdb
+    raw = duckdb.connect(db_path)
+    raw.execute("UPDATE schema_info SET version = 19")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN derive_why")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN lines_discarded")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN evidence_downgraded")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN contract")
+    raw.execute("ALTER TABLE judge2_reviews ALTER COLUMN required_fit SET NOT NULL")
+    raw.execute("DROP TABLE IF EXISTS judge2_lines")
+    raw.close()
+
+    con2 = store.connect(db_path)
+    version = con2.execute("SELECT version FROM schema_info").fetchone()[0]
+    assert version == store.SCHEMA_VERSION
+
+    row = con2.execute("SELECT required_fit, contract, lines_discarded, evidence_downgraded, derive_why "
+                       "FROM judge2_reviews WHERE prompt_version = 'old-pv'").fetchone()
+    assert row == ("meets", "overall", 0, 0, None)
+    assert con2.execute("SELECT count(*) FROM judge2_lines").fetchone()[0] == 0
+
+    # required_fit is nullable now: a 'lines' contract row with no surviving required lines must be insertable
+    con2.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract) VALUES (?, ?, 'new-pv', 'gemini', 'm', NULL, '[]', 0, false, NULL, NULL, 'high', '',
+                   0, ?, 'no required lines survived validation', 0, 0, 'lines')""", [pid, dh, NOW])
+    null_row = con2.execute("SELECT required_fit, contract FROM judge2_reviews "
+                            "WHERE prompt_version = 'new-pv'").fetchone()
+    assert null_row == (None, "lines")
+    con2.close()
+
+
 # ---------------------------------------------------------------- rubric shadow-immunity
 def test_public_background_immune_to_rubric_local_shadow(monkeypatch):
     original = rubric.JUDGE2_PUBLIC_BACKGROUND
@@ -121,43 +170,80 @@ def test_required_lines_reuses_the_requirements_splitter():
     assert any("years" not in l.lower() or "process improvement" in l.lower() for l in lines)
 
 
-# ---------------------------------------------------------------- validation (hallucination guard)
-def test_parse_response_discards_non_verbatim_quotes():
+# ---------------------------------------------------------------- validation (§29.1/§29.2 per-line guards)
+def test_parse_response_discards_non_verbatim_line():
     jd = "Required: 5+ years of process improvement experience. Active TS/SCI clearance required."
-    raw = json.dumps({"required_fit": "fails",
-                      "unmet": ["Active TS/SCI clearance required.", "a paraphrased made-up requirement"],
-                      "held_clearance": True, "years_gap": None, "confidence": "high"})
-    review = judge2.parse_response(raw, jd)
+    raw = json.dumps({"lines": [
+        {"line": "Active TS/SCI clearance required.", "section": "required", "kind": "clearance",
+         "verdict": "unmet", "evidence": ""},
+        {"line": "a paraphrased made-up requirement", "section": "required", "kind": "skill",
+         "verdict": "unmet", "evidence": ""},
+    ], "held_clearance": True, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, "")
     assert review is not None
-    assert review.unmet == ["Active TS/SCI clearance required."]
-    assert review.unmet_discarded == 1
-    assert review.downgraded is False
-    assert review.required_fit == "fails"
+    assert [l.line for l in review.lines] == ["Active TS/SCI clearance required."]
+    assert review.lines_discarded == 1
 
 
-def test_fails_with_zero_surviving_quotes_downgrades_to_partial():
-    jd = "Required: 5+ years of process improvement experience."
-    raw = json.dumps({"required_fit": "fails", "unmet": ["a fabricated line not in the JD"],
-                      "held_clearance": False, "years_gap": None, "confidence": "medium"})
-    review = judge2.parse_response(raw, jd)
-    assert review.required_fit == "partial"
-    assert review.downgraded is True
-    assert review.unmet == []
-    assert review.unmet_discarded == 1
+def test_parse_response_discards_invalid_enum_values():
+    jd = "Required: Active TS/SCI clearance required."
+    raw = json.dumps({"lines": [
+        {"line": "Active TS/SCI clearance required.", "section": "required", "kind": "clearance",
+         "verdict": "sort-of", "evidence": ""},
+        {"line": "Active TS/SCI clearance required.", "section": "not-a-section", "kind": "clearance",
+         "verdict": "unmet", "evidence": ""},
+        {"line": "Active TS/SCI clearance required.", "section": "required", "kind": "not-a-kind",
+         "verdict": "unmet", "evidence": ""},
+    ], "held_clearance": True, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, "")
+    assert review is not None
+    assert review.lines == []
+    assert review.lines_discarded == 3
+
+
+def test_parse_response_evidence_guard_downgrades_met_without_verbatim_evidence():
+    jd = "Required: Bachelor's degree or equivalent experience."
+    bg = "Holds a Bachelor of Science in Business, awarded 2010."
+
+    good = json.dumps({"lines": [{"line": "Bachelor's degree or equivalent experience.", "section": "required",
+                                  "kind": "degree", "verdict": "met", "evidence": bg}],
+                       "held_clearance": False, "confidence": "high"})
+    review = judge2.parse_response(good, jd, bg)
+    assert review.lines[0].verdict == "met"
+    assert review.lines[0].evidence_downgraded is False
+    assert review.evidence_downgraded == 0
+
+    fabricated = json.dumps({"lines": [{"line": "Bachelor's degree or equivalent experience.",
+                                        "section": "required", "kind": "degree", "verdict": "met",
+                                        "evidence": "a fabricated degree claim not in the background"}],
+                             "held_clearance": False, "confidence": "high"})
+    review2 = judge2.parse_response(fabricated, jd, bg)
+    assert review2.lines[0].verdict == "unclear"
+    assert review2.lines[0].evidence_downgraded is True
+    assert review2.evidence_downgraded == 1
+
+    empty = json.dumps({"lines": [{"line": "Bachelor's degree or equivalent experience.", "section": "required",
+                                   "kind": "degree", "verdict": "met", "evidence": ""}],
+                        "held_clearance": False, "confidence": "high"})
+    review3 = judge2.parse_response(empty, jd, bg)
+    assert review3.lines[0].verdict == "unclear"
+    assert review3.lines[0].evidence_downgraded is True
 
 
 def test_parse_response_tolerates_fenced_and_prose_wrapped_json():
     jd = "Required: an active Public Trust clearance."
+    bg = "Holds an active Public Trust clearance."
     fenced = "Here is my answer:\n```json\n" + json.dumps(
-        {"required_fit": "meets", "unmet": [], "held_clearance": False, "years_gap": None,
-         "confidence": "high"}) + "\n```\nThanks."
-    review = judge2.parse_response(fenced, jd)
-    assert review is not None and review.required_fit == "meets"
+        {"lines": [{"line": "an active Public Trust clearance.", "section": "required", "kind": "clearance",
+                    "verdict": "met", "evidence": bg}],
+         "held_clearance": True, "confidence": "high"}) + "\n```\nThanks."
+    review = judge2.parse_response(fenced, jd, bg)
+    assert review is not None and review.lines[0].verdict == "met"
 
 
-def test_parse_response_rejects_invalid_enum():
-    raw = json.dumps({"required_fit": "sort-of", "unmet": []})
-    assert judge2.parse_response(raw, "jd text") is None
+def test_parse_response_rejects_missing_or_non_list_lines():
+    assert judge2.parse_response(json.dumps({"held_clearance": True}), "jd text") is None
+    assert judge2.parse_response(json.dumps({"lines": "not a list"}), "jd text") is None
 
 
 def test_parse_response_unparseable_returns_none():
@@ -166,16 +252,98 @@ def test_parse_response_unparseable_returns_none():
 
 def test_verbatim_check_is_whitespace_normalized_not_case_folded():
     jd = "Required:   Active   TS/SCI clearance required."
-    raw = json.dumps({"required_fit": "fails", "unmet": ["Active TS/SCI clearance required."],
-                      "held_clearance": True, "years_gap": None, "confidence": "high"})
-    review = judge2.parse_response(raw, jd)
-    assert review.unmet == ["Active TS/SCI clearance required."]
+    raw = json.dumps({"lines": [{"line": "Active TS/SCI clearance required.", "section": "required",
+                                 "kind": "clearance", "verdict": "unmet", "evidence": ""}],
+                      "held_clearance": True, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, "")
+    assert [l.line for l in review.lines] == ["Active TS/SCI clearance required."]
 
-    raw_wrong_case = json.dumps({"required_fit": "fails", "unmet": ["active ts/sci clearance required."],
-                                "held_clearance": True, "years_gap": None, "confidence": "high"})
-    review2 = judge2.parse_response(raw_wrong_case, jd)
-    assert review2.unmet == []
-    assert review2.unmet_discarded == 1
+    raw_wrong_case = json.dumps({"lines": [{"line": "active ts/sci clearance required.", "section": "required",
+                                            "kind": "clearance", "verdict": "unmet", "evidence": ""}],
+                                 "held_clearance": True, "confidence": "high"})
+    review2 = judge2.parse_response(raw_wrong_case, jd, "")
+    assert review2.lines == []
+    assert review2.lines_discarded == 1
+
+
+# ---------------------------------------------------------------- derive_required_fit (§29.2, pure, table-style)
+def _line(line="a required line", section="required", kind="skill", verdict="met", years=None):
+    return {"line": line, "section": section, "kind": kind, "verdict": verdict, "years": years}
+
+
+def test_derive_zero_required_lines_returns_none():
+    fit, why = judge2.derive_required_fit([], title="Analyst")
+    assert fit is None and isinstance(why, str)
+    # only a preferred line present -- still zero REQUIRED lines
+    fit2, _why2 = judge2.derive_required_fit([_line(section="preferred")], title="Analyst")
+    assert fit2 is None
+
+
+def test_derive_hard_gate_unmet_fails():
+    lines = [_line(kind="clearance", verdict="unmet"), _line(kind="skill", verdict="met")]
+    fit, why = judge2.derive_required_fit(lines, title="")
+    assert fit == "fails"
+    assert "hard gate" in why
+
+
+def test_derive_hard_gate_unclear_is_partial_never_meets():
+    lines = [_line(kind="licence", verdict="unclear"), _line(kind="skill", verdict="met")]
+    fit, why = judge2.derive_required_fit(lines, title="")
+    assert fit == "partial"
+
+
+def test_derive_lone_soft_gap_meets():
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="tool", verdict="unmet", line="Familiarity with Jira is a plus.")]
+    fit, why = judge2.derive_required_fit(lines, title="Process Analyst")
+    assert fit == "meets"
+
+
+def test_derive_two_soft_gaps_partial():
+    # 4 required lines, 2 unmet (exactly half -- NOT "more than half", so the majority-unmet rule does not
+    # fire); 2 soft gaps exceeds SOFT_GAP_MEETS_MAX(1) -> partial, not meets.
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="skill", verdict="met", line="L2"),
+            _line(kind="tool", verdict="unmet", line="L3"),
+            _line(kind="degree", verdict="unmet", line="L4")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+
+
+def test_derive_majority_unmet_fails():
+    lines = [_line(kind="skill", verdict="unmet", line="L1"),
+            _line(kind="skill", verdict="unmet", line="L2"),
+            _line(kind="skill", verdict="met", line="L3")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "fails"
+    assert "majority" in why
+
+
+def test_derive_preferred_lines_never_move_the_call():
+    lines = [_line(kind="skill", verdict="met", section="required"),
+            _line(kind="clearance", verdict="unmet", section="preferred", line="Preferred: active TS/SCI")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"
+
+
+def test_derive_tool_in_title_is_a_hard_gate():
+    lines = [_line(kind="tool", verdict="unmet", line="Experience with Salesforce required.")]
+    fit, why = judge2.derive_required_fit(lines, title="Salesforce Administrator")
+    assert fit == "fails"
+    assert "Salesforce" in why
+
+
+def test_derive_tool_with_years_on_the_line_is_a_hard_gate_even_off_title():
+    lines = [_line(kind="tool", verdict="unmet", line="5+ years developing in Salesforce Apex.")]
+    fit, why = judge2.derive_required_fit(lines, title="Business Analyst")
+    assert fit == "fails"
+
+
+def test_derive_tool_off_title_with_no_years_stays_soft():
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="tool", verdict="unmet", line="Familiarity with Jira preferred.")]
+    fit, why = judge2.derive_required_fit(lines, title="Process Analyst")
+    assert fit == "meets"   # a lone soft gap, not a hard-gate failure
 
 
 # ---------------------------------------------------------------- run(): dry-run, live gate, one review
@@ -239,9 +407,9 @@ def test_live_run_records_one_review_with_a_fake_transport(tmp_path, monkeypatch
         calls.append((url, headers, json))
         assert "x-goog-api-key" in headers
         assert headers["x-goog-api-key"] == "unused-fake-key"
-        body = _gemini_body({"required_fit": "fails",
-                             "unmet": ["Active TS/SCI clearance required."], "held_clearance": True,
-                             "years_gap": None, "confidence": "high"})
+        body = _gemini_body({"lines": [{"line": "Active TS/SCI clearance required.", "section": "required",
+                                        "kind": "clearance", "verdict": "unmet", "evidence": ""}],
+                             "held_clearance": True, "confidence": "high"})
         return _FakeResponse(200, body)
 
     sleeps = []
@@ -270,8 +438,7 @@ def test_model_fallback_on_429(tmp_path, monkeypatch):
     def fake_transport(url, headers=None, json=None):
         if "bad-model" in url:
             return _FakeResponse(429, {})
-        body = _gemini_body({"required_fit": "meets", "unmet": [], "held_clearance": False,
-                             "years_gap": None, "confidence": "medium"})
+        body = _gemini_body({"lines": [], "held_clearance": False, "confidence": "medium"})
         return _FakeResponse(200, body)
 
     result = judge2.run(con, top_n=5, dry_run=False, transport=fake_transport, sleep_fn=lambda s: None)
@@ -293,8 +460,7 @@ def test_already_reviewed_is_skipped_unless_forced(tmp_path, monkeypatch):
 
     def fake_transport(url, headers=None, json=None):
         calls["n"] += 1
-        return _FakeResponse(200, _gemini_body({"required_fit": "meets", "unmet": [], "held_clearance": False,
-                                               "years_gap": None, "confidence": "high"}))
+        return _FakeResponse(200, _gemini_body({"lines": [], "held_clearance": False, "confidence": "high"}))
 
     judge2.run(con, top_n=5, dry_run=False, transport=fake_transport, sleep_fn=lambda s: None)
     assert calls["n"] == 1
@@ -599,3 +765,133 @@ def test_live_run_refuses_without_a_key(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         judge2.run(con, top_n=1, transport=_ExplodingTransport(), sleep_fn=lambda s: None)
     con.close()
+
+
+# ---------------------------------------------------------------- §29.4/§29.5: rerun/tag, compare, rederive,
+# line-level report, thinking level, dry-run prompt
+def test_dry_run_prints_the_rendered_prompt(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    logs = []
+    judge2.run(con, top_n=5, dry_run=True, show=1, transport=_ExplodingTransport(), log=logs.append)
+    combined = "\n".join(logs)
+    assert "rendered prompt" in combined
+    assert "You are a strict, independent reviewer" in combined
+    con.close()
+
+
+def test_run_tag_keeps_a_repeat_run_separate_from_the_first(tmp_path, monkeypatch):
+    """§29.4's noise-floor tool: a `--rerun --run-tag` re-ask under the IDENTICAL prompt is stored under its
+    own (tagged) prompt_version rather than overwriting the first run's row, so `judge2 eval --compare` has
+    two distinct rows to diff. Default (no tag) behaviour -- a repeat overwrites -- is unaffected."""
+    monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
+    monkeypatch.setenv("GEMINI_API_MODEL", "m")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+
+    def fake_transport(url, headers=None, json=None):
+        return _FakeResponse(200, _gemini_body({"lines": [], "held_clearance": False, "confidence": "high"}))
+
+    r1 = judge2.run(con, top_n=5, transport=fake_transport, sleep_fn=lambda s: None, log=lambda *_: None)
+    r2 = judge2.run(con, top_n=5, transport=fake_transport, sleep_fn=lambda s: None, log=lambda *_: None,
+                    rerun=True, run_tag="round6")
+    assert r1["base_prompt_version"] == r2["base_prompt_version"]
+    assert r1["prompt_version"] == r1["base_prompt_version"]          # untagged: unchanged from before
+    assert r2["prompt_version"] == f"{r2['base_prompt_version']}:round6"
+    rows = con.execute("SELECT count(*) FROM judge2_reviews WHERE posting_id = ?", [pid]).fetchone()[0]
+    assert rows == 2
+    con.close()
+
+
+def test_compare_reports_differing_calls_between_two_prompt_versions(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    for pv, fit in (("pv-a", "meets"), ("pv-b", "fails")):
+        con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider,
+                       model, required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap,
+                       confidence, raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded,
+                       evidence_downgraded, contract) VALUES (?, ?, ?, 'gemini', 'm', ?, '[]', 0, false, false,
+                       NULL, 'high', '', 0, ?, 'why', 0, 0, 'lines')""", [pid, dh, pv, fit, NOW])
+    diffs = judge2.compare(con, "pv-a", "pv-b", log=lambda *_: None)
+    assert len(diffs) == 1
+    assert diffs[0]["posting_id"] == pid
+    assert diffs[0]["fit_a"] == "meets" and diffs[0]["fit_b"] == "fails"
+    # identical calls under two prompt_versions -> no diff
+    con.execute("UPDATE judge2_reviews SET required_fit = 'meets' WHERE prompt_version = 'pv-b'")
+    assert judge2.compare(con, "pv-a", "pv-b", log=lambda *_: None) == []
+    con.close()
+
+
+def test_rederive_recomputes_from_stored_lines_with_no_api_call(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    pv = "rederive-pv"
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract) VALUES (?, ?, ?, 'gemini', 'm', 'meets', '[]', 0, false, false, NULL, 'high', '',
+                   0, ?, 'stale why', 0, 0, 'lines')""", [pid, dh, pv, NOW])
+    con.execute("""INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line,
+                   section, kind, verdict, evidence, years, evidence_downgraded)
+                   VALUES (?, ?, ?, 0, 'Active TS/SCI clearance required.', 'required', 'clearance', 'unmet',
+                          '', NULL, false)""", [pid, dh, pv])
+    out = judge2.rederive(con, log=lambda *_: None)
+    assert out["updated"] == 1
+    row = con.execute("SELECT required_fit, derive_why, unmet FROM judge2_reviews WHERE prompt_version = ?",
+                      [pv]).fetchone()
+    assert row[0] == "fails"
+    assert "hard gate" in row[1]
+    assert json.loads(row[2]) == ["Active TS/SCI clearance required."]
+    con.close()
+
+
+def test_line_level_report_matches_gold_unmet_to_a_judge_line(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    feedback.record_mark(con, pid, dh, "pass", reason_code="requirement", required_fit="fails",
+                         required_unmet="Active TS/SCI clearance required.", basis="blind", now=NOW)
+    pv = judge2.prompt_version(judge2.get_background("public"))
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract) VALUES (?, ?, ?, 'gemini', 'm', 'fails', '[]', 0, false, false, NULL, 'high', '',
+                   0, ?, 'why', 0, 0, 'lines')""", [pid, dh, pv, NOW])
+    con.execute("""INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line,
+                   section, kind, verdict, evidence, years, evidence_downgraded)
+                   VALUES (?, ?, ?, 0, 'Active TS/SCI clearance required.', 'required', 'clearance', 'unmet',
+                          '', NULL, false)""", [pid, dh, pv])
+    out = judge2.line_level_report(con, log=lambda *_: None)
+    assert out["n_gold_unmet_lines"] == 1
+    assert out["n_caught_unmet"] == 1
+    assert out["rows"][0]["judge_verdict"] == "unmet"
+    con.close()
+
+
+def test_line_level_report_reports_never_listed_when_no_matching_judge_line(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    feedback.record_mark(con, pid, dh, "pass", reason_code="requirement", required_fit="fails",
+                         required_unmet="Active TS/SCI clearance required.", basis="blind", now=NOW)
+    out = judge2.line_level_report(con, log=lambda *_: None)   # no judge2_lines rows at all
+    assert out["n_gold_unmet_lines"] == 1
+    assert out["n_caught_unmet"] == 0
+    assert out["rows"][0]["judge_verdict"] == "never_listed"
+    con.close()
+
+
+def test_thinking_level_joins_prompt_version(monkeypatch):
+    bg = judge2.get_background("public")
+    monkeypatch.delenv("JUDGE2_THINKING", raising=False)
+    assert judge2.thinking_level() == judge2.DEFAULT_THINKING
+    pv_default = judge2.prompt_version(bg)
+    monkeypatch.setenv("JUDGE2_THINKING", "high")
+    assert judge2.thinking_level() == "high"
+    pv_high = judge2.prompt_version(bg)
+    assert pv_default != pv_high

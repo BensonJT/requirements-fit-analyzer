@@ -2,16 +2,19 @@
 formats -- until this module, only one of them (`feedback.load_csv`'s own wide export) could be loaded.
 Detects the format from the header, normalizes enum values through an explicit alias table (never silent),
 resolves precedence when the same posting is graded more than once (across files in one run, or already in
-the DB), and writes through the SAME paths `feedback.write_records` / `feedback.load_csv` already use.
-Nothing here calls an LLM or touches the network.
+the DB), and writes through the SAME paths `feedback.write_records` / `feedback.load_csv` already use (F1-F3),
+or the `human_lens_grades` table (F4, v19; see `ingest_f4` -- NEVER `llm_labels`). Nothing here calls an LLM
+or touches the network.
 
 Five formats, by header shape (see `detect_format`):
   F1  the golden-source wide CSV `feedback.load_csv` already reads -- delegated to unchanged, one row per
       report_feedback column, `basis` carried per row.
   F2  a narrow spot-check sheet: posting_id, employer, title, url, human_grade, level_fit, note.
   F3  the blind-sheet format `blind_sheet.import_sheet` reads: F2 plus location, required_fit, required_unmet.
-  F4  a single-lens (Applied-AI) grade sheet: human_grade_ai, not an overall human_grade -- see `ingest_f4`
-      for why this format is report-only here.
+  F4  a single-lens (Applied-AI) grade sheet: human_grade_ai, not an overall human_grade -- written into the
+      `human_lens_grades` table (v19), lens='ai', through the SAME seed/merge/basis-conflict precedence
+      `_parse_f2_f3` uses for the overall report_feedback sheet. NEVER writes to or alters `llm_labels`: the
+      overall grade, required_fit, and the process/technical lenses are untouched -- see `ingest_f4`.
   F5  a derived train/frozen split (posting_id/half/baseline_judge_grade) -- never a grading sheet; refused.
 """
 import csv
@@ -297,31 +300,78 @@ def _parse_f2_f3(con, fmt, fr: FileReport, rows, basis, accumulator: dict) -> No
         fr.would_write += 1
 
 
-def ingest_f4(fr: FileReport, rows) -> list:
-    """Parses and validates the single-lens (Applied-AI) sheet fully, but never writes it: `llm_labels`
-    stamps whether a `scorer='user-adjudicated'` row's LENS grade is human/carried/placeholder with ONE
-    column (`lens_grade_source`) for the WHOLE row, not one per lens (see store.py's `lens_label_source`
-    macro and its 2026-09-19 audit-fix comment). Writing a human `grade_ai` here would need the row's overall
-    `grade` and any existing `required_fit` to be preserved untouched while only `grade_ai`'s provenance
-    changes -- which the current single-flag column cannot express without either (a) laundering an
-    unasserted overall grade into 'user_adjudicated' status (the exact defect that comment describes), or
-    (b) silently overwriting an existing user-adjudicated row's required_fit/other lens grades on a PK
-    collision (posting_id, description_hash, rubric_version, scorer). Both are worse than not writing.
-    A real fix needs a schema change (e.g. a per-lens `*_grade_source` column, or a separate table for a
-    human per-lens grade) -- out of scope here (no schema bump allowed on this branch). Returns the parsed,
-    validated rows for the report only."""
-    out = []
+F4_LENS = "ai"  # the only lens F4's own header (human_grade_ai) can express
+
+HUMAN_LENS_GRADE_INSERT_SQL = """
+    INSERT OR REPLACE INTO human_lens_grades (
+        posting_id, description_hash, lens, grade, basis, level_fit, note, source_file, graded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _seed_human_lens_from_db(con, pid, description_hash, lens):
+    row = con.execute("""
+        SELECT basis, grade, level_fit, note, source_file FROM human_lens_grades
+        WHERE posting_id = ? AND description_hash = ? AND lens = ?
+    """, [pid, description_hash, lens]).fetchone()
+    if not row:
+        return None
+    basis, grade, level_fit, note, source_file = row
+    return {"posting_id": pid, "description_hash": description_hash, "lens": lens, "basis": basis,
+            "grade": grade, "level_fit": level_fit, "note": note, "source_file": source_file}
+
+
+def _merge_human_lens(existing, incoming):
+    """Same basis precedence _merge gives report_feedback rows (via _resolve_basis): a 'seen' row never
+    overwrites an existing 'blind' one for the same (posting_id, description_hash, lens) -- the mismatch is
+    reported as a conflict, the existing row is kept WHOLE (grade included). `grade` is required and non-blank by the time a row
+    reaches here (a blank grade is skipped before this is called), so a later file's row always supersedes an
+    earlier one's grade/level_fit/note/source_file within a run, same "last one in a run wins the non-basis
+    fields" shape _merge gives report_feedback."""
+    if existing is None:
+        return dict(incoming), False
+    merged = dict(existing)
+    basis, conflict = _resolve_basis(existing.get("basis"), incoming.get("basis"))
+    merged["basis"] = basis
+    if conflict and existing.get("basis") == "blind":
+        # Audit fix: a grade made AFTER seeing the scores must never land under the existing row's 'blind'
+        # basis -- that would put a seen grade into the blind evaluation set. Keep the blind row whole. (The
+        # other direction, a blind sheet over an existing 'seen' row, stores the new grade as 'seen': safe.)
+        return merged, True
+    for field in ("grade", "level_fit", "note", "source_file"):
+        v = incoming.get(field)
+        if v not in (None, ""):
+            merged[field] = v
+    return merged, conflict
+
+
+def ingest_f4(con, fr: FileReport, rows, basis, source_file, accumulator: dict) -> None:
+    """Parses, validates and folds the single-lens (Applied-AI) sheet's rows into the run-wide `accumulator`
+    (mutated in place, keyed by (posting_id, description_hash, lens)) as `human_lens_grades` rows (v19),
+    lens='ai' -- the SAME seed-from-DB / merge / basis-conflict precedence `_parse_f2_f3` gives the overall
+    report_feedback sheet, applied to the new table instead. NEVER writes to or alters `llm_labels`: the
+    posting's overall grade, required_fit, and the process/technical lenses are untouched by this -- see the
+    module header and store.py's `human_lens_grades` table comment for why this needed its own table rather
+    than another llm_labels column."""
     for line, raw in rows:
         fr.rows_total += 1
-        pid = _clean(raw.get("posting_id"))
-        human_grade_ai = _clean(raw.get("human_grade_ai"))
-        if human_grade_ai is None:
+        pid_in = _clean(raw.get("posting_id"))
+        url = _clean(raw.get("url"))
+        pid, description_hash, matched_by_url = _resolve_posting(con, pid_in, url)
+        if matched_by_url:
+            fr.matched_by_url += 1
+        if pid is None or description_hash is None:
+            fr.skipped_no_posting += 1
+            continue
+
+        grade = _clean(raw.get("human_grade_ai"))
+        if grade is None:
             fr.skipped_blank_grade += 1
             continue
-        if human_grade_ai not in rubric.GRADES:
-            fr.rejected.append({"line": line, "posting_id": pid, "field": "human_grade_ai",
-                                "value": human_grade_ai})
+        if grade not in rubric.GRADES:
+            fr.rejected.append({"line": line, "posting_id": pid, "field": "human_grade_ai", "value": grade})
             continue
+
         level_fit, level_alias, level_invalid = _normalize_enum(raw.get("level_fit"), LEVEL_FIT_ALIASES,
                                                                  feedback.LEVEL_ORDER)
         if level_invalid:
@@ -331,15 +381,29 @@ def ingest_f4(fr: FileReport, rows) -> list:
         if level_alias:
             fr.aliases_applied.append({"line": line, "posting_id": pid, "field": "level_fit",
                                        "from": level_alias, "to": level_fit})
-        fr.would_write += 1  # "would write" if F4 ever gets a write path; today it never does
-        out.append({"posting_id": pid, "human_grade_ai": human_grade_ai, "level_fit": level_fit,
-                    "note": _clean(raw.get("note"))})
-    fr.refused = ("F4 (single-lens Applied-AI grade) parses and validates but is never written -- "
-                  "llm_labels.lens_grade_source is one flag for the whole row, not one per lens, so a human "
-                  "grade_ai cannot be stored here without either laundering an unasserted overall grade as "
-                  "human-adjudicated or overwriting an existing required_fit/other lens grade on the same "
-                  "posting. Needs a schema change this branch may not make; see ingest_f4's docstring.")
-    return out
+
+        row = {"posting_id": pid, "description_hash": description_hash, "lens": F4_LENS, "grade": grade,
+               "level_fit": level_fit, "note": _clean(raw.get("note")), "basis": basis,
+               "source_file": source_file}
+        key = (pid, description_hash, F4_LENS)
+        if key not in accumulator:
+            accumulator[key] = _seed_human_lens_from_db(con, pid, description_hash, F4_LENS)
+        merged, conflict = _merge_human_lens(accumulator[key], row)
+        accumulator[key] = merged
+        if conflict:
+            fr.conflicts.append({"line": line, "posting_id": pid,
+                                 "existing": merged.get("basis"), "incoming": basis})
+        fr.would_write += 1
+
+
+def _write_human_lens_grades(con, accumulator: dict) -> int:
+    if not accumulator:
+        return 0
+    now = _now()
+    rows = [(pid, description_hash, lens, rec["grade"], rec["basis"], rec["level_fit"], rec["note"],
+             rec.get("source_file"), now) for (pid, description_hash, lens), rec in accumulator.items()]
+    con.executemany(HUMAN_LENS_GRADE_INSERT_SQL, rows)
+    return len(rows)
 
 
 def _read_csv(path):
@@ -377,11 +441,12 @@ def ingest(con, targets: list, *, accept_proposed=False, dry_run=False, log=prin
     """`targets` is [(path, basis)], in the order they should be applied (a later entry wins precedence
     ties for the same posting). Detects each file's format, normalizes and validates its rows, folds them
     into a run-wide precedence merge (seeded from the DB), and -- unless `dry_run` -- writes the result
-    through `feedback.write_records` (F2/F3) or delegates whole-file to `feedback.load_csv` (F1). F4 is
-    always report-only (see `ingest_f4`); F5 is always refused. Returns {"files": [...], "ok": bool}; `ok`
-    is False if any file was refused outright or any row was rejected for a bad enum value."""
+    through `feedback.write_records` (F2/F3), `human_lens_grades` (F4, v19; NEVER touches `llm_labels`), or
+    delegates whole-file to `feedback.load_csv` (F1). F5 is always refused. Returns {"files": [...], "ok":
+    bool}; `ok` is False if any file was refused outright or any row was rejected for a bad enum value."""
     file_reports = []
     accumulator: dict = {}
+    lens_accumulator: dict = {}
     ok = True
 
     for path, basis in targets:
@@ -425,12 +490,7 @@ def ingest(con, targets: list, *, accept_proposed=False, dry_run=False, log=prin
                 fr.would_write = fr.rows_total  # load_csv's own counts are logged separately by cmd
             continue
 
-        if fmt == "f4":
-            ingest_f4(fr, rows)
-            ok = False  # F4 never writes; a run that touched one is not fully applied
-            continue
-
-        # f2 / f3: basis is required -- narrow sheets carry no basis column of their own, and a default
+        # f2 / f3 / f4: basis is required -- narrow sheets carry no basis column of their own, and a default
         # would silently blur blind vs seen (sprint plan §22.4, the whole point of the distinction).
         if basis is None:
             fr.refused = (f"no basis declared for a narrow sheet (format {fmt}) -- pass --basis blind|seen "
@@ -440,6 +500,12 @@ def ingest(con, targets: list, *, accept_proposed=False, dry_run=False, log=prin
         if basis not in BASIS_VALUES:
             fr.refused = f"basis {basis!r} must be one of {', '.join(BASIS_VALUES)}"
             ok = False
+            continue
+
+        if fmt == "f4":
+            ingest_f4(con, fr, rows, basis, Path(path).name, lens_accumulator)
+            if fr.rejected:
+                ok = False
             continue
 
         _parse_f2_f3(con, fmt, fr, rows, basis, accumulator)
@@ -455,12 +521,15 @@ def ingest(con, targets: list, *, accept_proposed=False, dry_run=False, log=prin
             "required_unmet": rec["required_unmet"], "assessed_at": now,
         } for (pid, description_hash), rec in accumulator.items()]
         feedback.write_records(con, records, log=lambda *_a, **_k: None)
+    n_lens_written = 0 if dry_run else _write_human_lens_grades(con, lens_accumulator)
 
     for fr in file_reports:
         fr.log(log)
-    log(f"gold ingest: {len(accumulator)} posting(s) resolved from narrow sheets "
+    log(f"gold ingest: {len(accumulator)} posting(s) resolved from narrow sheets, "
+        f"{len(lens_accumulator)} single-lens grade(s) resolved from F4 sheets "
         f"({'DRY RUN, nothing written' if dry_run else 'written'})")
-    return {"files": [fr.as_dict() for fr in file_reports], "merged_postings": len(accumulator), "ok": ok}
+    return {"files": [fr.as_dict() for fr in file_reports], "merged_postings": len(accumulator),
+            "lens_grades_written": n_lens_written, "ok": ok}
 
 
 def _dry_run_f1(con, fr: FileReport, rows) -> None:

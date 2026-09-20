@@ -616,6 +616,8 @@ CREATE OR REPLACE VIEW vw_required_embed_latest AS
 CREATE OR REPLACE VIEW vw_judge2_latest AS
     SELECT r.* FROM judge2_reviews r JOIN postings p
       ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
+    WHERE r.prompt_version NOT LIKE '%:%'   -- a `--run-tag` repeat (base_pv:TAG, §29.4) is a noise-floor
+                                            -- measurement, never the review the rank reads
     QUALIFY row_number() OVER (PARTITION BY r.posting_id ORDER BY r.reviewed_at DESC) = 1;
 
 -- Newest evaluation per prompt_version -- what the rank actually reads to decide whether a prompt_version's

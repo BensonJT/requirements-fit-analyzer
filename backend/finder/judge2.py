@@ -332,7 +332,7 @@ class ValidatedReview:
     years_gap: Optional[dict] = None
 
     def apply_derivation(self, *, title: str = "") -> None:
-        fit, why = derive_required_fit(self.lines, title=title)
+        fit, why = derive_required_fit(self.lines, title=title, lines_discarded=self.lines_discarded)
         self.required_fit = fit
         self.derive_why = why
         self.unmet = [l.line for l in self.lines if l.section == "required" and l.verdict == "unmet"]
@@ -411,10 +411,29 @@ def parse_response(raw_text: str, jd_text_sent: str, background_text_sent: str =
 HARD_GATE_KINDS = ("clearance", "licence", "years_function")   # always a hard gate
 SOFT_GATE_KINDS = ("tool", "skill", "degree")                  # a `tool` line is promoted to a hard gate by
                                                                  # `_tool_is_the_job` below; the rest stay soft
-SOFT_GAP_MEETS_MAX = 1              # `meets` tolerates at most this many soft required lines not `met`
+SOFT_UNMET_MEETS_MAX = 1            # `meets` tolerates at most this many soft required lines rated `unmet`
+                                    # (the lone learnable gap)
+SOFT_UNCLEAR_MEETS_MAX_FRACTION = 0.5   # ...and at most this fraction of soft required lines `unclear`. A
+                                    # background sheet is SILENT on generic lines ("strong communication
+                                    # skills"), and the evidence guard turns an unsupported `met` into
+                                    # `unclear`, so counting every soft `unclear` as a gap would make `meets`
+                                    # unreachable for an ordinary posting (orchestrator audit, 2026-09-20)
+DISCARDED_LINES_CAP_MEETS = True    # a review with >= 1 entry dropped by validation can be at most `partial`:
+                                    # a dropped entry may have been an unmet hard gate the model misquoted, so
+                                    # `meets` cannot be confirmed (the §25 guard's spirit, kept under §29)
 MAJORITY_UNMET_FRACTION = 0.5       # > this fraction of ALL required lines `unmet` -> `fails`, regardless of kind
 _YEARS_IN_LINE_RE = re.compile(r"\b\d+\+?\s*years?\b", re.I)   # "N+ years" / "N years" written on the line itself
 _TITLE_TOKEN_RE = re.compile(r"\b[A-Z][A-Za-z0-9+.#]{1,}\b")    # candidate tool-name tokens (capitalized/acronym)
+# Capitalized words that open or pad a requirement line and also appear in ordinary titles. Without this list
+# "Data visualization tools such as ..." is a hard gate for every "Data Analyst" (orchestrator audit).
+_GENERIC_TITLE_WORDS = frozenset("""experience experienced knowledge proficiency proficient strong ability
+    skills skill familiarity working understanding demonstrated proven advanced expert expertise excellent
+    data business analytics analysis analyst analytical operations operational management manager managing
+    senior principal lead leader leadership director associate specialist consultant engineer engineering
+    developer development architect administrator program project product process processes strategy strategic
+    planning intelligence reporting systems system solutions services service technology technical digital
+    enterprise global customer financial finance risk quality performance improvement transformation change
+    tools tool platform platforms software applications application cloud ai it bi and or the of in with""".split())
 
 
 def _get(obj, key, default=None):
@@ -436,11 +455,12 @@ def _tool_is_the_job(line_obj, title: str) -> bool:
         return True
     if not title:
         return False
-    title_lower = title.lower()
-    return any(len(tok) >= 2 and tok.lower() in title_lower for tok in _TITLE_TOKEN_RE.findall(line_text))
+    title_words = {w.lower() for w in re.findall(r"[A-Za-z0-9+.#]+", title)}   # WHOLE words: "AI" is not in "Retail"
+    return any(tok.lower() in title_words and tok.lower() not in _GENERIC_TITLE_WORDS
+               for tok in _TITLE_TOKEN_RE.findall(line_text))
 
 
-def derive_required_fit(lines, *, title: str = "") -> tuple:
+def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
     """§29.2, exactly. Pure function, no I/O: `lines` is an iterable of validated per-line entries (LineVerdict
     or plain dicts with the same keys/attributes -- see `_get`); only `section == "required"` entries count,
     Preferred lines never affect the call. Returns `(required_fit, why)`:
@@ -451,8 +471,10 @@ def derive_required_fit(lines, *, title: str = "") -> tuple:
       - more than `MAJORITY_UNMET_FRACTION` of ALL required lines rated `unmet` -> `fails` (a broader net than
         the hard-gate check alone: several soft gaps together are also disqualifying).
       - a hard gate rated `unclear` (and no `fails` condition above fired) -> `partial`, never `meets`.
-      - at most `SOFT_GAP_MEETS_MAX` soft required lines (`tool`/`skill`/`degree`, not promoted to hard) not
-        `met` -> `meets` (the "lone learnable gap" §25/§29 both allow).
+      - at most `SOFT_UNMET_MEETS_MAX` soft required lines (`tool`/`skill`/`degree`, not promoted to hard)
+        `unmet` AND at most `SOFT_UNCLEAR_MEETS_MAX_FRACTION` of the soft lines `unclear` -> `meets` (the "lone
+        learnable gap" §25/§29 both allow) -- unless `lines_discarded` > 0 and `DISCARDED_LINES_CAP_MEETS`,
+        which caps the call at `partial` (a dropped entry may have been an unmet hard gate).
       - otherwise -> `partial`.
     """
     required = [l for l in lines if _get(l, "section") == "required"]
@@ -476,14 +498,18 @@ def derive_required_fit(lines, *, title: str = "") -> tuple:
     if hard_unclear:
         return "partial", f"hard gate unclear: {_get(hard_unclear[0], 'line')}"
 
-    soft_not_met = [l for l in soft if _get(l, "verdict") != "met"]
-    if len(soft_not_met) <= SOFT_GAP_MEETS_MAX:
-        why = "all hard gates met, no soft gap"
-        if soft_not_met:
-            why = f"all hard gates met; lone soft gap: {_get(soft_not_met[0], 'line')}"
-        return "meets", why
-
-    return "partial", f"{len(soft_not_met)} soft required lines not met"
+    soft_unmet = [l for l in soft if _get(l, "verdict") == "unmet"]
+    soft_unclear = [l for l in soft if _get(l, "verdict") == "unclear"]
+    if len(soft_unmet) > SOFT_UNMET_MEETS_MAX:
+        return "partial", f"{len(soft_unmet)} soft required lines unmet"
+    if soft and len(soft_unclear) > len(soft) * SOFT_UNCLEAR_MEETS_MAX_FRACTION:
+        return "partial", f"{len(soft_unclear)} of {len(soft)} soft required lines unclear"
+    if lines_discarded and DISCARDED_LINES_CAP_MEETS:
+        return "partial", f"{lines_discarded} line(s) dropped by validation; meets cannot be confirmed"
+    why = "all hard gates met, no soft gap"
+    if soft_unmet:
+        why = f"all hard gates met; lone soft gap: {_get(soft_unmet[0], 'line')}"
+    return "meets", why
 
 
 # ---------------------------------------------------------------- 3. client (transport + sleep always injected)
@@ -624,12 +650,12 @@ def rederive(con, *, log=print) -> dict:
     tuning the §29.2 constants (or `_tool_is_the_job`'s heuristic) is then free. §25-era `contract='overall'`
     rows have no stored lines to rederive from and are left untouched."""
     rows = con.execute("""
-        SELECT r.posting_id, r.description_hash, r.prompt_version, p.title
+        SELECT r.posting_id, r.description_hash, r.prompt_version, p.title, r.lines_discarded
         FROM judge2_reviews r JOIN postings p USING (posting_id)
         WHERE r.contract = 'lines'
     """).fetchall()
     updated = 0
-    for pid, dh, pv, title in rows:
+    for pid, dh, pv, title, n_discarded in rows:
         line_rows = con.execute("""
             SELECT line, section, kind, verdict, evidence, years, evidence_downgraded FROM judge2_lines
             WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? ORDER BY line_no
@@ -637,7 +663,7 @@ def rederive(con, *, log=print) -> dict:
         lines = [{"line": l, "section": s, "kind": k, "verdict": v, "evidence": e,
                  "years": json.loads(y) if y else None, "evidence_downgraded": ed}
                 for (l, s, k, v, e, y, ed) in line_rows]
-        fit, why = derive_required_fit(lines, title=title or "")
+        fit, why = derive_required_fit(lines, title=title or "", lines_discarded=n_discarded or 0)
         unmet = [l["line"] for l in lines if l["section"] == "required" and l["verdict"] == "unmet"]
         years_gap = next((l["years"] for l in lines if l["section"] == "required"
                           and l["kind"] == "years_function" and l["verdict"] == "unmet" and l["years"]), None)
@@ -810,9 +836,13 @@ def evaluate(con, *, background: str = "public", background_path: Optional[str] 
         FROM vw_report_feedback_blind rf
         JOIN postings p USING (posting_id)
         LEFT JOIN vw_llm_labels_latest_judge j USING (posting_id)
-        LEFT JOIN vw_judge2_latest r ON r.posting_id = rf.posting_id AND r.prompt_version = ?
+        LEFT JOIN judge2_reviews r ON r.posting_id = rf.posting_id AND r.prompt_version = ?
+                                  AND r.description_hash = coalesce(p.description_hash, '')
         WHERE rf.required_fit IS NOT NULL
     """, [pv]).fetchall()
+    # Reads `judge2_reviews` for THIS prompt_version at the posting's current hash, NOT `vw_judge2_latest`:
+    # that view keeps only the NEWEST review per posting, so evaluating an earlier run after a later one (two
+    # rounds, or a `--run-tag` noise-floor repeat) would find every row "unjudged" (orchestrator audit).
 
     # row = (posting_id, employer, title, human_fit, judge_fit, judge2_fit)
     # Rates are over rows the second judge has actually JUDGED under this prompt_version. An unjudged row is

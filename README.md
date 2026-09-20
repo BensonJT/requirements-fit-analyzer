@@ -115,12 +115,26 @@ fact sheet can be used instead (`background="file"`, path from `JUDGE2_BACKGROUN
 `judge2_background.example.md` to the gitignored `judge2_background.local.md` and edit it). No posting_id
 semantics, URL, pay, score or first-judge output is ever sent -- the second judge judges independently.
 
-Every `unmet` line the model returns must be a verbatim substring of the JD text actually sent (checked after
-the same whitespace normalization used for description hashing, nothing looser); a line that fails is
-discarded, and a `fails` call with zero surviving quotes is downgraded to `partial`. `finder.py judge2 run
---dry-run --show 3` builds and prints full payloads and a summary (postings, characters, estimated tokens,
-provider, model list) and calls nothing -- no API key needed. A real call additionally requires
-`JUDGE2_LIVE_OK=1` in the environment or `--i-have-approval`, on top of a dry run having already been read.
+As of sprint plan §29, the model is never asked for an overall call -- it rates ONE JD line at a time (`line`,
+`section`, `kind`, `verdict`, `evidence` for a `met`, `years` for a `years_function`), plus `held_clearance`
+and `confidence`. Every `line` the model returns must be a verbatim substring of the JD text actually sent
+(checked after the same whitespace normalization used for description hashing, nothing looser) or the entry
+is discarded; a `met` verdict whose `evidence` is empty or not a verbatim substring of the background text
+sent is downgraded to `unclear` rather than trusted. `derive_required_fit` (`backend/finder/judge2.py`) is a
+PURE function that turns the surviving lines into one `required_fit` + a short `why`, so the §29.2 thresholds
+can be tuned and every stored review re-derived with `finder.py judge2 rederive` -- no new API call. Stored
+lines live in `judge2_lines` (schema v20); `judge2_reviews` keeps its §25 shape (`required_fit`/`unmet`/
+`years_gap`, now filled from the derived call) so `vw_judge2_latest`/`vw_lens_fit` read it unchanged.
+`finder.py judge2 run --dry-run --show 3` builds and prints full payloads and the rendered prompt, plus a
+summary (postings, characters, estimated tokens, provider, model list), and calls nothing -- no API key
+needed. A real call additionally requires `JUDGE2_LIVE_OK=1` in the environment or `--i-have-approval`, on top
+of a dry run having already been read.
+
+`finder.py judge2 eval` also prints a §29.4 line-level report against `vw_report_feedback_blind.required_unmet`
+(each gold unmet line matched, by normalized containment, to a judge line and its verdict), and
+`judge2 eval --compare <pv_a> <pv_b>` prints postings whose call differs between two stored prompt_versions --
+run on two runs of the identical prompt (`judge2 run --rerun --run-tag <tag>`, which keeps the repeat's rows
+separate instead of overwriting the first run's) this is the noise floor, not a real prompt change.
 
 Before it can move anything, `finder.py judge2 eval` scores it against `vw_report_feedback_blind` only (grade-
 first, reveal-second rows): it must catch at least 70% of the blind rows where the first judge said `meets`

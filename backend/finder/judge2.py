@@ -1,28 +1,40 @@
-"""The LLM "second judge" (sprint plan §25): one narrow, strict call on a posting's Required block only.
+"""The LLM "second judge" (sprint plan §25, extended by §29): a strict, independent read of a posting's
+Required block, one JD line at a time.
 
 WHY. §22.2 Gap 2: the first judge's lane call (grade_process/technical/ai) is sound; its Required call is
-lenient. This module reads the JD and a public-safe background document and asks a stricter, independent
-question -- it never sees the first judge's own output, a score, a rank or a URL.
+lenient. §25's first version asked the model for one overall call plus a list of unmet lines; four live
+evaluations all missed the bar (see SPRINT_PLAN.md §29's "Why"), and a bare `meets` with an empty `unmet` list
+left nothing to audit. §29 keeps the model to one narrow judgment -- rate ONE line -- and moves the policy that
+turns lines into a call (`derive_required_fit`) into code, where it is pure, unit-tested and re-tunable with NO
+new API call (`finder.py judge2 rederive`). This module still never sees the first judge's own output, a
+score, a rank or a URL.
 
-NOTHING IN THIS MODULE MAY MAKE A LIVE API CALL WITHOUT THE USER'S EXPLICIT GO (`run()`'s live gate, §5 below).
+NOTHING IN THIS MODULE MAY MAKE A LIVE API CALL WITHOUT THE USER'S EXPLICIT GO (`run()`'s live gate, §4 below).
 The transport and the sleep function are always INJECTED (never `httpx` or `time.sleep` imported and called
 directly at the top of a code path a test can reach), so the test suite never makes a network call and never
 depends on wall-clock time.
 
 Sections:
   1. Prompt + payload (`prompt_version`, `build_payload`, `get_background`) -- what is sent, and to whom.
-  2. Validation (`parse_response`) -- the hallucination guard: an `unmet` quote must be a VERBATIM substring
+  2. Validation (`parse_response`) -- TWO guards. The §25 guard: a line's `line` must be a VERBATIM substring
      of the JD text that was actually sent, compared after the same whitespace normalization
      `store.normalize_for_hash` uses for description hashing (see the module-level `_WS_RE` note below) and
-     NOTHING looser -- no case folding, no fuzzy match.
+     NOTHING looser -- no case folding, no fuzzy match. The §29 guard: a `met` verdict's `evidence` must
+     likewise be a verbatim substring of the BACKGROUND text sent; empty or non-substring evidence downgrades
+     the verdict to `unclear` rather than being trusted at face value (the fix for the bare `meets` above).
+  2b. Derivation (`derive_required_fit`, §29.2) -- a PURE function, no I/O: turns validated per-line verdicts
+      into one `required_fit` call and a short `why`. Module-level constants are the only tunables.
   3. Client (`_call_with_fallback`) -- httpx POST, model fallback, RPM throttle, all injected.
   4. `run()` -- population, dry-run, the live gate, one review per posting, at most one re-ask.
   5. `evaluate()` -- the §25 acceptance bar against `vw_report_feedback_blind`, storing pass/fail per
-     prompt_version so the rank (`vw_lens_fit` in `backend/ats/store.py`) can read it back.
+     prompt_version so the rank (`vw_lens_fit` in `backend/ats/store.py`) can read it back. Also
+     `line_level_report()` (§29.4) and `compare()` (§29.4's `--compare`).
 
-Schema note: `judge2_reviews` (v18) is keyed by (posting_id, description_hash, prompt_version) -- a changed
-JD, or a changed prompt, makes the old review stale/incomparable rather than silently reused. See
-`vw_judge2_latest` / `vw_judge2_eval_latest` in backend/ats/store.py.
+Schema note: `judge2_reviews` (v18, extended v20) is keyed by (posting_id, description_hash, prompt_version) --
+a changed JD, or a changed prompt, makes the old review stale/incomparable rather than silently reused. The
+per-line answers themselves live in `judge2_lines` (v20), same key plus `line_no`. See `vw_judge2_latest` /
+`vw_judge2_eval_latest` in backend/ats/store.py -- both are untouched by §29: `judge2_reviews.required_fit` /
+`unmet` / `years_gap` are still filled in, now from the derived call rather than asked of the model directly.
 """
 import hashlib
 import json
@@ -43,14 +55,29 @@ DEFAULT_JD_CAP = 12_000
 BACKOFF_SECONDS = (2, 8)          # §25 / §10: back off, then fall to the next model
 DEFAULT_RPM = 10                  # sane conservative default when GEMINI_RPM is unset
 DEFAULT_TPM = 12_000               # free tier is ~14K tokens/minute PER MODEL; stay under it (GEMINI_TPM overrides)
-THINKING_LEVEL = "minimal"         # Gemma 4 is a thinking model: at "minimal" it emits no thought part, so the
-                                   # per-minute token budget is spent on the posting, not on reasoning tokens
 CHARS_PER_TOKEN = 4               # crude estimate ("tokens ~ chars/4"), logging/throttle only
+EXPECTED_OUTPUT_TOKENS = 900       # §29.5: per-line output runs ~600-1,200 tokens/posting (was ~100 under the
+                                   # §25 overall-call contract, where the pacing allowance was a flat 400);
+                                   # the token-aware pacing (`_wait` below) must budget for the ANSWER too
+MAX_OUTPUT_TOKENS = 4096          # §29.5: raised so a real per-line answer is never truncated mid-response;
+                                   # a response that IS truncated still parses as unparseable (never partial)
 REQUIRED_FIT_VALUES = ("meets", "partial", "fails")
 CONFIDENCE_VALUES = ("low", "medium", "high")
+LINE_SECTION_VALUES = ("required", "preferred")
+LINE_KIND_VALUES = ("clearance", "licence", "years_function", "degree", "tool", "skill")
+LINE_VERDICT_VALUES = ("met", "unmet", "unclear")
 
 BACKGROUND_ENV = "JUDGE2_BACKGROUND_FILE"
 LIVE_OK_ENV = "JUDGE2_LIVE_OK"
+THINKING_ENV = "JUDGE2_THINKING"   # §29.5: thinkingLevel is now a setting, not a constant -- it joins the
+                                   # prompt_version hash (below), so a higher level is evaluated as its own
+                                   # prompt_version rather than silently changing what a passed bar covers
+DEFAULT_THINKING = "minimal"       # Gemma 4 is a thinking model: at "minimal" it emits no thought part, so the
+                                   # per-minute token budget is spent on the posting, not on reasoning tokens
+
+
+def thinking_level() -> str:
+    return os.environ.get(THINKING_ENV) or DEFAULT_THINKING
 
 # Same whitespace collapse as backend.ats.store.normalize_for_hash (v11 note), WITHOUT the case-fold: the
 # hallucination guard is deliberately stricter than description hashing -- no case folding, no fuzzy match.
@@ -66,58 +93,71 @@ def _norm_ws(text: str) -> str:
 
 
 # ---------------------------------------------------------------- 1. prompt + payload
-PROMPT_TEMPLATE = """You are a strict, independent reviewer. You are given a job posting's Required
-qualifications and a background document describing a candidate. Answer ONE question: does the candidate
-meet every REQUIRED (not preferred) qualification?
+# §29.1: the model rates ONE line at a time and is asked for no overall call -- that policy moved into code
+# (`derive_required_fit`, §2b below). The clearance wording, the TOOLS rule and the years-in-an-OR-list rule
+# carry over from §25's overall-call prompt, reworded as guidance for rating a single line.
+PROMPT_TEMPLATE = """You are a strict, independent reviewer. You are given a job posting and a background
+document describing a candidate. For EACH qualification line you find under the posting's Required heading
+(and any Preferred lines you choose to include, marked as such), answer independently: does the background
+show the candidate meets THIS ONE line? You are not asked for an overall call -- that is computed afterward
+from your per-line answers.
 
-Be strict. Rules:
-- "Ability to obtain" a clearance is NOT a held clearance. A clearance that must ALREADY be held or active
-  (e.g. "must hold an active TS/SCI", "current Public Trust required") IS a held-clearance requirement
-  (held_clearance=true). "TS/SCI with ability to obtain a polygraph" is a HELD requirement (the TS/SCI itself
-  must already be held; only the polygraph is obtainable).
-- A line asking for N+ years in a NAMED function, domain or platform that the background does not show is a
-  years_gap: record the named function and the number of years.
+For every REQUIRED qualification line (the parsed Required list below is a hint; the full JD text and its own
+headings are the authority, and can override the hint when they disagree), and any Preferred line you choose
+to rate, return one entry:
+- "line": the JD line, copied CHARACTER-FOR-CHARACTER from the JD text below. Do not paraphrase, summarize or
+  combine lines. A line that is not an exact substring of the JD text will be discarded.
+- "section": "required" or "preferred" -- follow the JD's own heading, not the parsed hint, when they disagree.
+- "kind": "clearance", "licence", "years_function", "degree", "tool", or "skill" -- the single best fit.
+- "verdict": "met", "unmet", or "unclear". Use "unclear" when the background is SILENT on this one line (it
+  neither shows nor rules it out) -- a forced two-way answer makes you guess, and "unclear" is not a penalty.
+- "evidence": ONLY for a "met" verdict, the background sentence or phrase you relied on, copied CHARACTER-FOR-
+  CHARACTER from the background document below. A "met" with no evidence, or evidence that is not an exact
+  substring of the background, will be downgraded to "unclear" -- so only answer "met" when you can point to
+  the exact background text that shows it. Leave it out (or empty) for "unmet" / "unclear".
+- "years": for a "years_function" line only, {"function": "<named function>", "required": <number>,
+  "shown": <number, or null if the background does not show a figure>}. Omit or set null for every other kind.
+
+Rules for rating a single line:
+- CLEARANCE. "Ability to obtain" a clearance is NOT a held clearance -- it is obtainable, not already
+  required, and is never a "clearance"-kind hard gate; rate it on what the background shows about the
+  candidate's ability to obtain it. A clearance that must ALREADY be held or active (e.g. "must hold an
+  active TS/SCI", "current Public Trust required") IS a held-clearance line (kind="clearance"); rate it "met"
+  only when the background shows the clearance is currently held. "TS/SCI with ability to obtain a
+  polygraph" is a HELD-clearance line for the TS/SCI itself (kind="clearance"); the polygraph clause is a
+  separate, obtainable matter and never changes this line's verdict.
 - YEARS IN AN "OR" LIST. When a years line lists several functions or domains joined by commas, "or" or
-  "and/or" ("N+ years in A, B, or C"), it is MET only when the background shows that at least ONE listed
+  "and/or" ("N+ years in A, B, or C"), rate it "met" only when the background shows that at least ONE listed
   item was the candidate's actual job for N or more years: check it against the background's years-by-
-  function figures and name to yourself which item and which years. It is NOT met by adjacent or related
+  function figures and record which item and which years in "years". It is NOT met by adjacent or related
   experience, by work that merely touched a listed item, by adding partial years across different items, or
   by a catch-all tail such as "or a related field". If exactly one listed item clearly was the job for N+
-  years, the line is met even when every other item is absent. If none was, it is a years_gap and a hard
-  gate: put the line in `unmet` and call `fails`. Do not call `meets` on such a line without being able to
-  point to the specific item and years in the background.
-- A qualification listed under a Preferred / Desired / Nice-to-have / Bonus heading is NOT required. Never
-  put a preferred line in `unmet`, and never let one lower required_fit. The parsed lists below are a
-  machine's best split of the JD and can be wrong; the full JD text and its own headings are the authority.
-- Every `unmet` entry must be copied CHARACTER-FOR-CHARACTER from the JD text below. Do not paraphrase,
-  summarize or combine lines. A quote that is not an exact substring of the JD will be discarded.
-- If the background is SILENT on a requirement (it neither shows nor rules it out), that is `partial`, not
-  `fails` -- UNLESS the requirement is a hard gate: a held clearance, a professional licence, or a named-
-  function years requirement the background clearly does not show.
+  years, rate "met" even when every other item is absent. If none was, rate "unmet" and set "years" to the
+  item and years asked. Do not rate "met" on such a line without being able to point to the specific item and
+  years in the background.
 - TOOLS. A line naming tools or platforms with "such as", "e.g.", "or similar", "or equivalent", or a list
-  joined by "or", is MET when the background shows ANY comparable tool of the same kind (one dashboard or
-  visualization tool for another, one SQL database for another, one work-tracking tool for another). A
-  single tool, "working knowledge of" or "familiarity with" line the background does not show is a
-  learnable gap, NOT a hard gate: list it in `unmet`, but it alone never makes the call `fails`, and when the
-  role's core function and years are clearly met it does not lower `meets` either. The exception is a tool
-  that IS the job: it is named in the title, or the line asks for N+ years of development in that one tool.
-  That is a named-function years requirement (a hard gate).
-- required_fit is the overall call:
-    meets   : every required qualification is met (a lone learnable tool gap, as above, does not count).
-    partial : most are met; one or more are unclear, light, or a genuine but non-fatal gap.
-    fails   : a hard gate is unmet (held clearance, licence, or a named-function years requirement clearly
-              absent), or most required qualifications are unmet.
+  joined by "or", is "met" when the background shows ANY comparable tool of the same kind (one dashboard or
+  visualization tool for another, one SQL database for another, one work-tracking tool for another). A single
+  named tool, "working knowledge of" or "familiarity with" line the background does not show is "unmet", kind
+  "tool" -- record it plainly. Whether that makes it a hard gate or a learnable gap is decided afterward, in
+  code, from the posting's title and this line's own wording -- not something you need to judge.
+- PREFERRED lines are informational only. Rate them the same way as required lines, but they never affect the
+  Required call -- that logic lives outside this prompt entirely.
 
 Output ONLY a JSON object, nothing else, no markdown fences, no commentary:
-{"required_fit": "meets|partial|fails", "unmet": ["<verbatim JD line>", ...], "held_clearance": true|false,
- "years_gap": {"function": "<named function>", "years": <number>} or null,
- "confidence": "low|medium|high"}
+{"lines": [{"line": "<verbatim JD line>", "section": "required|preferred",
+            "kind": "clearance|licence|years_function|degree|tool|skill", "verdict": "met|unmet|unclear",
+            "evidence": "<verbatim background text, only for met>",
+            "years": {"function": "<named function>", "required": <number>, "shown": <number>|null} | null},
+           ...],
+ "held_clearance": true|false, "confidence": "low|medium|high"}
 """
 
 OUTPUT_CONTRACT = (
-    '{"required_fit": "meets|partial|fails", "unmet": [...verbatim JD lines...], '
-    '"held_clearance": true|false, "years_gap": {"function": str, "years": number} | null, '
-    '"confidence": "low|medium|high"}'
+    '{"lines": [{"line": str, "section": "required|preferred", '
+    '"kind": "clearance|licence|years_function|degree|tool|skill", "verdict": "met|unmet|unclear", '
+    '"evidence": str, "years": {"function": str, "required": number, "shown": number|null} | null}, ...], '
+    '"held_clearance": true|false, "confidence": "low|medium|high"}'
 )
 
 # The ONLY fields sent, in this order (a test asserts this list against build_payload's actual keys).
@@ -154,9 +194,13 @@ def get_background(mode: str = "public", *, path: Optional[str] = None) -> str:
     raise ValueError(f"unknown background mode {mode!r} (expected 'public' or 'file')")
 
 
-def prompt_version(background_text: str) -> str:
-    """sha1(prompt template + background text + output contract)[:12]."""
-    payload = PROMPT_TEMPLATE + background_text + OUTPUT_CONTRACT
+def prompt_version(background_text: str, *, thinking: Optional[str] = None) -> str:
+    """sha1(prompt template + background text + output contract + thinking level)[:12]. §29.5: `thinking`
+    joins the hash (default: whatever `JUDGE2_THINKING` / DEFAULT_THINKING resolves to right now) so a run
+    under a higher thinking level is evaluated as its own prompt_version, never silently folded into a bar a
+    lower level already passed."""
+    thinking = thinking if thinking is not None else thinking_level()
+    payload = PROMPT_TEMPLATE + background_text + OUTPUT_CONTRACT + thinking
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -255,29 +299,66 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 @dataclass
+class LineVerdict:
+    """One validated, per-line answer (§29.1). `evidence` is '' unless `verdict == "met"` and it survived the
+    substring guard; `evidence_downgraded` says whether THIS line's `met` was downgraded to `unclear` because
+    its evidence was missing or fabricated."""
+    line: str
+    section: str
+    kind: str
+    verdict: str
+    evidence: str = ""
+    years: Optional[dict] = None
+    evidence_downgraded: bool = False
+
+
+@dataclass
 class ValidatedReview:
-    required_fit: str
-    unmet: list = field(default_factory=list)
-    unmet_discarded: int = 0
-    downgraded: bool = False
+    """One parsed-and-validated model response. `lines` are the entries that survived both guards (§2 above);
+    `lines_discarded` counts entries dropped outright (bad enum, non-verbatim `line`, malformed shape) and
+    `evidence_downgraded` counts `met` verdicts downgraded to `unclear` (kept, not dropped). The overall call
+    is NOT computed here -- parse_response has no posting title to apply §29.2's tool-in-title check with;
+    call `apply_derivation(title=...)` once the posting is known, which fills `required_fit` / `derive_why` /
+    `unmet` / `years_gap` from `derive_required_fit` (§2b) so every caller reads one finished shape."""
+    lines: list = field(default_factory=list)
     held_clearance: Optional[bool] = None
-    years_gap: Optional[dict] = None
     confidence: Optional[str] = None
+    lines_discarded: int = 0
+    evidence_downgraded: int = 0
     raw_response: str = ""
+    required_fit: Optional[str] = None
+    derive_why: Optional[str] = None
+    unmet: list = field(default_factory=list)
+    years_gap: Optional[dict] = None
+
+    def apply_derivation(self, *, title: str = "") -> None:
+        fit, why = derive_required_fit(self.lines, title=title)
+        self.required_fit = fit
+        self.derive_why = why
+        self.unmet = [l.line for l in self.lines if l.section == "required" and l.verdict == "unmet"]
+        self.years_gap = next((l.years for l in self.lines
+                               if l.section == "required" and l.kind == "years_function"
+                               and l.verdict == "unmet" and l.years), None)
 
 
-def parse_response(raw_text: str, jd_text_sent: str, *, log=print) -> Optional[ValidatedReview]:
-    """Parses and validates one model response against the JD text that was actually SENT. Returns None
-    (unparseable / invalid shape -- logged and counted, never recorded as a verdict) or a ValidatedReview with
-    the hallucination guard already applied (non-verbatim `unmet` lines discarded; a `fails` with zero
-    surviving lines downgraded to `partial`)."""
+def parse_response(raw_text: str, jd_text_sent: str, background_text_sent: str = "",
+                   *, log=print) -> Optional[ValidatedReview]:
+    """Parses and validates one model response against the JD and background text that were actually SENT.
+    Returns None (unparseable / no usable `lines` list -- logged and counted, never recorded as a verdict) or
+    a ValidatedReview with both §29.1/§29.2 guards already applied:
+      - `line` must be a VERBATIM (whitespace-normalized, case-sensitive) substring of the JD text sent, or
+        the whole entry is discarded (invalid `section`/`kind`/`verdict` enums discard it the same way).
+      - a `met` verdict whose `evidence` is empty or not a verbatim substring of the background text sent is
+        downgraded to `unclear` (kept, counted) rather than trusted at face value.
+    Never partially accepts a truncated/unparseable response: `_extract_json` already returns None for a
+    response cut off mid-object (no balanced `{...}` to find), so this function does too."""
     obj = _extract_json(raw_text)
     if obj is None:
         log("judge2: response was not parseable JSON; discarding")
         return None
-    required_fit = obj.get("required_fit")
-    if required_fit not in REQUIRED_FIT_VALUES:
-        log(f"judge2: invalid required_fit {required_fit!r}; discarding response")
+    raw_lines = obj.get("lines")
+    if not isinstance(raw_lines, list):
+        log("judge2: response has no usable 'lines' list; discarding")
         return None
     confidence = obj.get("confidence")
     if confidence is not None and confidence not in CONFIDENCE_VALUES:
@@ -285,31 +366,124 @@ def parse_response(raw_text: str, jd_text_sent: str, *, log=print) -> Optional[V
     held_clearance = obj.get("held_clearance")
     if not isinstance(held_clearance, bool):
         held_clearance = None
-    years_gap = obj.get("years_gap")
-    if not (years_gap is None or (isinstance(years_gap, dict) and "function" in years_gap and "years" in years_gap)):
-        years_gap = None
-    raw_unmet = obj.get("unmet")
-    if not isinstance(raw_unmet, list):
-        raw_unmet = []
 
     jd_norm = _norm_ws(jd_text_sent)
-    survived, discarded = [], 0
-    for quote in raw_unmet:
-        if not isinstance(quote, str) or not quote.strip():
+    bg_norm = _norm_ws(background_text_sent)
+    validated, discarded, downgraded_n = [], 0, 0
+    for entry in raw_lines:
+        if not isinstance(entry, dict):
             discarded += 1
             continue
-        if _norm_ws(quote) in jd_norm:
-            survived.append(quote)
-        else:
+        line, section, kind, verdict = (entry.get("line"), entry.get("section"),
+                                        entry.get("kind"), entry.get("verdict"))
+        if not isinstance(line, str) or not line.strip():
             discarded += 1
+            continue
+        if (section not in LINE_SECTION_VALUES or kind not in LINE_KIND_VALUES
+                or verdict not in LINE_VERDICT_VALUES):
+            discarded += 1
+            continue
+        if _norm_ws(line) not in jd_norm:
+            discarded += 1
+            continue
+        evidence = entry.get("evidence")
+        evidence = evidence if isinstance(evidence, str) else ""
+        line_downgraded = False
+        if verdict == "met" and (not evidence.strip() or _norm_ws(evidence) not in bg_norm):
+            verdict, line_downgraded = "unclear", True
+            downgraded_n += 1
+        years = entry.get("years")
+        if not (years is None or (isinstance(years, dict) and "function" in years and "required" in years)):
+            years = None
+        validated.append(LineVerdict(line=line, section=section, kind=kind, verdict=verdict,
+                                     evidence=evidence if verdict == "met" else "", years=years,
+                                     evidence_downgraded=line_downgraded))
+        if line_downgraded:
+            log(f"judge2: 'met' downgraded to 'unclear' (evidence missing/not verbatim): {line!r}")
 
-    downgraded = False
-    if required_fit == "fails" and not survived:
-        required_fit, downgraded = "partial", True
+    return ValidatedReview(lines=validated, held_clearance=held_clearance, confidence=confidence,
+                           lines_discarded=discarded, evidence_downgraded=downgraded_n, raw_response=raw_text)
 
-    return ValidatedReview(required_fit=required_fit, unmet=survived, unmet_discarded=discarded,
-                           downgraded=downgraded, held_clearance=held_clearance, years_gap=years_gap,
-                           confidence=confidence, raw_response=raw_text)
+
+# ---------------------------------------------------------------- 2b. derivation (pure, no I/O -- §29.2)
+# Thresholds as module constants, per §29.2, so `finder.py judge2 rederive` can tune them and recompute every
+# stored review's `required_fit` from its stored `judge2_lines` with NO new API call.
+HARD_GATE_KINDS = ("clearance", "licence", "years_function")   # always a hard gate
+SOFT_GATE_KINDS = ("tool", "skill", "degree")                  # a `tool` line is promoted to a hard gate by
+                                                                 # `_tool_is_the_job` below; the rest stay soft
+SOFT_GAP_MEETS_MAX = 1              # `meets` tolerates at most this many soft required lines not `met`
+MAJORITY_UNMET_FRACTION = 0.5       # > this fraction of ALL required lines `unmet` -> `fails`, regardless of kind
+_YEARS_IN_LINE_RE = re.compile(r"\b\d+\+?\s*years?\b", re.I)   # "N+ years" / "N years" written on the line itself
+_TITLE_TOKEN_RE = re.compile(r"\b[A-Z][A-Za-z0-9+.#]{1,}\b")    # candidate tool-name tokens (capitalized/acronym)
+
+
+def _get(obj, key, default=None):
+    """Reads `key` off a dict OR an attribute-holding object (LineVerdict or a plain dict), so
+    `derive_required_fit` works identically on real parsed lines and on the plain-dict fixtures its own
+    table-style unit tests use."""
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
+def _tool_is_the_job(line_obj, title: str) -> bool:
+    """§29.2: a `tool` line is a hard gate ONLY when the tool IS the job -- its name appears in the posting
+    title, or the line itself asks for N+ years in that one tool (the model should have typed such a line
+    `years_function`; this is the code-side double-check the spec calls for). The "name in the title" check
+    has no isolated tool-name field to compare against, only the line text and the title, so it looks for a
+    capitalized/acronym token from the line (a plausible tool name, e.g. "Salesforce", "SQL", "Tableau")
+    that also appears in the title -- a deliberately narrow heuristic; a miss just leaves the line soft."""
+    line_text = _get(line_obj, "line") or ""
+    if _YEARS_IN_LINE_RE.search(line_text):
+        return True
+    if not title:
+        return False
+    title_lower = title.lower()
+    return any(len(tok) >= 2 and tok.lower() in title_lower for tok in _TITLE_TOKEN_RE.findall(line_text))
+
+
+def derive_required_fit(lines, *, title: str = "") -> tuple:
+    """§29.2, exactly. Pure function, no I/O: `lines` is an iterable of validated per-line entries (LineVerdict
+    or plain dicts with the same keys/attributes -- see `_get`); only `section == "required"` entries count,
+    Preferred lines never affect the call. Returns `(required_fit, why)`:
+      - zero required lines survived validation -> `(None, why)` -- "no call", the caller/evaluate() must
+        treat this as unjudged, never as a verdict.
+      - a HARD GATE (`clearance`, `licence`, `years_function`, or a `tool` line where the tool IS the job,
+        per `_tool_is_the_job`) rated `unmet` -> `fails`.
+      - more than `MAJORITY_UNMET_FRACTION` of ALL required lines rated `unmet` -> `fails` (a broader net than
+        the hard-gate check alone: several soft gaps together are also disqualifying).
+      - a hard gate rated `unclear` (and no `fails` condition above fired) -> `partial`, never `meets`.
+      - at most `SOFT_GAP_MEETS_MAX` soft required lines (`tool`/`skill`/`degree`, not promoted to hard) not
+        `met` -> `meets` (the "lone learnable gap" §25/§29 both allow).
+      - otherwise -> `partial`.
+    """
+    required = [l for l in lines if _get(l, "section") == "required"]
+    n_required = len(required)
+    if n_required == 0:
+        return None, "no required lines survived validation"
+
+    hard = [l for l in required if _get(l, "kind") in HARD_GATE_KINDS
+           or (_get(l, "kind") == "tool" and _tool_is_the_job(l, title))]
+    soft = [l for l in required if l not in hard]
+
+    hard_unmet = [l for l in hard if _get(l, "verdict") == "unmet"]
+    if hard_unmet:
+        return "fails", f"hard gate unmet: {_get(hard_unmet[0], 'line')}"
+
+    n_unmet_all = sum(1 for l in required if _get(l, "verdict") == "unmet")
+    if n_unmet_all > n_required * MAJORITY_UNMET_FRACTION:
+        return "fails", f"majority of required lines unmet ({n_unmet_all} of {n_required})"
+
+    hard_unclear = [l for l in hard if _get(l, "verdict") == "unclear"]
+    if hard_unclear:
+        return "partial", f"hard gate unclear: {_get(hard_unclear[0], 'line')}"
+
+    soft_not_met = [l for l in soft if _get(l, "verdict") != "met"]
+    if len(soft_not_met) <= SOFT_GAP_MEETS_MAX:
+        why = "all hard gates met, no soft gap"
+        if soft_not_met:
+            why = f"all hard gates met; lone soft gap: {_get(soft_not_met[0], 'line')}"
+        return "meets", why
+
+    return "partial", f"{len(soft_not_met)} soft required lines not met"
 
 
 # ---------------------------------------------------------------- 3. client (transport + sleep always injected)
@@ -352,7 +526,8 @@ def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_
     headers = {"content-type": "application/json", "x-goog-api-key": api_key}
     body = {"contents": [{"parts": [{"text": prompt_text}]}],
             "generationConfig": {"temperature": temperature, "response_mime_type": "application/json",
-                                 "thinkingConfig": {"thinkingLevel": THINKING_LEVEL}}}
+                                 "thinkingConfig": {"thinkingLevel": thinking_level()},
+                                 "maxOutputTokens": MAX_OUTPUT_TOKENS}}
     last_reason = "no models configured"
     for model in models:
         url = API_URL_TMPL.format(model=model)
@@ -411,39 +586,101 @@ def _already_reviewed(con, pid: str, description_hash: str, pv: str) -> bool:
 
 
 def _insert_review(con, *, pid, description_hash, pv, model, review: ValidatedReview, prompt_chars: int) -> None:
+    """`review` must already have `apply_derivation()` applied (`required_fit`/`derive_why`/`unmet`/
+    `years_gap` filled from §29.2's derived call, per §29.3). The legacy `unmet_discarded`/`downgraded`
+    columns are kept meaningful rather than dropped: `unmet_discarded` mirrors `lines_discarded` (entries the
+    validation guard dropped outright), `downgraded` is true when at least one line's evidence guard fired."""
     con.execute("""
         INSERT OR REPLACE INTO judge2_reviews (
             posting_id, description_hash, prompt_version, provider, model, required_fit, unmet,
             unmet_discarded, downgraded, held_clearance, years_gap, confidence, raw_response, prompt_chars,
-            reviewed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reviewed_at, derive_why, lines_discarded, evidence_downgraded, contract
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [pid, description_hash, pv, PROVIDER, model, review.required_fit, json.dumps(review.unmet),
-          review.unmet_discarded, review.downgraded, review.held_clearance,
+          review.lines_discarded, review.evidence_downgraded > 0, review.held_clearance,
           json.dumps(review.years_gap) if review.years_gap is not None else None, review.confidence,
-          review.raw_response, prompt_chars, _now()])
+          review.raw_response, prompt_chars, _now(), review.derive_why, review.lines_discarded,
+          review.evidence_downgraded, "lines"])
+
+
+def _insert_lines(con, *, pid, description_hash, pv, lines: list) -> None:
+    """Replaces (never appends to) this review's stored lines -- a `--force`/`--rerun` re-ask can return a
+    different number of lines than the previous attempt, so DELETE-then-INSERT is simpler and safer than
+    INSERT OR REPLACE against a PK that includes `line_no`."""
+    con.execute("DELETE FROM judge2_lines WHERE posting_id = ? AND description_hash = ? AND prompt_version = ?",
+               [pid, description_hash, pv])
+    for i, l in enumerate(lines):
+        con.execute("""
+            INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line, section,
+                                      kind, verdict, evidence, years, evidence_downgraded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [pid, description_hash, pv, i, l.line, l.section, l.kind, l.verdict, l.evidence,
+              json.dumps(l.years) if l.years is not None else None, l.evidence_downgraded])
+
+
+def rederive(con, *, log=print) -> dict:
+    """`finder.py judge2 rederive` (§29.2/§29.3): recomputes `required_fit`/`unmet`/`years_gap`/`derive_why`
+    for every stored `contract='lines'` review from its OWN stored `judge2_lines`, with NO new API call --
+    tuning the §29.2 constants (or `_tool_is_the_job`'s heuristic) is then free. §25-era `contract='overall'`
+    rows have no stored lines to rederive from and are left untouched."""
+    rows = con.execute("""
+        SELECT r.posting_id, r.description_hash, r.prompt_version, p.title
+        FROM judge2_reviews r JOIN postings p USING (posting_id)
+        WHERE r.contract = 'lines'
+    """).fetchall()
+    updated = 0
+    for pid, dh, pv, title in rows:
+        line_rows = con.execute("""
+            SELECT line, section, kind, verdict, evidence, years, evidence_downgraded FROM judge2_lines
+            WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? ORDER BY line_no
+        """, [pid, dh, pv]).fetchall()
+        lines = [{"line": l, "section": s, "kind": k, "verdict": v, "evidence": e,
+                 "years": json.loads(y) if y else None, "evidence_downgraded": ed}
+                for (l, s, k, v, e, y, ed) in line_rows]
+        fit, why = derive_required_fit(lines, title=title or "")
+        unmet = [l["line"] for l in lines if l["section"] == "required" and l["verdict"] == "unmet"]
+        years_gap = next((l["years"] for l in lines if l["section"] == "required"
+                          and l["kind"] == "years_function" and l["verdict"] == "unmet" and l["years"]), None)
+        con.execute("""
+            UPDATE judge2_reviews SET required_fit = ?, unmet = ?, years_gap = ?, derive_why = ?
+            WHERE posting_id = ? AND description_hash = ? AND prompt_version = ?
+        """, [fit, json.dumps(unmet), json.dumps(years_gap) if years_gap is not None else None, why, pid, dh, pv])
+        updated += 1
+    log(f"judge2.rederive: {updated} review(s) recomputed from stored lines (no API call)")
+    return {"updated": updated}
 
 
 def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, show: int = 1,
        background: str = "public", background_path: Optional[str] = None, jd_cap: int = DEFAULT_JD_CAP,
        only_blind: bool = False, i_have_approval: bool = False, transport=None, sleep_fn=None,
-       rpm: Optional[int] = None, log=print) -> dict:
+       rpm: Optional[int] = None, rerun: bool = False, run_tag: Optional[str] = None, log=print) -> dict:
     """Builds payloads for the population (top N by rank, or every blind human-graded row when
     `only_blind=True`) and, unless `dry_run`, sends them to the live API through the INJECTED `transport`.
 
-    `dry_run=True` builds and prints the full payload for the first `show` postings plus a summary, and NEVER
-    calls `transport` (a test asserts this). It needs no API key and bypasses the live gate below -- it makes
-    no call, so there is nothing to gate.
+    `dry_run=True` builds and prints the full payload AND the fully rendered prompt for the first `show`
+    postings plus a summary, and NEVER calls `transport` (a test asserts this). It needs no API key and
+    bypasses the live gate below -- it makes no call, so there is nothing to gate.
 
     The live gate (belt and braces, §5): a non-dry-run call refuses to start unless `JUDGE2_LIVE_OK=1` is set
     or `i_have_approval=True` is passed, so a scheduled pipeline (`pipeline.judge2_stage`) can never make the
     first live call by accident.
+
+    §29.4's noise-floor tool: `run_tag`, when given, is appended to the prompt_version used as the STORAGE/
+    cache key (`f"{base_pv}:{run_tag}"`) -- so a repeat run under the IDENTICAL prompt template lands in its
+    own set of `judge2_reviews` rows rather than overwriting the first run's, and `judge2 eval --compare` can
+    diff the two by prompt_version. Default `run_tag=None` leaves the key exactly `base_pv`, so production
+    caching is byte-for-byte unchanged. `rerun=True` implies `force=True` (a tagged or untagged repeat is
+    pointless if `_already_reviewed` just skips it).
     """
+    if rerun:
+        force = True
     sql = EVAL_SET_SQL if only_blind else POPULATION_SQL
     rows = con.execute(sql).fetchall()
     if not only_blind:
         rows = rows[:top_n]
     background_text = get_background(background, path=background_path)
-    pv = prompt_version(background_text)
+    base_pv = prompt_version(background_text)
+    pv = f"{base_pv}:{run_tag}" if run_tag else base_pv
 
     candidates = []
     for pid, description_hash, title, employer, description_text, *_rest in rows:
@@ -457,13 +694,15 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
     est_tokens = total_chars // CHARS_PER_TOKEN
     models = _models_from_env()
     summary = {"count": len(candidates), "total_chars": total_chars, "estimated_tokens": est_tokens,
-              "provider": PROVIDER, "models": models, "prompt_version": pv,
+              "provider": PROVIDER, "models": models, "prompt_version": pv, "base_prompt_version": base_pv,
               "payload_fields": list(PAYLOAD_FIELDS)}
 
     if dry_run:
         for pid, description_hash, title, employer, payload in candidates[:show]:
             log(f"--- judge2 dry-run payload: {pid} ({title!r} @ {employer!r}) ---")
             log(json.dumps(payload, indent=2))
+            log(f"--- judge2 dry-run rendered prompt: {pid} ---")
+            log(render_prompt(payload))
         log(f"judge2 dry-run summary: {summary}")
         return {"dry_run": True, **summary}
 
@@ -481,40 +720,51 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         sleep_fn = _time.sleep
     if transport is None:
         transport = default_transport()
+    import time as _time_mod
+    run_start = _time_mod.monotonic()   # §29.5: elapsed time for the per-call progress line only -- never
+                                        # read by any code path a test asserts on, so it stays real wall time
     reviewed, unparseable, skipped_no_model = 0, 0, 0
     pace = (60.0 / rpm) if rpm > 0 else 0.0   # paid on EVERY request (a failed or re-asked one too), never only on success
     tpm = int(os.environ.get("GEMINI_TPM", DEFAULT_TPM) or DEFAULT_TPM)
 
     def _wait(prompt_text: str) -> float:
         # Token-aware pacing: the free tier's binding limit is tokens per minute, not requests. Wait long
-        # enough AFTER a request of N estimated tokens that the rolling minute stays under `tpm`.
-        est = len(prompt_text) / CHARS_PER_TOKEN + 400   # + a small allowance for the JSON answer
+        # enough AFTER a request of N estimated tokens that the rolling minute stays under `tpm`. §29.5: the
+        # allowance now budgets for the per-line ANSWER (EXPECTED_OUTPUT_TOKENS), not the old flat +400.
+        est = len(prompt_text) / CHARS_PER_TOKEN + EXPECTED_OUTPUT_TOKENS
         return max(pace, 60.0 * est / tpm) if tpm > 0 else pace
     last_prompt = ""
+    n_candidates = len(candidates)
     for i, (pid, description_hash, title, employer, payload) in enumerate(candidates):
         prompt_text = render_prompt(payload)
         if i and _wait(last_prompt):
             sleep_fn(_wait(last_prompt))
         last_prompt = prompt_text
         model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
+        # §29.5: one progress line per call -- n of N, the model that answered (or 'none'), the posting, elapsed.
+        log(f"judge2.run: {i + 1}/{n_candidates} · model={model or 'none'} · {pid} · "
+           f"elapsed={_time_mod.monotonic() - run_start:.1f}s")
         if data is None:
             skipped_no_model += 1
             continue
         raw_text = _gemini_text(data) or ""
-        review = parse_response(raw_text, payload["jd_text"], log=log)
+        review = parse_response(raw_text, payload["jd_text"], payload["background"], log=log)
         if review is None:
             # at most one re-ask per posting
             if _wait(prompt_text):
                 sleep_fn(_wait(prompt_text))
             model, data = _call_with_fallback(transport, sleep_fn, models, api_key, prompt_text, log=log)
             raw_text = _gemini_text(data) if data else ""
-            review = parse_response(raw_text or "", payload["jd_text"], log=log) if raw_text else None
+            review = (parse_response(raw_text or "", payload["jd_text"], payload["background"], log=log)
+                      if raw_text else None)
         if review is None:
             unparseable += 1
             log(f"judge2: {pid} gave no usable verdict after one re-ask; recording nothing")
             continue
+        review.apply_derivation(title=title)
         _insert_review(con, pid=pid, description_hash=description_hash, pv=pv, model=model, review=review,
                        prompt_chars=len(prompt_text))
+        _insert_lines(con, pid=pid, description_hash=description_hash, pv=pv, lines=review.lines)
         reviewed += 1
 
     log(f"judge2.run: {reviewed} reviewed, {unparseable} unparseable (skipped), "
@@ -626,6 +876,77 @@ def evaluate(con, *, background: str = "public", background_path: Optional[str] 
            "catch_rate_strict": catch_rate_strict, "n_all_fails": n_all_fails,
            "catch_rate_all_fails": catch_rate_all_fails, "n_agree": n_agree, "agree_rate": agree_rate,
            "n_unjudged": n_unjudged, "insufficient": insufficient, "passed": passed, "reason": reason}
+
+
+# The separator `finder.py mark --unmet` / `feedback._mark_required_fit` actually joins multiple unmet lines
+# with (`" ; ".join(unmet)`, backend/finder/feedback.py) -- used here rather than the sprint plan prose's
+# looser "pipe-separated" phrasing, so this reads the SAME golden-source text `report_feedback.required_unmet`
+# actually stores.
+GOLD_UNMET_SEPARATOR = " ; "
+
+
+def line_level_report(con, *, background: str = "public", background_path: Optional[str] = None,
+                      prompt_version_override: Optional[str] = None, log=print) -> dict:
+    """§29.4's line-level report: for each blind human-graded row that named at least one unmet requirement
+    (`vw_report_feedback_blind.required_unmet`, split on GOLD_UNMET_SEPARATOR), report whether the second
+    judge rated a MATCHING line (normalized containment either way -- neither side need quote the other
+    exactly) `unmet` / `unclear` / `met`, or never listed a matching line at all. This is a finer-grained
+    companion to `evaluate()`'s posting-level catch/agree rates: it names the specific line, so a miss can be
+    traced to the background sheet, a prompt rule, or the model -- not just "the call disagreed"."""
+    background_text = get_background(background, path=background_path)
+    pv = prompt_version_override or prompt_version(background_text)
+    gold_rows = con.execute("""
+        SELECT rf.posting_id, p.employer, p.title, p.description_hash, rf.required_unmet
+        FROM vw_report_feedback_blind rf JOIN postings p USING (posting_id)
+        WHERE rf.required_unmet IS NOT NULL AND trim(rf.required_unmet) != ''
+    """).fetchall()
+
+    results = []
+    for pid, employer, title, dh, gold_unmet in gold_rows:
+        gold_lines = [g.strip() for g in gold_unmet.split(GOLD_UNMET_SEPARATOR) if g.strip()]
+        judge_lines = con.execute("""
+            SELECT line, verdict FROM judge2_lines
+            WHERE posting_id = ? AND description_hash = ? AND prompt_version = ?
+        """, [pid, dh, pv]).fetchall()
+        for gold_line in gold_lines:
+            gnorm = _norm_ws(gold_line).lower()
+            verdict = None
+            for jline, jverdict in judge_lines:
+                jnorm = _norm_ws(jline).lower()
+                if gnorm in jnorm or jnorm in gnorm:
+                    verdict = jverdict
+                    break
+            results.append({"posting_id": pid, "employer": employer, "title": title,
+                            "gold_unmet_line": gold_line, "judge_verdict": verdict or "never_listed"})
+            if verdict != "unmet":
+                log(f"  LINE MISS: {pid} · {employer} · {title} · gold_unmet={gold_line!r} "
+                   f"judge={verdict or 'never_listed'}")
+
+    n = len(results)
+    n_caught = sum(1 for r in results if r["judge_verdict"] == "unmet")
+    log(f"judge2 line-level report: prompt_version={pv} {n_caught}/{n} gold unmet line(s) rated unmet by the judge")
+    return {"prompt_version": pv, "n_gold_unmet_lines": n, "n_caught_unmet": n_caught, "rows": results}
+
+
+def compare(con, prompt_version_a: str, prompt_version_b: str, *, log=print) -> list:
+    """§29.4's `judge2 eval --compare <A> <B>`: postings judged under BOTH prompt_version A and B, whose
+    `required_fit` call differs between the two. Run on two runs of the SAME prompt (see `run(..., run_tag=)`,
+    §29.4's noise-floor tool) this measures run-to-run noise rather than a real prompt change."""
+    rows = con.execute("""
+        SELECT a.posting_id, p.employer, p.title, a.required_fit AS fit_a, b.required_fit AS fit_b
+        FROM judge2_reviews a
+        JOIN judge2_reviews b ON b.posting_id = a.posting_id AND b.prompt_version = ?
+        JOIN postings p ON p.posting_id = a.posting_id
+        WHERE a.prompt_version = ?
+    """, [prompt_version_b, prompt_version_a]).fetchall()
+    diffs = [{"posting_id": pid, "employer": employer, "title": title, "fit_a": fit_a, "fit_b": fit_b}
+            for pid, employer, title, fit_a, fit_b in rows if fit_a != fit_b]
+    for d in diffs:
+        log(f"  DIFF: {d['posting_id']} · {d['employer']} · {d['title']} · "
+           f"{prompt_version_a}={d['fit_a']} vs {prompt_version_b}={d['fit_b']}")
+    log(f"judge2 compare: {len(diffs)} differing of {len(rows)} common posting(s) between "
+       f"{prompt_version_a} and {prompt_version_b}")
+    return diffs
 
 
 # ---------------------------------------------------------------- status

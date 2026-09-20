@@ -26,7 +26,21 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 19  # v19 (2026-09-19): human_lens_grades table -- a human grade for ONE lens only (the F4
+SCHEMA_VERSION = 20  # v20 (2026-09-20): the second judge answers line-by-line instead of an overall call
+                     #                  (sprint plan §29). New table `judge2_lines` (one row per rated JD
+                     #                  line, PK posting_id+description_hash+prompt_version+line_no; CREATE
+                     #                  IF NOT EXISTS below is enough, additive). `judge2_reviews` gains four
+                     #                  columns (`derive_why`, `lines_discarded`, `evidence_downgraded`,
+                     #                  `contract`) via the `_add_missing_columns` pattern, backfilled so old
+                     #                  (§25-era) rows read `contract='overall'`, the others 0/NULL. ALSO v20:
+                     #                  `judge2_reviews.required_fit` becomes NULLable (`_migrate_v20_...`
+                     #                  below) -- §29.2's `derive_required_fit` returns NULL when zero
+                     #                  required lines survive validation, which the old NOT NULL constraint
+                     #                  (written for the §25 contract, where every parsed response produced a
+                     #                  value) would reject. `required_fit`/`unmet`/`years_gap` are still
+                     #                  filled from the DERIVED call (§29.3), so `vw_judge2_latest` /
+                     #                  `vw_lens_fit` / `judge2_value` keep reading them exactly as before;
+                     # v19 (2026-09-19): human_lens_grades table -- a human grade for ONE lens only (the F4
                      #                  gold sheet, sprint plan §22.3/§25/§26), keyed (posting_id,
                      #                  description_hash, lens). NEVER writes to or alters llm_labels: the
                      #                  overall grade, required_fit and the OTHER lenses stay whatever they
@@ -250,23 +264,54 @@ CREATE TABLE IF NOT EXISTS model_runs (
 -- comment for why. `unmet` holds only quotes that survived the verbatim-substring hallucination guard;
 -- `unmet_discarded` counts the ones that did not. `downgraded` = a `fails` call with zero surviving quotes,
 -- downgraded to `partial` (§25's hallucination guard). `raw_response` is kept for audit even on a downgrade.
+-- v20 (sprint plan §29): the model answers per LINE now, not with one overall call (`judge2_lines` below
+-- holds the lines themselves); this table keeps its §25 shape so `vw_judge2_latest` / `vw_lens_fit` /
+-- `judge2_value` are untouched, but `required_fit`/`unmet`/`years_gap` are now filled from the DERIVED call
+-- (`judge2.derive_required_fit`, a pure function over the stored lines) rather than asked of the model
+-- directly. `required_fit` is nullable as of v20: zero surviving required lines derives no call at all.
 CREATE TABLE IF NOT EXISTS judge2_reviews (
     posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
     provider          VARCHAR NOT NULL,          -- 'gemini'
     model             VARCHAR NOT NULL,          -- the model that actually answered (fallback-aware)
-    required_fit      VARCHAR NOT NULL,          -- meets | partial | fails (only two human values exist --
-                                                  -- meets | fails -- but the second judge, like the first, is
-                                                  -- allowed the middle ground)
-    unmet             JSON,                      -- verbatim-quoted unmet lines that survived validation
-    unmet_discarded   INTEGER NOT NULL DEFAULT 0, -- non-verbatim quotes the model returned, discarded
-    downgraded        BOOLEAN NOT NULL DEFAULT FALSE,
+    required_fit      VARCHAR,                   -- meets | partial | fails | NULL (no required lines survived);
+                                                  -- only two human values exist -- meets | fails -- but the
+                                                  -- second judge, like the first, is allowed the middle ground
+    unmet             JSON,                      -- required-section lines the DERIVED call rated unmet
+    unmet_discarded   INTEGER NOT NULL DEFAULT 0, -- v20: mirrors `lines_discarded` (kept for the §25 column's
+                                                  -- own meaning: lines dropped by validation, not model verdicts)
+    downgraded        BOOLEAN NOT NULL DEFAULT FALSE, -- v20: true when >=1 line's evidence guard fired
     held_clearance    BOOLEAN,
-    years_gap         JSON,                      -- {"function": str, "years": number} or NULL
+    years_gap         JSON,                      -- {"function": str, "required": number, "shown": number|null}
+                                                  -- from the first unmet required years_function line, or NULL
     confidence        VARCHAR,                   -- low | medium | high
     raw_response      VARCHAR,
     prompt_chars      INTEGER,
     reviewed_at       TIMESTAMP NOT NULL,
+    derive_why        VARCHAR,                   -- v20: derive_required_fit's short machine string naming the
+                                                  -- deciding line(s); NULL for §25-era 'overall' rows
+    lines_discarded   INTEGER NOT NULL DEFAULT 0, -- v20: entries dropped by validation (bad enum, non-verbatim
+                                                  -- `line`, or malformed shape) -- 0 for 'overall' rows
+    evidence_downgraded INTEGER NOT NULL DEFAULT 0, -- v20: count of `met` lines downgraded to `unclear` by the
+                                                  -- evidence-substring guard -- 0 for 'overall' rows
+    contract          VARCHAR NOT NULL DEFAULT 'overall', -- 'overall' (§25 rows) | 'lines' (§29 rows)
     PRIMARY KEY (posting_id, description_hash, prompt_version)
+);
+
+-- v20 (sprint plan §29.3): one row per JD line the second judge rated, under the SAME key as its parent
+-- `judge2_reviews` row plus `line_no` (document order, as returned). `derive_required_fit` (a pure function,
+-- backend/finder/judge2.py) reads these back to recompute `required_fit` with NO new API call
+-- (`finder.py judge2 rederive`) -- tuning §29.2's thresholds is then free, unlike a new prompt/model call.
+CREATE TABLE IF NOT EXISTS judge2_lines (
+    posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
+    line_no           INTEGER NOT NULL,
+    line              VARCHAR NOT NULL,          -- verbatim JD line (already passed the substring guard)
+    section           VARCHAR NOT NULL,          -- required | preferred
+    kind              VARCHAR NOT NULL,          -- clearance | licence | years_function | degree | tool | skill
+    verdict           VARCHAR NOT NULL,          -- met | unmet | unclear
+    evidence          VARCHAR,                   -- verbatim background text for a surviving `met`; '' otherwise
+    years             JSON,                      -- {"function": str, "required": number, "shown": number|null}
+    evidence_downgraded BOOLEAN NOT NULL DEFAULT FALSE, -- this line's `met` was downgraded to `unclear` (no/bad evidence)
+    PRIMARY KEY (posting_id, description_hash, prompt_version, line_no)
 );
 
 -- One row per `judge2.evaluate()` run against `vw_report_feedback_blind` (sprint plan §25's acceptance bar).
@@ -1176,6 +1221,8 @@ def connect(db_path=None):
         prev = con.execute("SELECT version FROM schema_info").fetchone()[0]
         if prev < 11 <= SCHEMA_VERSION:
             _migrate_v11_hash_normalization(con)
+        if prev < 20 <= SCHEMA_VERSION:
+            _migrate_v20_required_fit_nullable(con)
         # v2 -> v3 added tables only (CREATE IF NOT EXISTS above), so bumping the version is otherwise enough
         con.execute("UPDATE schema_info SET version = ? WHERE version < ?", [SCHEMA_VERSION, SCHEMA_VERSION])
     _add_missing_columns(con)
@@ -1214,7 +1261,11 @@ def _add_missing_columns(con):
                                 ("screens", "level_fit", "VARCHAR"),
                                 ("postings", "detail_attempts", "INTEGER DEFAULT 0"),
                                 ("report_feedback", "required_fit", "VARCHAR"),
-                                ("report_feedback", "required_unmet", "VARCHAR")):
+                                ("report_feedback", "required_unmet", "VARCHAR"),
+                                ("judge2_reviews", "derive_why", "VARCHAR"),
+                                ("judge2_reviews", "lines_discarded", "INTEGER DEFAULT 0"),
+                                ("judge2_reviews", "evidence_downgraded", "INTEGER DEFAULT 0"),
+                                ("judge2_reviews", "contract", "VARCHAR DEFAULT 'overall'")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":
@@ -1222,6 +1273,11 @@ def _add_missing_columns(con):
             if table == "llm_labels" and column == "lens_grade_source":
                 con.execute("UPDATE llm_labels SET lens_grade_source = 'human' "
                            "WHERE scorer = 'user-adjudicated' AND lens_grade_source IS NULL")
+            if table == "judge2_reviews" and column == "contract":
+                # every row that predates this column was written under the §25 overall-call contract
+                con.execute("UPDATE judge2_reviews SET contract = 'overall' WHERE contract IS NULL")
+            if table == "judge2_reviews" and column in ("lines_discarded", "evidence_downgraded"):
+                con.execute(f"UPDATE judge2_reviews SET {column} = 0 WHERE {column} IS NULL")
 
 
 def _columns(con, table):
@@ -1394,6 +1450,18 @@ def _migrate_v11_hash_normalization(con, log=lambda *a, **k: None) -> int:
         raise
     log(f"v11 hash normalization: {n_changed} posting(s) rehashed")
     return n_changed
+
+
+def _migrate_v20_required_fit_nullable(con) -> None:
+    """v19 -> v20 (sprint plan §29): `judge2_reviews.required_fit` was declared NOT NULL under the §25
+    overall-call contract, where every parsed response produced a value. §29.2's `derive_required_fit`
+    legitimately returns NULL (zero required lines survived validation -- "no call", counted as unjudged, not
+    an error), so the constraint has to go. A no-op if the table does not exist yet (a brand-new DB is created
+    straight from SCHEMA, which already declares the column nullable, so this path is never reached for it)."""
+    tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    if "judge2_reviews" not in tables:
+        return
+    con.execute("ALTER TABLE judge2_reviews ALTER COLUMN required_fit DROP NOT NULL")
 
 
 def _stage(con, employer, platform, jobs, now):

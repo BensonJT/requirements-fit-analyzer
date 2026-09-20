@@ -77,6 +77,15 @@ Be strict. Rules:
   must already be held; only the polygraph is obtainable).
 - A line asking for N+ years in a NAMED function, domain or platform that the background does not show is a
   years_gap: record the named function and the number of years.
+- YEARS IN AN "OR" LIST. When a years line lists several functions or domains joined by commas, "or" or
+  "and/or" ("N+ years in A, B, or C"), it is MET only when the background shows that at least ONE listed
+  item was the candidate's actual job for N or more years: check it against the background's years-by-
+  function figures and name to yourself which item and which years. It is NOT met by adjacent or related
+  experience, by work that merely touched a listed item, by adding partial years across different items, or
+  by a catch-all tail such as "or a related field". If exactly one listed item clearly was the job for N+
+  years, the line is met even when every other item is absent. If none was, it is a years_gap and a hard
+  gate: put the line in `unmet` and call `fails`. Do not call `meets` on such a line without being able to
+  point to the specific item and years in the background.
 - A qualification listed under a Preferred / Desired / Nice-to-have / Bonus heading is NOT required. Never
   put a preferred line in `unmet`, and never let one lower required_fit. The parsed lists below are a
   machine's best split of the JD and can be wrong; the full JD text and its own headings are the authority.

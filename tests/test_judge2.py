@@ -952,3 +952,27 @@ def test_evaluate_reads_an_earlier_run_after_a_later_one(tmp_path):
     assert con.execute("SELECT count(*) FROM vw_judge2_latest WHERE prompt_version LIKE '%:%'").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM vw_judge2_latest").fetchone()[0] == 10
     con.close()
+
+
+def test_derive_years_line_met_on_evidence_without_years_is_unclear():
+    # "Bachelor's degree AND 4+ years of X" rated met on the degree sentence alone: not evidence of years.
+    weak = dict(_line(kind="years_function", verdict="met", line="Bachelor's AND 4+ years product management, strategy consulting"),
+                evidence="B.A., Some Major -- Some College (1991)")   # a lone year is not a span
+    assert judge2.derive_required_fit([weak], title="Analyst")[0] == "partial"
+    strong = dict(weak, evidence="Function X: ~13 years (2012-2025)")
+    assert judge2.derive_required_fit([strong], title="Analyst")[0] == "meets"
+    generic = dict(weak, line="Bachelor's degree and 10 years of directly related experience")
+    assert judge2.derive_required_fit([generic], title="Analyst")[0] == "meets"
+
+
+def test_derive_degree_ladder_is_any_of():
+    rung = lambda text, v, ev: dict(_line(kind="years_function", verdict=v, line=text), evidence=ev)
+    ladder = [rung("Doctorate degree and 2 years of planning operations experience", "unmet", ""),
+              rung("Master's degree and 4 years of planning operations experience", "met", "Planning operations: ~13 years (2012-2025)"),
+              rung("Bachelor's degree and 6 years of planning operations experience", "met", "Planning operations: ~13 years (2012-2025)")]
+    assert judge2.derive_required_fit(ladder, title="Analyst")[0] == "meets"
+    # every rung met only on a degree sentence -> the ladder is unclear -> partial, never meets
+    weak = [rung(l["line"], "met", "M.A., Some Major -- Some College (2003)") for l in ladder]
+    assert judge2.derive_required_fit(weak, title="Analyst")[0] == "partial"
+    all_unmet = [rung(l["line"], "unmet", "") for l in ladder]
+    assert judge2.derive_required_fit(all_unmet, title="Analyst")[0] == "fails"

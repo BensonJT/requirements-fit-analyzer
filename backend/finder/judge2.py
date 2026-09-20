@@ -436,6 +436,47 @@ _GENERIC_TITLE_WORDS = frozenset("""experience experienced knowledge proficiency
     tools tool platform platforms software applications application cloud ai it bi and or the of in with""".split())
 
 
+# A `met` on a years line must rest on evidence that itself carries a span of time ("~13 years", "10+ yrs",
+# "2012-2025"). Round 5 (2026-09-20) showed the model rating "Bachelor's degree AND 4+ years of X" `met` on the
+# strength of the DEGREE sentence alone; evidence with no years in it cannot show N years of anything.
+_EVIDENCE_HAS_YEARS_RE = re.compile(
+    r"\b\d+\+?[\s-]*(?:years?|yrs?)\b|\b(?:19|20)\d{2}\s*[-\u2013\u2014]\s*(?:(?:19|20)\d{2}|present|now)\b"
+    r"|\bsince\s+(?:\w+\s+)?(?:19|20)\d{2}\b", re.I)   # a span, never a lone year: "(1991)" is a graduation date
+
+
+_YEARS_TOKEN_RE = re.compile(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\)?\+?\s*(?:or more\s+)?years?\b", re.I)
+_GENERIC_EXPERIENCE_WORDS = frozenset("""of in a an the and or with as to for is are plus prior relevant related
+    directly work overall industry professional progressive equivalent total combined general minimum experience
+    experiences degree typically requires required""".split())
+
+
+def _names_a_function(line_text: str) -> bool:
+    """True when a years line asks for N years of something NAMED ("4+ years product management"), False when
+    it asks only for generic tenure ("10 years of directly related experience"). Reads the words between the
+    first years figure and the next clause break; two or more substantive words = a named function."""
+    m = _YEARS_TOKEN_RE.search(line_text or "")
+    if not m:
+        return False
+    tail = re.split(r"[,.;:(]|\s+or\s+|\s+OR\s+", _norm_ws(line_text[m.end():]), maxsplit=1)[0]
+    words = [w for w in re.findall(r"[A-Za-z&/+#]+", tail) if w.lower() not in _GENERIC_EXPERIENCE_WORDS]
+    return len(words) >= 2
+
+
+def _effective_verdict(line_obj) -> str:
+    """The verdict `derive_required_fit` acts on: the stored verdict, except that a `years_function` line
+    that NAMES a function, rated `met` on evidence that shows no span of time, counts as `unclear` (a generic
+    tenure line -- "10 years of related experience" -- may rest on a degree or a career summary). Applied here, not in
+    `parse_response`, so the stored line keeps what the model said and `rederive` can re-tune this for free.
+    A line with NO `evidence` key at all (a plain-dict test fixture) is left as rated."""
+    verdict = _get(line_obj, "verdict")
+    evidence = _get(line_obj, "evidence")
+    if (verdict == "met" and _get(line_obj, "kind") == "years_function" and evidence is not None
+            and not _EVIDENCE_HAS_YEARS_RE.search(evidence)
+            and _names_a_function(_get(line_obj, "line") or "")):
+        return "unclear"
+    return verdict
+
+
 def _get(obj, key, default=None):
     """Reads `key` off a dict OR an attribute-holding object (LineVerdict or a plain dict), so
     `derive_required_fit` works identically on real parsed lines and on the plain-dict fixtures its own
@@ -460,6 +501,40 @@ def _tool_is_the_job(line_obj, title: str) -> bool:
                for tok in _TITLE_TOKEN_RE.findall(line_text))
 
 
+_DEGREE_LADDER_RE = re.compile(r"\b(?:doctorate|ph\.?d|master|bachelor|associate|high school|diploma|GED)\b", re.I)
+
+
+def _collapse_degree_ladder(required: list) -> list:
+    """A posting that writes its education/tenure requirement as a LADDER of alternatives ("Doctorate and 2
+    years ... OR Master's and 4 years ... OR Bachelor's and 6 years ...") lists each rung as its own line, and
+    the model rates each rung. The rungs are ANY-OF: a candidate with a Master's does not "fail" the Doctorate
+    rung. Two or more required `years_function`/`degree` lines that each name a degree level AND a years figure
+    collapse into ONE virtual line: `met` if any rung is (effectively) met, else `unclear` if any is unclear,
+    else `unmet`. Found in round 5 (2026-09-20): every rung was a separate hard gate, so one unmet Doctorate
+    rung failed the posting."""
+    rungs = [l for l in required if _get(l, "kind") in ("years_function", "degree")
+             and _DEGREE_LADDER_RE.search(_get(l, "line") or "") and _YEARS_TOKEN_RE.search(_get(l, "line") or "")]
+    if len(rungs) < 2:
+        return required
+    verdicts = [_effective_verdict(l) for l in rungs]
+    if "met" in verdicts:
+        keep = dict(line=_get(rungs[verdicts.index("met")], "line"), verdict="met")
+    elif "unclear" in verdicts:
+        keep = dict(line=_get(rungs[verdicts.index("unclear")], "line"), verdict="unclear")
+    else:
+        keep = dict(line=_get(rungs[0], "line"), verdict="unmet")
+    virtual = {"line": keep["line"], "section": "required", "kind": "years_function", "verdict": keep["verdict"]}
+    out, placed = [], False
+    for l in required:
+        if any(l is r for r in rungs):
+            if not placed:
+                out.append(virtual)
+                placed = True
+        else:
+            out.append(l)
+    return out
+
+
 def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
     """§29.2, exactly. Pure function, no I/O: `lines` is an iterable of validated per-line entries (LineVerdict
     or plain dicts with the same keys/attributes -- see `_get`); only `section == "required"` entries count,
@@ -478,28 +553,29 @@ def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> 
       - otherwise -> `partial`.
     """
     required = [l for l in lines if _get(l, "section") == "required"]
-    n_required = len(required)
-    if n_required == 0:
+    if not required:
         return None, "no required lines survived validation"
+    required = _collapse_degree_ladder(required)
+    n_required = len(required)
 
     hard = [l for l in required if _get(l, "kind") in HARD_GATE_KINDS
            or (_get(l, "kind") == "tool" and _tool_is_the_job(l, title))]
     soft = [l for l in required if l not in hard]
 
-    hard_unmet = [l for l in hard if _get(l, "verdict") == "unmet"]
+    hard_unmet = [l for l in hard if _effective_verdict(l) == "unmet"]
     if hard_unmet:
         return "fails", f"hard gate unmet: {_get(hard_unmet[0], 'line')}"
 
-    n_unmet_all = sum(1 for l in required if _get(l, "verdict") == "unmet")
+    n_unmet_all = sum(1 for l in required if _effective_verdict(l) == "unmet")
     if n_unmet_all > n_required * MAJORITY_UNMET_FRACTION:
         return "fails", f"majority of required lines unmet ({n_unmet_all} of {n_required})"
 
-    hard_unclear = [l for l in hard if _get(l, "verdict") == "unclear"]
+    hard_unclear = [l for l in hard if _effective_verdict(l) == "unclear"]
     if hard_unclear:
         return "partial", f"hard gate unclear: {_get(hard_unclear[0], 'line')}"
 
-    soft_unmet = [l for l in soft if _get(l, "verdict") == "unmet"]
-    soft_unclear = [l for l in soft if _get(l, "verdict") == "unclear"]
+    soft_unmet = [l for l in soft if _effective_verdict(l) == "unmet"]
+    soft_unclear = [l for l in soft if _effective_verdict(l) == "unclear"]
     if len(soft_unmet) > SOFT_UNMET_MEETS_MAX:
         return "partial", f"{len(soft_unmet)} soft required lines unmet"
     if soft and len(soft_unclear) > len(soft) * SOFT_UNCLEAR_MEETS_MAX_FRACTION:

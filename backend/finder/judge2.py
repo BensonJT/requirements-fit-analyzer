@@ -79,6 +79,24 @@ DEFAULT_THINKING = "minimal"       # Gemma 4 is a thinking model: at "minimal" i
 def thinking_level() -> str:
     return os.environ.get(THINKING_ENV) or DEFAULT_THINKING
 
+
+# With thinking ON the model's reasoning tokens count against BOTH the response cap and the per-minute token
+# budget, so a thinking run needs a far larger cap (or the answer is truncated -> unparseable) and a far larger
+# pacing allowance (or the free tier answers 429). JUDGE2_MAX_OUTPUT_TOKENS / JUDGE2_EXPECTED_OUTPUT_TOKENS
+# override either figure.
+THINKING_MAX_OUTPUT_TOKENS = 16_384
+THINKING_EXPECTED_OUTPUT_TOKENS = 6_000
+
+
+def max_output_tokens() -> int:
+    default = MAX_OUTPUT_TOKENS if thinking_level() == DEFAULT_THINKING else THINKING_MAX_OUTPUT_TOKENS
+    return int(os.environ.get("JUDGE2_MAX_OUTPUT_TOKENS") or default)
+
+
+def expected_output_tokens() -> int:
+    default = EXPECTED_OUTPUT_TOKENS if thinking_level() == DEFAULT_THINKING else THINKING_EXPECTED_OUTPUT_TOKENS
+    return int(os.environ.get("JUDGE2_EXPECTED_OUTPUT_TOKENS") or default)
+
 # Same whitespace collapse as backend.ats.store.normalize_for_hash (v11 note), WITHOUT the case-fold: the
 # hallucination guard is deliberately stricter than description hashing -- no case folding, no fuzzy match.
 _WS_RE = re.compile("[\\s​‌‍﻿]+")
@@ -605,7 +623,9 @@ def default_transport():
     already passed. Constructing the client makes no network call by itself; `httpx` is an existing
     dependency (requirements.txt)."""
     import httpx
-    return httpx.Client(timeout=120.0)
+    # a thinking run can reason for minutes before the first answer byte (round 7, 2026-09-20: every call at
+    # thinking=high hit the 120 s read timeout)
+    return httpx.Client(timeout=120.0 if thinking_level() == DEFAULT_THINKING else 900.0)
 
 
 def _gemini_text(response_json: dict) -> Optional[str]:
@@ -629,7 +649,7 @@ def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_
     body = {"contents": [{"parts": [{"text": prompt_text}]}],
             "generationConfig": {"temperature": temperature, "response_mime_type": "application/json",
                                  "thinkingConfig": {"thinkingLevel": thinking_level()},
-                                 "maxOutputTokens": MAX_OUTPUT_TOKENS}}
+                                 "maxOutputTokens": max_output_tokens()}}
     last_reason = "no models configured"
     for model in models:
         url = API_URL_TMPL.format(model=model)
@@ -833,7 +853,7 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         # Token-aware pacing: the free tier's binding limit is tokens per minute, not requests. Wait long
         # enough AFTER a request of N estimated tokens that the rolling minute stays under `tpm`. §29.5: the
         # allowance now budgets for the per-line ANSWER (EXPECTED_OUTPUT_TOKENS), not the old flat +400.
-        est = len(prompt_text) / CHARS_PER_TOKEN + EXPECTED_OUTPUT_TOKENS
+        est = len(prompt_text) / CHARS_PER_TOKEN + expected_output_tokens()
         return max(pace, 60.0 * est / tpm) if tpm > 0 else pace
     last_prompt = ""
     n_candidates = len(candidates)

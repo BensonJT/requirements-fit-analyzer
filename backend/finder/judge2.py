@@ -85,8 +85,16 @@ Be strict. Rules:
 - If the background is SILENT on a requirement (it neither shows nor rules it out), that is `partial`, not
   `fails` -- UNLESS the requirement is a hard gate: a held clearance, a professional licence, or a named-
   function years requirement the background clearly does not show.
+- TOOLS. A line naming tools or platforms with "such as", "e.g.", "or similar", "or equivalent", or a list
+  joined by "or", is MET when the background shows ANY comparable tool of the same kind (one dashboard or
+  visualization tool for another, one SQL database for another, one work-tracking tool for another). A
+  single tool, "working knowledge of" or "familiarity with" line the background does not show is a
+  learnable gap, NOT a hard gate: list it in `unmet`, but it alone never makes the call `fails`, and when the
+  role's core function and years are clearly met it does not lower `meets` either. The exception is a tool
+  that IS the job: it is named in the title, or the line asks for N+ years of development in that one tool.
+  That is a named-function years requirement (a hard gate).
 - required_fit is the overall call:
-    meets   : every required qualification is met.
+    meets   : every required qualification is met (a lone learnable tool gap, as above, does not count).
     partial : most are met; one or more are unclear, light, or a genuine but non-fatal gap.
     fails   : a hard gate is unmet (held clearance, licence, or a named-function years requirement clearly
               absent), or most required qualifications are unmet.

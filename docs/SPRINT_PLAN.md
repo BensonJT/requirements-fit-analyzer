@@ -994,3 +994,82 @@ ingest --db X ...` (given AFTER the sub-action) used to fail outright -- the nes
 inner parser's own (unset) default silently overwriting a value the outer parser already captured. `judge2`
 and `required-embed` take a plain `action` CHOICE positional, not a nested subparser, so they never had this
 bug.
+
+## 29. Amendment — the second judge answers line by line; the call is derived in code (2026-09-20, user decision; binding, extends §25)
+**Why.** Four live evaluations of §25's judge (one overall `required_fit` per posting, prompt rules added
+between rounds) all missed the bar: catch/agree 62/58, 46/81, 54/77, 46/73 against 70/85. Across the four
+rounds 64 of 90 gold rows were right every time, 12 wrong every time, and 14 changed verdict, several with no
+relevant prompt change (run-to-run noise; with a 13-row catch set one flip is 7.7 points). Five catch rows came
+back `meets` with an EMPTY `unmet` list in every round, so no wording change could reach the bar, and a bare
+`meets` leaves nothing to audit. The model also broke rules it had been given (it failed a posting on a
+"such as X or Y" tool line the prompt says is met). The judgment that matters is per requirement line, so
+that is what the model is asked for; the policy that turns lines into a call moves into code, where it is
+deterministic, testable and tunable without a new live run.
+
+**29.1 What the model returns.** Strict JSON: `{"lines": [...], "held_clearance": bool, "confidence": ...}`,
+one entry per REQUIRED qualification it finds in the JD (the parsed Required list is a hint, the JD text and
+its headings stay the authority, as in §25), plus any Preferred lines it chooses to rate, marked as such:
+- `line`: the JD line, VERBATIM. Same guard as §25: not an exact (whitespace-normalized, case-sensitive)
+  substring of the JD text sent -> the entry is discarded and counted.
+- `section`: `required` | `preferred`.
+- `kind`: `clearance` | `licence` | `years_function` | `degree` | `tool` | `skill`.
+- `verdict`: `met` | `unmet` | `unclear`. `unclear` = the background is silent. A forced two-way answer makes
+  the model guess, so the third value is kept.
+- `evidence`: for `met`, the background sentence or phrase relied on, VERBATIM from the background text sent.
+  NEW GUARD: a `met` whose evidence is empty or is not a substring of the background is downgraded to
+  `unclear` and counted (`evidence_downgraded`). This is the fix for the bare `meets`.
+- `years`: for `years_function`, `{"function": str, "required": number, "shown": number|null}`.
+The prompt keeps §25's clearance wording, the tools rule and the or-list years rule, but states them as how to
+rate ONE line. It no longer asks for an overall call.
+
+**29.2 How code derives `required_fit`** (pure function `derive_required_fit(lines) -> (fit, why)`, no I/O,
+unit-tested table-style; only `section == required` lines count):
+- HARD GATES: `clearance` (held), `licence`, `years_function`. Any hard gate `unmet` -> `fails`.
+- A `tool` line is a hard gate ONLY when the tool is the job: the tool's name appears in the posting title, or
+  the line itself asks for N+ years in that one tool (then the model should have typed it `years_function`;
+  code double-checks with a years regex on the line). Otherwise a `tool` line is a soft line.
+- Soft lines (`tool`, `skill`, `degree`): more than half of all required lines `unmet` -> `fails`.
+- `meets`: no hard gate `unmet` or `unclear`, and at most ONE soft line not `met` (the lone learnable gap).
+- Everything else -> `partial`. A hard gate that is `unclear` is `partial`, never `meets`.
+- Zero surviving required lines -> no call (`required_fit` NULL, counted as unjudged; §25's 10% unjudged cap
+  in `evaluate` applies unchanged).
+- Preferred lines are stored and shown; they NEVER move `required_fit`. (A "Preferred: k of n met" note in the
+  Why column is a later, separate step.)
+`why` is a short machine string naming the deciding line(s), stored with the review. Thresholds are module
+constants, so tuning them re-derives calls from stored lines with NO new API call: `finder.py judge2 rederive`.
+
+**29.3 Storage (schema v20; back up the live DB first).** New table `judge2_lines` (posting_id,
+description_hash, prompt_version, line_no, line, section, kind, verdict, evidence, years JSON,
+evidence_downgraded bool; PK posting_id+description_hash+prompt_version+line_no). `judge2_reviews` keeps one row
+per review and its existing columns, so `vw_judge2_latest`, `vw_lens_fit`, the J2 column and the rank feed are
+untouched: `required_fit` = the derived call, `unmet` = the JSON list of required lines rated `unmet`,
+`years_gap` = the first unmet `years_function`, plus new columns `derive_why`, `lines_discarded`,
+`evidence_downgraded`, `contract` (`overall` for §25-era rows, `lines` for these). Old rows stay valid.
+The prompt_version hash covers the new template, so old and new reviews never mix in an evaluation.
+
+**29.4 Evaluation.** `judge2 eval` is unchanged at the posting level (same bar: catch >= 70%, agree >= 85%,
+<= 10% unjudged). Added: a LINE-LEVEL report. Gold rows carry the user's own unmet lines
+(`vw_report_feedback_blind.required_unmet`, pipe-separated); for each gold unmet line report whether the judge
+rated a matching line `unmet` / `unclear` / `met` / never listed it (match = normalized containment either
+way). Printed per miss, so a disagreement names the line and whether the cause is the background sheet, a
+rule, or the model. Also added: `judge2 eval --compare <prompt_version_a> <prompt_version_b>` prints rows whose
+call differs between two stored runs; run on two runs of the SAME prompt it measures the noise floor. A run
+may be repeated under one prompt_version with `judge2 run --eval-set --rerun --run-tag <tag>` (the tag joins
+the cache key; default tag empty, so production caching is unchanged).
+
+**29.5 Cost and pacing.** Output grows from ~100 tokens to roughly 600-1,200 per posting; the token-aware
+pacing in §25 must count expected OUTPUT tokens too. `thinkingLevel` becomes a setting
+(`JUDGE2_THINKING`, default `minimal`) and joins the prompt_version hash, so a higher level can be evaluated
+as its own version. Max output tokens raised accordingly; a truncated JSON response is `unparseable`, never
+partially accepted. Add a per-call progress line to `judge2.run` (n of N, model, call, elapsed).
+
+**29.6 Privacy and gates.** Unchanged from §25: the same seven payload fields and nothing else; the background
+is the public text or the user's curated sheet, never `rubric_local` / `profile_local`; tests use recorded or
+fake responses only and never open the live DB; a live run still needs `JUDGE2_LIVE_OK=1`. The evidence
+strings stored in `judge2_lines` are quotes from the user's PRIVATE background sheet: they live in the local
+DB only and must never be written to a tracked file, a fixture, a log committed to the repo, or STATUS.md.
+
+**29.7 Order.** Build on a branch in a worktree -> audit -> back up DB -> merge -> dry run -> live round 5 and
+round 6 with the IDENTICAL prompt (noise floor) -> read line-level misses with the user -> tune the sheet,
+the prompt, or the §29.2 constants, in that order of preference (constants are free, the sheet is cheap, the
+prompt costs a run).

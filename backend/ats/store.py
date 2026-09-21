@@ -573,11 +573,26 @@ CREATE OR REPLACE VIEW vw_board_health AS
 
 -- Active bridge (place-scoped) postings, newest first -- the `finder.py bridge` command's own
 -- source view (sprint plan §31.6). Advisory only: nothing here is hidden or filtered by voice.
-CREATE OR REPLACE VIEW vw_bridge_open AS
+--
+-- `vw_bridge_open_all` is every active bridge posting, stale or not (`finder.py bridge
+-- --include-stale` reads this one). `vw_bridge_open` -- the default -- additionally hides a
+-- posting whose `last_seen_at` has not moved in BRIDGE_STALE_DAYS days (orchestrator audit
+-- 2026-09-21, letter E): the literal `10` here must be kept in sync with
+-- backend.ats.bridge.BRIDGE_STALE_DAYS, which is what Python code reads instead of this view
+-- (DuckDB SQL can't import a Python constant). This is what actually retires a place removed
+-- from bridge_places.csv, or heals a transient empty pull letter D's zero-result guard left
+-- open -- neither is a "close", both are simply stopping getting re-confirmed. Evergreen pool
+-- rows follow the same staleness rule as every other bridge row (their `pool` display is a
+-- separate, purely cosmetic thing -- see finder.py cmd_bridge).
+CREATE OR REPLACE VIEW vw_bridge_open_all AS
     SELECT posting_id, employer, title, location_primary, bridge_place, employment_type, pay_min, pay_max,
-           pay_interval, url, first_seen_at, date_diff('day', first_seen_at, now()) AS days_open
+           pay_interval, url, first_seen_at, last_seen_at, date_diff('day', first_seen_at, now()) AS days_open,
+           date_diff('day', last_seen_at, now()) AS days_stale
     FROM postings WHERE track = 'bridge' AND status = 'active'
     ORDER BY first_seen_at DESC;
+
+CREATE OR REPLACE VIEW vw_bridge_open AS
+    SELECT * FROM vw_bridge_open_all WHERE days_stale < 10;   -- BRIDGE_STALE_DAYS, kept in sync by hand
 
 -- How long postings stay up, per employer — the "closed_at - first_seen_at" corpus stat.
 CREATE OR REPLACE VIEW vw_posting_lifetimes AS
@@ -783,7 +798,11 @@ CREATE OR REPLACE VIEW vw_lens_grades AS
                 WHEN l.grade_technical IN ('bullseye','adjacent') THEN 'technical'
                 ELSE 'neither' END AS lens_bucket
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    LEFT JOIN vw_screen_latest s USING (posting_id);
+    LEFT JOIN vw_screen_latest s USING (posting_id)
+    -- Orchestrator audit 2026-09-21, letter F: same belt-and-suspenders `p.track = 'fit'` filter
+    -- vw_lens_fit/vw_shortlist already carry, for consistency -- a bridge posting must never
+    -- reach a report list built off this view either, even if it somehow picked up a judge grade.
+    WHERE p.track = 'fit';
 
 -- Apply/review/hidden tiers, computed from STORED fields only so the formula is tunable without re-judging.
 -- Tiers were set against 61 blind gold rows on 2026-09-18: lens+meets matched the user's own adjacent/bullseye
@@ -808,7 +827,10 @@ CREATE OR REPLACE VIEW vw_selection AS
                lens_label_source(l.scorer, l.lens_grade_source) = 'user_adjudicated' AS adjudicated, l.grade
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
         LEFT JOIN vw_screen_latest s USING (posting_id)
-        WHERE l.required_fit IS NOT NULL OR l.scorer = 'user-adjudicated'
+        -- Orchestrator audit 2026-09-21, letter F: same `p.track = 'fit'` filter as
+        -- vw_lens_fit/vw_shortlist/vw_lens_grades -- a bridge posting never earns an apply/review
+        -- tier.
+        WHERE (l.required_fit IS NOT NULL OR l.scorer = 'user-adjudicated') AND p.track = 'fit'
     )
     SELECT * EXCLUDE (grade),
            CASE WHEN adjudicated THEN CASE WHEN grade IN ('bullseye', 'adjacent') THEN 'apply' ELSE 'hidden' END
@@ -1663,7 +1685,7 @@ def record_board(con, employer, platform, jobs, now, truncated=False, track="fit
     return seen, new, reopened, closed
 
 
-def record_bridge_board(con, employer, platform, jobs, now, attempted_places, place_status):
+def record_bridge_board(con, employer, platform, jobs, now, attempted_places, place_status, log=None):
     """Upserts one bridge board's PLACE-SCOPED pull and closes what genuinely went missing, per
     sprint plan §31.4's data-loss guard.
 
@@ -1680,8 +1702,31 @@ def record_bridge_board(con, employer, platform, jobs, now, attempted_places, pl
     on some LATER ring-1-only run.
 
     `jobs` is the union already computed by the caller (sweep.py's places-strategy pull); each
-    posting dict's `_bridge_places` holds the place names that matched it THIS run.
+    posting dict's `_bridge_places` holds the place names that matched it THIS run. Orchestrator
+    audit 2026-09-21, letter A.3: a job dict with no `_bridge_places` tag (or an empty one) is
+    refused outright -- an untagged bridge row must never reach the database, since it can never
+    be told apart from a genuinely place-scoped one by the close pass below.
+
+    Letter D (same audit): a place that came back with ZERO matched rows this run -- whether
+    because its query genuinely emptied or because of a transient empty response -- closes
+    NOTHING for that place this run, logged as "0 rows for <place>: close skipped". This is
+    stricter than `place_status` alone (which only says the pull didn't error or truncate): a
+    clean-but-empty pull is not evidence of anything, and letter E's staleness rule is what
+    actually retires a place over several such runs.
     """
+    for j in jobs:
+        if not j.get("_bridge_places"):
+            raise ValueError(
+                f"{employer} ({platform}): bridge posting {j.get('req_id')!r} has no _bridge_places "
+                f"tag -- refusing to write an untagged bridge row")
+    place_counts = {}
+    for j in jobs:
+        for p in j["_bridge_places"]:
+            place_counts[p] = place_counts.get(p, 0) + 1
+    for p in sorted(attempted_places):
+        if place_status.get(p) and not place_counts.get(p):
+            if log:
+                log(f"    0 rows for {p!r}: close skipped")
     con.execute("BEGIN")
     try:
         prior = dict(con.execute(
@@ -1722,8 +1767,11 @@ def record_bridge_board(con, employer, platform, jobs, now, attempted_places, pl
         for pid, places in candidates:
             place_list = [p for p in (places or "").split("|") if p]
             # Never close an untagged row (defensive only -- every bridge row gets a tag on write)
-            # and never close a row with ANY place this run did not attempt or did not clear.
-            if place_list and all(p in attempted_places and place_status.get(p) for p in place_list):
+            # and never close a row with ANY place this run did not attempt, did not clear, or
+            # (letter D) cleared with zero matched rows -- a transient empty response must never
+            # close a place on its own.
+            if place_list and all(p in attempted_places and place_status.get(p) and place_counts.get(p)
+                                  for p in place_list):
                 con.execute("UPDATE postings SET status = 'closed', closed_at = ? WHERE posting_id = ?", [now, pid])
                 closed += 1
         con.execute("DROP TABLE stage")

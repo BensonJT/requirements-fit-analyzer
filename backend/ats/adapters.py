@@ -275,9 +275,14 @@ def _workday_places_jobs(row, places, max_pages=None, log=print):
             place_status[place["place"]] = not truncated
             city, parsed_state = B.parse_place(place["place"])
             state = place.get("state") or parsed_state
-            dropped = 0
+            allow_no_state = bool(place.get("allow_no_state"))
+            dropped = multi_site = 0
             for p in got:
-                if not B.location_matches(p.get("location_primary") or "", city, state):
+                loc = p.get("location_primary") or ""
+                if B.is_multi_site_text(loc):
+                    multi_site += 1
+                    continue
+                if not B.location_matches(loc, city, state, allow_no_state=allow_no_state):
                     dropped += 1
                     continue
                 key = p.get("req_id") or p.get("url")
@@ -288,9 +293,9 @@ def _workday_places_jobs(row, places, max_pages=None, log=print):
                     seen[key] = entry
                 if place["place"] not in entry["_bridge_places"]:
                     entry["_bridge_places"].append(place["place"])
-            if dropped:
+            if dropped or multi_site:
                 log(f"    place {place['place']!r}: dropped {dropped} result(s) whose location text "
-                    f"did not actually name this place")
+                    f"did not actually name this place, {multi_site} multi-site result(s) skipped")
     return PlacesPulled(list(seen.values()), place_status)
 
 
@@ -975,9 +980,14 @@ def _eightfold_places_jobs(row, places, max_pages=None, log=print):
             place_status[place["place"]] = not truncated
             city, parsed_state = B.parse_place(place["place"])
             state = place.get("state") or parsed_state
-            dropped = 0
+            allow_no_state = bool(place.get("allow_no_state"))
+            dropped = multi_site = 0
             for p in got:
-                if not B.location_matches(p.get("location_primary") or "", city, state):
+                loc = p.get("location_primary") or ""
+                if B.is_multi_site_text(loc):
+                    multi_site += 1
+                    continue
+                if not B.location_matches(loc, city, state, allow_no_state=allow_no_state):
                     dropped += 1
                     continue
                 key = p.get("req_id") or p.get("url")
@@ -988,9 +998,9 @@ def _eightfold_places_jobs(row, places, max_pages=None, log=print):
                     seen[key] = entry
                 if place["place"] not in entry["_bridge_places"]:
                     entry["_bridge_places"].append(place["place"])
-            if dropped:
+            if dropped or multi_site:
                 log(f"    place {place['place']!r}: dropped {dropped} result(s) whose location text "
-                    f"did not actually name this place")
+                    f"did not actually name this place, {multi_site} multi-site result(s) skipped")
     return PlacesPulled(list(seen.values()), place_status)
 
 
@@ -1171,15 +1181,34 @@ _DETAIL = {
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)
 
+# Platforms with a real places-strategy implementation (sprint plan §31.3). Orchestrator audit
+# 2026-09-21, letter A: `list_jobs` must never silently do an ordinary whole-board pull for a
+# `scope={"strategy": "places", ...}` call on a platform NOT in this set -- see the guard below.
+PLACES_PLATFORMS = frozenset({"workday", "eightfold"})
+
 
 def list_jobs(row, max_pages=None, scope=None):
     """Whole-board pull. Raises on hard failure so the caller never close-passes a
     board it didn't actually read. Returns a `Truncated` list if max_pages tripped.
 
-    `scope` is the board's `board_scope` row; adapters that understand it pull to its plan."""
+    `scope` is the board's `board_scope` row; adapters that understand it pull to its plan.
+
+    A `scope` whose strategy is `places` (the bridge track, sprint plan §31.3) is never forwarded
+    to a platform function that has no `scope` parameter at all -- that used to fall through
+    silently into an ordinary, unfiltered whole-board call (orchestrator audit 2026-09-21, letter
+    A: `greenhouse_jobs(row, max_pages=None)` has no `scope` param, so the old
+    `"scope" in inspect.signature(fn).parameters` guard let a places-scoped pull on such a
+    platform quietly become a whole-board pull). A places-strategy scope now raises outright on
+    any platform outside PLACES_PLATFORMS, before any request is made."""
     fn = _LIST.get(row["platform"])
     if fn is None:
         raise ValueError(f"no adapter for platform {row['platform']!r}")
+    if scope is not None and scope.get("strategy") == "places":
+        if row["platform"] not in PLACES_PLATFORMS:
+            raise ValueError(
+                f"{row['employer']}: platform {row['platform']!r} has no places-scoped adapter "
+                f"(supported: {sorted(PLACES_PLATFORMS)}) -- refusing to fall back to a whole-board pull")
+        return fn(row, max_pages=max_pages, scope=scope)
     if scope is not None and "scope" in inspect.signature(fn).parameters:
         return fn(row, max_pages=max_pages, scope=scope)
     return fn(row, max_pages=max_pages)

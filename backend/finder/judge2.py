@@ -56,16 +56,21 @@ BACKOFF_SECONDS = (2, 8)          # §25 / §10: back off, then fall to the next
 DEFAULT_RPM = 10                  # sane conservative default when GEMINI_RPM is unset
 DEFAULT_TPM = 12_000               # free tier is ~14K tokens/minute PER MODEL; stay under it (GEMINI_TPM overrides)
 CHARS_PER_TOKEN = 4               # crude estimate ("tokens ~ chars/4"), logging/throttle only
-EXPECTED_OUTPUT_TOKENS = 900       # §29.5: per-line output runs ~600-1,200 tokens/posting (was ~100 under the
-                                   # §25 overall-call contract, where the pacing allowance was a flat 400);
-                                   # the token-aware pacing (`_wait` below) must budget for the ANSWER too
-MAX_OUTPUT_TOKENS = 4096          # §29.5: raised so a real per-line answer is never truncated mid-response;
-                                   # a response that IS truncated still parses as unparseable (never partial)
+EXPECTED_OUTPUT_TOKENS = 2000      # §30.5: raised from 900 -- output roughly DOUBLES once the model also rates
+                                   # up to MAX_RESPONSIBILITY_LINES (12) responsibility/duty lines per posting,
+                                   # so the pacing allowance is a matching ~2x-ish dry estimate (not a precise
+                                   # measurement -- no live call has been made under this contract yet), never
+                                   # a hard cap; the token-aware pacing (`_wait` below) must budget for it
+MAX_OUTPUT_TOKENS = 8192          # §30.5: default for minimal thinking (was 4096 under §29.5's line-only
+                                   # contract); a response that IS truncated still parses as unparseable
+                                   # (never partial) -- see the unparseable diagnostics log in run(), §30.5
 REQUIRED_FIT_VALUES = ("meets", "partial", "fails")
 CONFIDENCE_VALUES = ("low", "medium", "high")
-LINE_SECTION_VALUES = ("required", "preferred")
+LINE_SECTION_VALUES = ("required", "preferred", "responsibility")   # §30.1
 LINE_KIND_VALUES = ("clearance", "licence", "years_function", "degree", "tool", "skill")
-LINE_VERDICT_VALUES = ("met", "unmet", "unclear")
+LINE_VERDICT_VALUES = ("met", "unmet", "unclear", "adjacent")   # §30.1: adjacent added
+MAX_RESPONSIBILITY_LINES = 12      # §30.1: the model rates at most this many responsibility/duty lines; a
+                                   # code-side cap (parse_response) in case the model returns more
 
 BACKGROUND_ENV = "JUDGE2_BACKGROUND_FILE"
 LIVE_OK_ENV = "JUDGE2_LIVE_OK"
@@ -111,48 +116,70 @@ def _norm_ws(text: str) -> str:
 
 
 # ---------------------------------------------------------------- 1. prompt + payload
-# §29.1: the model rates ONE line at a time and is asked for no overall call -- that policy moved into code
-# (`derive_required_fit`, §2b below). The clearance wording, the TOOLS rule and the years-in-an-OR-list rule
-# carry over from §25's overall-call prompt, reworded as guidance for rating a single line.
+# §29.1/§30.1: the model rates ONE line at a time and is asked for no overall call -- that policy moved into
+# code (`derive_required_fit`, §2b below). §30 adds a third `section` value (`responsibility`, up to
+# MAX_RESPONSIBILITY_LINES) and a fourth `verdict` value (`adjacent`); the eight reading rules below (§30.2)
+# replace §25/§29's clearance + or-list-years wording, stated generically as how to rate ONE line -- they hold
+# no facts about any specific candidate. The TOOLS rule carries over unchanged.
 PROMPT_TEMPLATE = """You are a strict, independent reviewer. You are given a job posting and a background
 document describing a candidate. For EACH qualification line you find under the posting's Required heading
 (and any Preferred lines you choose to include, marked as such), answer independently: does the background
-show the candidate meets THIS ONE line? You are not asked for an overall call -- that is computed afterward
-from your per-line answers.
+show the candidate meets THIS ONE line? Then do the same for up to twelve of the posting's responsibility /
+duty lines: does the background show the candidate has actually done THIS ONE kind of work? You are not asked
+for an overall call -- that is computed afterward from your per-line answers.
 
 For every REQUIRED qualification line (the parsed Required list below is a hint; the full JD text and its own
-headings are the authority, and can override the hint when they disagree), and any Preferred line you choose
-to rate, return one entry:
+headings are the authority, and can override the hint when they disagree), any Preferred line you choose to
+rate, and up to twelve Responsibility / duty lines from the posting's own responsibilities section, return one
+entry:
 - "line": the JD line, copied CHARACTER-FOR-CHARACTER from the JD text below. Do not paraphrase, summarize or
   combine lines. A line that is not an exact substring of the JD text will be discarded.
-- "section": "required" or "preferred" -- follow the JD's own heading, not the parsed hint, when they disagree.
-- "kind": "clearance", "licence", "years_function", "degree", "tool", or "skill" -- the single best fit.
-- "verdict": "met", "unmet", or "unclear". Use "unclear" when the background is SILENT on this one line (it
-  neither shows nor rules it out) -- a forced two-way answer makes you guess, and "unclear" is not a penalty.
-- "evidence": ONLY for a "met" verdict, the background sentence or phrase you relied on, copied CHARACTER-FOR-
-  CHARACTER from the background document below. A "met" with no evidence, or evidence that is not an exact
-  substring of the background, will be downgraded to "unclear" -- so only answer "met" when you can point to
-  the exact background text that shows it. Leave it out (or empty) for "unmet" / "unclear".
+- "section": "required", "preferred", or "responsibility" -- follow the JD's own heading, not the parsed hint,
+  when they disagree. Rate at most twelve responsibility lines; pick the twelve that most define the role.
+- "kind": "clearance", "licence", "years_function", "degree", "tool", or "skill" -- the single best fit. A
+  responsibility line is "skill" unless another kind plainly fits.
+- "verdict": "met", "unmet", "unclear", or "adjacent". Use "unclear" when the background is SILENT on this one
+  line (it neither shows nor rules it out) -- a forced answer makes you guess, and "unclear" is not a penalty.
+  Use "adjacent" when the background shows the SAME skill practised in a different domain, tool family, or
+  scale -- work that would transfer but is not the thing asked.
+- "evidence": for a "met" OR an "adjacent" verdict, the background sentence or phrase you relied on, copied
+  CHARACTER-FOR-CHARACTER from the background document below. A "met" or "adjacent" with no evidence, or
+  evidence that is not an exact substring of the background, will be downgraded to "unclear" -- so only answer
+  "met" or "adjacent" when you can point to the exact background text that shows it. Leave it out (or empty)
+  for "unmet" / "unclear". "adjacent" is never used for a clearance or licence line.
 - "years": for a "years_function" line only, {"function": "<named function>", "required": <number>,
   "shown": <number, or null if the background does not show a figure>}. Omit or set null for every other kind.
 
-Rules for rating a single line:
-- CLEARANCE. "Ability to obtain" a clearance is NOT a held clearance -- it is obtainable, not already
-  required, and is never a "clearance"-kind hard gate; rate it on what the background shows about the
-  candidate's ability to obtain it. A clearance that must ALREADY be held or active (e.g. "must hold an
-  active TS/SCI", "current Public Trust required") IS a held-clearance line (kind="clearance"); rate it "met"
-  only when the background shows the clearance is currently held. "TS/SCI with ability to obtain a
-  polygraph" is a HELD-clearance line for the TS/SCI itself (kind="clearance"); the polygraph clause is a
-  separate, obtainable matter and never changes this line's verdict.
-- YEARS IN AN "OR" LIST. When a years line lists several functions or domains joined by commas, "or" or
-  "and/or" ("N+ years in A, B, or C"), rate it "met" only when the background shows that at least ONE listed
-  item was the candidate's actual job for N or more years: check it against the background's years-by-
-  function figures and record which item and which years in "years". It is NOT met by adjacent or related
-  experience, by work that merely touched a listed item, by adding partial years across different items, or
-  by a catch-all tail such as "or a related field". If exactly one listed item clearly was the job for N+
-  years, rate "met" even when every other item is absent. If none was, rate "unmet" and set "years" to the
-  item and years asked. Do not rate "met" on such a line without being able to point to the specific item and
-  years in the background.
+Reading rules, for how to rate ONE line:
+1. A domain qualifier applies to every item in its list. "N years in healthcare operations, strategy,
+   analytics, technology, or a related field" asks for each item INSIDE that domain; a generic item never
+   satisfies the line on its own. The same holds when the posting's own function supplies the domain
+   ("relevant experience in HR operations, process design, HR technology").
+2. Systems named in a line set its context. "Experience with <named systems>, approval workflows, or process
+   design and configuration" means that work IN those systems; if the background shows none of the named
+   systems the line is "unmet" (or "adjacent" when the same kind of work was done in a different system).
+3. "N years of directly related / relevant experience" (including a degree ladder, e.g. "Master's and 4 years
+   OR Bachelor's and 6 years") is judged against the posting's OWN responsibilities: pick the rung the
+   candidate's degree selects, then count only years spent doing the KIND of work the responsibilities
+   describe, not tenure in general.
+4. Clearance timing. "Ability to obtain", "eligible for", "required after day 1", or "must obtain within N
+   months" means the clearance is obtainable after hire: rate "met" for a candidate with no disqualifier
+   shown. "Active", "current", "required on day 1", "required to start", a polygraph, or a held level the
+   background does not show means the clearance must already be held: rate "unmet" unless the background
+   shows it is currently held.
+5. A tool named in the posting's own title is a hard gate; trying a tool out, or using it only as an end
+   user, is not experience building with it.
+6. A certification line that names its issuing bodies (especially with wording like "verifiable in the
+   issuer's database") is kind "licence": rate "unmet" unless the background shows that specific issuer.
+7. Finance. Experience with financial data, budgets, forecasts, or cost/benefit models is met by budget-
+   management work done outside a finance department. A line asking for time "in a finance organization",
+   FP&A, accounting, named finance systems, or a role that sits inside the CFO's organization is not met by
+   that same budget-management work.
+8. A posting with no qualifications section at all: its responsibilities ARE the requirements. Still mark
+   them "responsibility" (not "required") -- the overall call is derived from the responsibility ratings
+   alone, outside this prompt.
+
+Other rules for rating a single line:
 - TOOLS. A line naming tools or platforms with "such as", "e.g.", "or similar", "or equivalent", or a list
   joined by "or", is "met" when the background shows ANY comparable tool of the same kind (one dashboard or
   visualization tool for another, one SQL database for another, one work-tracking tool for another). A single
@@ -161,19 +188,23 @@ Rules for rating a single line:
   code, from the posting's title and this line's own wording -- not something you need to judge.
 - PREFERRED lines are informational only. Rate them the same way as required lines, but they never affect the
   Required call -- that logic lives outside this prompt entirely.
+- RESPONSIBILITY lines are rated the same way (met/unmet/unclear/adjacent, with evidence for met/adjacent) but
+  answer a different question -- has the candidate actually DONE this kind of work -- not a qualification gate.
 
 Output ONLY a JSON object, nothing else, no markdown fences, no commentary:
-{"lines": [{"line": "<verbatim JD line>", "section": "required|preferred",
-            "kind": "clearance|licence|years_function|degree|tool|skill", "verdict": "met|unmet|unclear",
-            "evidence": "<verbatim background text, only for met>",
+{"lines": [{"line": "<verbatim JD line>", "section": "required|preferred|responsibility",
+            "kind": "clearance|licence|years_function|degree|tool|skill",
+            "verdict": "met|unmet|unclear|adjacent",
+            "evidence": "<verbatim background text, for met or adjacent>",
             "years": {"function": "<named function>", "required": <number>, "shown": <number>|null} | null},
            ...],
  "held_clearance": true|false, "confidence": "low|medium|high"}
 """
 
 OUTPUT_CONTRACT = (
-    '{"lines": [{"line": str, "section": "required|preferred", '
-    '"kind": "clearance|licence|years_function|degree|tool|skill", "verdict": "met|unmet|unclear", '
+    '{"lines": [{"line": str, "section": "required|preferred|responsibility", '
+    '"kind": "clearance|licence|years_function|degree|tool|skill", '
+    '"verdict": "met|unmet|unclear|adjacent", '
     '"evidence": str, "years": {"function": str, "required": number, "shown": number|null} | null}, ...], '
     '"held_clearance": true|false, "confidence": "low|medium|high"}'
 )
@@ -318,9 +349,10 @@ def _extract_json(text: str) -> Optional[dict]:
 
 @dataclass
 class LineVerdict:
-    """One validated, per-line answer (§29.1). `evidence` is '' unless `verdict == "met"` and it survived the
-    substring guard; `evidence_downgraded` says whether THIS line's `met` was downgraded to `unclear` because
-    its evidence was missing or fabricated."""
+    """One validated, per-line answer (§29.1, extended §30.1). `evidence` is '' unless `verdict` is "met" or
+    "adjacent" and it survived the substring guard; `evidence_downgraded` says whether THIS line's `met`/
+    `adjacent` was downgraded to `unclear` because its evidence was missing or fabricated. `section` is
+    "required", "preferred", or "responsibility" (§30.1)."""
     line: str
     section: str
     kind: str
@@ -333,11 +365,14 @@ class LineVerdict:
 @dataclass
 class ValidatedReview:
     """One parsed-and-validated model response. `lines` are the entries that survived both guards (§2 above);
-    `lines_discarded` counts entries dropped outright (bad enum, non-verbatim `line`, malformed shape) and
-    `evidence_downgraded` counts `met` verdicts downgraded to `unclear` (kept, not dropped). The overall call
-    is NOT computed here -- parse_response has no posting title to apply §29.2's tool-in-title check with;
-    call `apply_derivation(title=...)` once the posting is known, which fills `required_fit` / `derive_why` /
-    `unmet` / `years_gap` from `derive_required_fit` (§2b) so every caller reads one finished shape."""
+    `lines_discarded` counts entries dropped outright (bad enum, non-verbatim `line`, malformed shape) EXCEPT
+    a discarded `responsibility`-section entry, which is never counted here (§30.1/§30.3 -- only a discarded
+    `required` entry caps `meets` at `partial`). `evidence_downgraded` counts `met`/`adjacent` verdicts
+    downgraded to `unclear` (kept, not dropped). The overall call is NOT computed here -- parse_response has
+    no posting title to apply §29.2's tool-in-title check with; call `apply_derivation(title=...)` once the
+    posting is known, which fills `required_fit` / `derive_why` / `unmet` / `years_gap` / `lines_fit` /
+    `shape_fit` / `shape_score` / `resp_met` / `resp_adjacent` / `resp_unmet` (§30.3-4) so every caller reads
+    one finished shape."""
     lines: list = field(default_factory=list)
     held_clearance: Optional[bool] = None
     confidence: Optional[str] = None
@@ -348,6 +383,12 @@ class ValidatedReview:
     derive_why: Optional[str] = None
     unmet: list = field(default_factory=list)
     years_gap: Optional[dict] = None
+    lines_fit: Optional[str] = None
+    shape_fit: Optional[str] = None
+    shape_score: Optional[float] = None
+    resp_met: int = 0
+    resp_adjacent: int = 0
+    resp_unmet: int = 0
 
     def apply_derivation(self, *, title: str = "") -> None:
         fit, why = derive_required_fit(self.lines, title=title, lines_discarded=self.lines_discarded)
@@ -357,17 +398,27 @@ class ValidatedReview:
         self.years_gap = next((l.years for l in self.lines
                                if l.section == "required" and l.kind == "years_function"
                                and l.verdict == "unmet" and l.years), None)
+        lfit, _lwhy = lines_fit(self.lines, title=title, lines_discarded=self.lines_discarded)
+        self.lines_fit = lfit
+        sfit, sscore, (m, a, u) = shape_fit(self.lines)
+        self.shape_fit = sfit
+        self.shape_score = sscore
+        self.resp_met, self.resp_adjacent, self.resp_unmet = m, a, u
 
 
 def parse_response(raw_text: str, jd_text_sent: str, background_text_sent: str = "",
                    *, log=print) -> Optional[ValidatedReview]:
     """Parses and validates one model response against the JD and background text that were actually SENT.
     Returns None (unparseable / no usable `lines` list -- logged and counted, never recorded as a verdict) or
-    a ValidatedReview with both §29.1/§29.2 guards already applied:
+    a ValidatedReview with the §29.1/§29.2/§30.1 guards already applied:
       - `line` must be a VERBATIM (whitespace-normalized, case-sensitive) substring of the JD text sent, or
         the whole entry is discarded (invalid `section`/`kind`/`verdict` enums discard it the same way).
-      - a `met` verdict whose `evidence` is empty or not a verbatim substring of the background text sent is
-        downgraded to `unclear` (kept, counted) rather than trusted at face value.
+      - a `met` or `adjacent` verdict whose `evidence` is empty or not a verbatim substring of the background
+        text sent is downgraded to `unclear` (kept, counted) rather than trusted at face value.
+      - `adjacent` on a `clearance` or `licence` line is coerced to `unmet` (§30.1 -- it is not a meaningful
+        answer to a held-clearance/licence gate).
+      - at most MAX_RESPONSIBILITY_LINES `responsibility`-section entries are kept (document order); any past
+        the cap are dropped, uncounted.
     Never partially accepts a truncated/unparseable response: `_extract_json` already returns None for a
     response cut off mid-object (no balanced `{...}` to find), so this function does too."""
     obj = _extract_json(raw_text)
@@ -388,36 +439,54 @@ def parse_response(raw_text: str, jd_text_sent: str, background_text_sent: str =
     jd_norm = _norm_ws(jd_text_sent)
     bg_norm = _norm_ws(background_text_sent)
     validated, discarded, downgraded_n = [], 0, 0
+    n_responsibility = 0
     for entry in raw_lines:
         if not isinstance(entry, dict):
-            discarded += 1
-            continue
+            discarded += 1   # unknown section (not even a dict) -- conservative: count toward the required-
+            continue         # line discard guard below, same as an unreadable required entry would
+        # §30.1/§30.3: a discarded RESPONSIBILITY-section entry is never counted toward `discarded` -- only a
+        # discarded `required` entry caps `meets` at `partial` (DISCARDED_LINES_CAP_MEETS below); an entry
+        # whose reported section is anything else (including an invalid one, or missing) is counted, the same
+        # conservative "might have been an unmet hard gate" reasoning §29's guard already used.
+        is_responsibility = entry.get("section") == "responsibility"
         line, section, kind, verdict = (entry.get("line"), entry.get("section"),
                                         entry.get("kind"), entry.get("verdict"))
         if not isinstance(line, str) or not line.strip():
-            discarded += 1
+            discarded += 0 if is_responsibility else 1
             continue
         if (section not in LINE_SECTION_VALUES or kind not in LINE_KIND_VALUES
                 or verdict not in LINE_VERDICT_VALUES):
-            discarded += 1
+            discarded += 0 if is_responsibility else 1
             continue
         if _norm_ws(line) not in jd_norm:
-            discarded += 1
+            discarded += 0 if is_responsibility else 1
+            continue
+        if section == "responsibility" and n_responsibility >= MAX_RESPONSIBILITY_LINES:
+            # §30.1: the model rates AT MOST MAX_RESPONSIBILITY_LINES responsibility lines; a code-side cap in
+            # case it returns more. Dropped silently, uncounted (a responsibility overflow, never a required
+            # discard) -- not logged per-line to avoid noise on an otherwise-normal response.
             continue
         evidence = entry.get("evidence")
         evidence = evidence if isinstance(evidence, str) else ""
+        orig_verdict = verdict
         line_downgraded = False
-        if verdict == "met" and (not evidence.strip() or _norm_ws(evidence) not in bg_norm):
+        if verdict == "adjacent" and kind in ("clearance", "licence"):
+            # §30.1: "adjacent" is not a meaningful answer to a held-clearance/licence gate -- either the
+            # candidate holds it (or can obtain it, per the clearance-timing rule) or does not.
+            verdict = "unmet"
+        elif verdict in ("met", "adjacent") and (not evidence.strip() or _norm_ws(evidence) not in bg_norm):
             verdict, line_downgraded = "unclear", True
             downgraded_n += 1
         years = entry.get("years")
         if not (years is None or (isinstance(years, dict) and "function" in years and "required" in years)):
             years = None
         validated.append(LineVerdict(line=line, section=section, kind=kind, verdict=verdict,
-                                     evidence=evidence if verdict == "met" else "", years=years,
+                                     evidence=evidence if verdict in ("met", "adjacent") else "", years=years,
                                      evidence_downgraded=line_downgraded))
+        if section == "responsibility":
+            n_responsibility += 1
         if line_downgraded:
-            log(f"judge2: 'met' downgraded to 'unclear' (evidence missing/not verbatim): {line!r}")
+            log(f"judge2: '{orig_verdict}' downgraded to 'unclear' (evidence missing/not verbatim): {line!r}")
 
     return ValidatedReview(lines=validated, held_clearance=held_clearance, confidence=confidence,
                            lines_discarded=discarded, evidence_downgraded=downgraded_n, raw_response=raw_text)
@@ -553,21 +622,30 @@ def _collapse_degree_ladder(required: list) -> list:
     return out
 
 
-def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
-    """§29.2, exactly. Pure function, no I/O: `lines` is an iterable of validated per-line entries (LineVerdict
-    or plain dicts with the same keys/attributes -- see `_get`); only `section == "required"` entries count,
-    Preferred lines never affect the call. Returns `(required_fit, why)`:
-      - zero required lines survived validation -> `(None, why)` -- "no call", the caller/evaluate() must
-        treat this as unjudged, never as a verdict.
+def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
+    """§29.2, extended by §30.3's `adjacent` handling. Pure function, no I/O: `lines` is an iterable of
+    validated per-line entries (LineVerdict or plain dicts with the same keys/attributes -- see `_get`); only
+    `section == "required"` entries count, Preferred and Responsibility lines never affect this call. Returns
+    `(lines_fit, why)`:
+      - zero required lines survived validation -> `(None, why)` -- "no call".
       - a HARD GATE (`clearance`, `licence`, `years_function`, or a `tool` line where the tool IS the job,
         per `_tool_is_the_job`) rated `unmet` -> `fails`.
       - more than `MAJORITY_UNMET_FRACTION` of ALL required lines rated `unmet` -> `fails` (a broader net than
-        the hard-gate check alone: several soft gaps together are also disqualifying).
+        the hard-gate check alone: several soft gaps together are also disqualifying). `adjacent` is never
+        counted as `unmet` here.
       - a hard gate rated `unclear` (and no `fails` condition above fired) -> `partial`, never `meets`.
-      - at most `SOFT_UNMET_MEETS_MAX` soft required lines (`tool`/`skill`/`degree`, not promoted to hard)
-        `unmet` AND at most `SOFT_UNCLEAR_MEETS_MAX_FRACTION` of the soft lines `unclear` -> `meets` (the "lone
+      - §30.3 BRIDGE: a hard gate (always `years_function` in practice -- `clearance`/`licence` adjacent is
+        coerced to `unmet` at parse time) rated `adjacent`: with every OTHER hard gate `met`, exactly one
+        adjacent hard gate leaves `meets` reachable (why says `bridged: <line>` when the call lands on
+        `meets`); two or more adjacent hard gates, or one adjacent hard gate beside another hard gate not
+        `met`, caps the call at `partial`. `adjacent` never produces `fails` by itself.
+      - a soft required line (`tool`/`skill`/`degree`, not promoted to hard) rated `adjacent` counts as
+        NEITHER met nor unmet -- excluded from both the soft-unmet and soft-unclear tallies.
+      - at most `SOFT_UNMET_MEETS_MAX` soft required lines `unmet` AND at most
+        `SOFT_UNCLEAR_MEETS_MAX_FRACTION` of the (non-adjacent) soft lines `unclear` -> `meets` (the "lone
         learnable gap" §25/§29 both allow) -- unless `lines_discarded` > 0 and `DISCARDED_LINES_CAP_MEETS`,
-        which caps the call at `partial` (a dropped entry may have been an unmet hard gate).
+        which caps the call at `partial` (a dropped `required` entry may have been an unmet hard gate;
+        `lines_discarded` itself never counts a discarded `responsibility` entry -- see parse_response).
       - otherwise -> `partial`.
     """
     required = [l for l in lines if _get(l, "section") == "required"]
@@ -592,18 +670,109 @@ def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> 
     if hard_unclear:
         return "partial", f"hard gate unclear: {_get(hard_unclear[0], 'line')}"
 
-    soft_unmet = [l for l in soft if _effective_verdict(l) == "unmet"]
-    soft_unclear = [l for l in soft if _effective_verdict(l) == "unclear"]
+    # §30.3 bridge: a lone adjacent hard gate, with every OTHER hard gate met, leaves `meets` reachable.
+    hard_adjacent = [l for l in hard if _effective_verdict(l) == "adjacent"]
+    bridge_line = None
+    if len(hard_adjacent) >= 2:
+        return "partial", f"{len(hard_adjacent)} hard gates adjacent"
+    if len(hard_adjacent) == 1:
+        bridge_line = hard_adjacent[0]
+        others_met = all(_effective_verdict(l) == "met" for l in hard if l is not bridge_line)
+        if not others_met:
+            return "partial", f"hard gate adjacent, not bridgeable: {_get(bridge_line, 'line')}"
+
+    # A soft `adjacent` line counts as neither met nor unmet -- excluded from both tallies below.
+    soft_scored = [(l, _effective_verdict(l)) for l in soft if _effective_verdict(l) != "adjacent"]
+    soft_unmet = [l for l, v in soft_scored if v == "unmet"]
+    soft_unclear = [l for l, v in soft_scored if v == "unclear"]
     if len(soft_unmet) > SOFT_UNMET_MEETS_MAX:
         return "partial", f"{len(soft_unmet)} soft required lines unmet"
-    if soft and len(soft_unclear) > len(soft) * SOFT_UNCLEAR_MEETS_MAX_FRACTION:
-        return "partial", f"{len(soft_unclear)} of {len(soft)} soft required lines unclear"
+    if soft_scored and len(soft_unclear) > len(soft_scored) * SOFT_UNCLEAR_MEETS_MAX_FRACTION:
+        return "partial", f"{len(soft_unclear)} of {len(soft_scored)} soft required lines unclear"
     if lines_discarded and DISCARDED_LINES_CAP_MEETS:
         return "partial", f"{lines_discarded} line(s) dropped by validation; meets cannot be confirmed"
+    if bridge_line is not None:
+        return "meets", f"bridged: {_get(bridge_line, 'line')}"
     why = "all hard gates met, no soft gap"
     if soft_unmet:
         why = f"all hard gates met; lone soft gap: {_get(soft_unmet[0], 'line')}"
     return "meets", why
+
+
+# ---------------------------------------------------------------- 2c. role shape (§30.3, pure, no I/O)
+SHAPE_MIN_LINES = 4          # fewer than this many GRADED (met/adjacent/unmet, unclear excluded) responsibility
+                             # lines -> shape has no opinion (`shape_fit` NULL)
+SHAPE_WRONG_BELOW = 0.45     # shape_score below this -> `wrong`
+SHAPE_FITS_FROM = 0.60       # shape_score at or above this -> `fits`; between the two thresholds -> `split`
+
+
+def shape_score(lines) -> tuple:
+    """§30.3: `(met + 0.5 * adjacent) / (met + adjacent + unmet)` over `section == "responsibility"` lines;
+    `unclear` responsibility lines are ignored entirely (neither numerator nor denominator). Returns
+    `(score_or_None, (met, adjacent, unmet))` -- the raw counts are returned unconditionally (0 each when no
+    responsibility lines were graded) so callers can store `resp_met`/`resp_adjacent`/`resp_unmet` even when
+    the score itself is NULL. `score` is None when fewer than `SHAPE_MIN_LINES` lines were graded (no opinion,
+    never a 0.0 "wrong")."""
+    resp = [l for l in lines if _get(l, "section") == "responsibility"]
+    met = sum(1 for l in resp if _get(l, "verdict") == "met")
+    adjacent = sum(1 for l in resp if _get(l, "verdict") == "adjacent")
+    unmet = sum(1 for l in resp if _get(l, "verdict") == "unmet")
+    graded = met + adjacent + unmet
+    if graded < SHAPE_MIN_LINES:
+        return None, (met, adjacent, unmet)
+    return (met + 0.5 * adjacent) / graded, (met, adjacent, unmet)
+
+
+def shape_fit(lines) -> tuple:
+    """§30.3: `(shape_fit, shape_score, (met, adjacent, unmet))`. `shape_fit` is `None` (no opinion) when
+    `shape_score` is `None`; otherwise `wrong` below `SHAPE_WRONG_BELOW`, `fits` at or above `SHAPE_FITS_FROM`,
+    else `split`."""
+    score, counts = shape_score(lines)
+    if score is None:
+        return None, None, counts
+    if score < SHAPE_WRONG_BELOW:
+        return "wrong", score, counts
+    if score >= SHAPE_FITS_FROM:
+        return "fits", score, counts
+    return "split", score, counts
+
+
+def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
+    """§30.3: THE one call the rank and `evaluate()` read, combining `lines_fit` (the Required-block gates,
+    §29.2 extended by the bridge rule above) and `shape_fit` (the role-shape read over responsibility lines):
+      - `fails` if `lines_fit` is `fails` OR `shape_fit` is `wrong`.
+      - `meets` if `lines_fit` is `meets` AND `shape_fit` is `fits` or `None` (no shape opinion).
+      - otherwise `partial`.
+      - Rule 8 (a posting with no qualifications section -- zero required lines -- and a non-NULL shape):
+        `fits` -> `meets`, `split` -> `partial`, `wrong` -> `fails`.
+      - Zero required lines AND a NULL shape -> `(None, why)`, "no call", exactly as before §30.
+    `why` names WHICH test decided: the existing `lines_fit` wording (kept verbatim for hard-gate/majority/
+    soft-gap decisions, including `bridged: <line>` for a bridged `meets`) when `lines_fit` alone decided it;
+    `shape: <fits|split|wrong> (m/a/u = <met>/<adjacent>/<unmet>)` when the shape test is what decided the
+    call (a shape-driven downgrade from a `lines_fit` `meets`, a shape-only call under rule 8, or a shape
+    `wrong` overriding an otherwise-passing `lines_fit`)."""
+    fit_l, why_l = lines_fit(lines, title=title, lines_discarded=lines_discarded)
+    sfit, sscore, (m, a, u) = shape_fit(lines)
+    shape_why = f"shape: {sfit} (m/a/u = {m}/{a}/{u})" if sfit is not None else None
+
+    if fit_l is None:
+        # Rule 8: no qualifications section at all -- the call comes from shape alone, when shape has one.
+        if sfit is None:
+            return None, why_l
+        if sfit == "fits":
+            return "meets", shape_why
+        if sfit == "split":
+            return "partial", shape_why
+        return "fails", shape_why   # wrong
+
+    if fit_l == "fails":
+        return "fails", why_l
+    if sfit == "wrong":
+        return "fails", shape_why
+    if fit_l == "meets" and sfit in ("fits", None):
+        return "meets", why_l
+    # fit_l == "partial", or fit_l == "meets" downgraded by a "split" shape
+    return "partial", why_l if fit_l == "partial" else shape_why
 
 
 # ---------------------------------------------------------------- 3. client (transport + sleep always injected)
@@ -637,6 +806,26 @@ def _gemini_text(response_json: dict) -> Optional[str]:
     except (KeyError, IndexError, TypeError):
         return None
     return "".join(texts) if texts else None
+
+
+def _log_unparseable_diagnostics(pid: str, response_json, *, log=print) -> None:
+    """§30.5: when a response is unparseable, log `finishReason` and the `usageMetadata` token counts --
+    NEVER the response text itself (it may quote the private background sheet, §29.6/§30.7) -- before it is
+    discarded. Round 7 (2026-09-20) had four unparseable rows that were `MAX_TOKENS` with the whole output
+    budget spent on thought tokens, and nothing in the log said so at the time; this is the fix. Tolerant of a
+    missing/malformed response shape (every model failed -> `response_json` is None)."""
+    if not isinstance(response_json, dict):
+        log(f"judge2: {pid} unparseable -- no response JSON to diagnose (every model call failed)")
+        return
+    try:
+        finish_reason = response_json["candidates"][0].get("finishReason")
+    except (KeyError, IndexError, TypeError):
+        finish_reason = None
+    usage = response_json.get("usageMetadata")
+    usage = usage if isinstance(usage, dict) else {}
+    counts = {k: usage.get(k) for k in
+             ("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount")}
+    log(f"judge2: {pid} unparseable diagnostics -- finishReason={finish_reason} usageMetadata={counts}")
 
 
 def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_text: str, *,
@@ -709,20 +898,25 @@ def _already_reviewed(con, pid: str, description_hash: str, pv: str) -> bool:
 
 def _insert_review(con, *, pid, description_hash, pv, model, review: ValidatedReview, prompt_chars: int) -> None:
     """`review` must already have `apply_derivation()` applied (`required_fit`/`derive_why`/`unmet`/
-    `years_gap` filled from §29.2's derived call, per §29.3). The legacy `unmet_discarded`/`downgraded`
-    columns are kept meaningful rather than dropped: `unmet_discarded` mirrors `lines_discarded` (entries the
-    validation guard dropped outright), `downgraded` is true when at least one line's evidence guard fired."""
+    `years_gap`/`lines_fit`/`shape_fit`/`shape_score`/`resp_met`/`resp_adjacent`/`resp_unmet` filled, per
+    §29.3/§30.4). The legacy `unmet_discarded`/`downgraded` columns are kept meaningful rather than dropped:
+    `unmet_discarded` mirrors `lines_discarded` (entries the validation guard dropped outright, EXCLUDING a
+    discarded `responsibility` entry -- see parse_response), `downgraded` is true when at least one line's
+    evidence guard fired."""
     con.execute("""
         INSERT OR REPLACE INTO judge2_reviews (
             posting_id, description_hash, prompt_version, provider, model, required_fit, unmet,
             unmet_discarded, downgraded, held_clearance, years_gap, confidence, raw_response, prompt_chars,
-            reviewed_at, derive_why, lines_discarded, evidence_downgraded, contract
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reviewed_at, derive_why, lines_discarded, evidence_downgraded, contract,
+            lines_fit, shape_fit, shape_score, resp_met, resp_adjacent, resp_unmet
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [pid, description_hash, pv, PROVIDER, model, review.required_fit, json.dumps(review.unmet),
           review.lines_discarded, review.evidence_downgraded > 0, review.held_clearance,
           json.dumps(review.years_gap) if review.years_gap is not None else None, review.confidence,
           review.raw_response, prompt_chars, _now(), review.derive_why, review.lines_discarded,
-          review.evidence_downgraded, "lines"])
+          review.evidence_downgraded, "lines",
+          review.lines_fit, review.shape_fit, review.shape_score, review.resp_met, review.resp_adjacent,
+          review.resp_unmet])
 
 
 def _insert_lines(con, *, pid, description_hash, pv, lines: list) -> None:
@@ -741,10 +935,16 @@ def _insert_lines(con, *, pid, description_hash, pv, lines: list) -> None:
 
 
 def rederive(con, *, log=print) -> dict:
-    """`finder.py judge2 rederive` (§29.2/§29.3): recomputes `required_fit`/`unmet`/`years_gap`/`derive_why`
-    for every stored `contract='lines'` review from its OWN stored `judge2_lines`, with NO new API call --
-    tuning the §29.2 constants (or `_tool_is_the_job`'s heuristic) is then free. §25-era `contract='overall'`
-    rows have no stored lines to rederive from and are left untouched."""
+    """`finder.py judge2 rederive` (§29.2/§29.3, extended §30.3/§30.4): recomputes `required_fit`/`unmet`/
+    `years_gap`/`derive_why`/`lines_fit`/`shape_fit`/`shape_score`/`resp_met`/`resp_adjacent`/`resp_unmet` for
+    every stored `contract='lines'` review from its OWN stored `judge2_lines`, with NO new API call -- tuning
+    the §29.2/§30.3 constants (or `_tool_is_the_job`'s heuristic) is then free. §25-era `contract='overall'`
+    rows have no stored lines to rederive from and are left untouched. `judge2_lines` only ever holds
+    VALIDATED (kept) lines, never a discarded entry, so `lines_fit`'s cap on a discarded `required` entry
+    still reads `n_discarded` from the stored review row (already required-line-scoped at insert time, per
+    parse_response's §30.1 exclusion of `responsibility` discards). A review whose stored lines include no
+    `responsibility`-section rows (an old §29-era 'lines' row, or a posting with no duties rated) rederives
+    `shape_fit`/`shape_score` back to NULL, `resp_met`/`resp_adjacent`/`resp_unmet` to 0 -- never stale."""
     rows = con.execute("""
         SELECT r.posting_id, r.description_hash, r.prompt_version, p.title, r.lines_discarded
         FROM judge2_reviews r JOIN postings p USING (posting_id)
@@ -760,13 +960,17 @@ def rederive(con, *, log=print) -> dict:
                  "years": json.loads(y) if y else None, "evidence_downgraded": ed}
                 for (l, s, k, v, e, y, ed) in line_rows]
         fit, why = derive_required_fit(lines, title=title or "", lines_discarded=n_discarded or 0)
+        lfit, _lwhy = lines_fit(lines, title=title or "", lines_discarded=n_discarded or 0)
+        sfit, sscore, (m, a, u) = shape_fit(lines)
         unmet = [l["line"] for l in lines if l["section"] == "required" and l["verdict"] == "unmet"]
         years_gap = next((l["years"] for l in lines if l["section"] == "required"
                           and l["kind"] == "years_function" and l["verdict"] == "unmet" and l["years"]), None)
         con.execute("""
-            UPDATE judge2_reviews SET required_fit = ?, unmet = ?, years_gap = ?, derive_why = ?
+            UPDATE judge2_reviews SET required_fit = ?, unmet = ?, years_gap = ?, derive_why = ?,
+                   lines_fit = ?, shape_fit = ?, shape_score = ?, resp_met = ?, resp_adjacent = ?, resp_unmet = ?
             WHERE posting_id = ? AND description_hash = ? AND prompt_version = ?
-        """, [fit, json.dumps(unmet), json.dumps(years_gap) if years_gap is not None else None, why, pid, dh, pv])
+        """, [fit, json.dumps(unmet), json.dumps(years_gap) if years_gap is not None else None, why,
+              lfit, sfit, sscore, m, a, u, pid, dh, pv])
         updated += 1
     log(f"judge2.rederive: {updated} review(s) recomputed from stored lines (no API call)")
     return {"updated": updated}
@@ -881,6 +1085,7 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
                       if raw_text else None)
         if review is None:
             unparseable += 1
+            _log_unparseable_diagnostics(pid, data, log=log)
             log(f"judge2: {pid} gave no usable verdict after one re-ask; recording nothing")
             continue
         review.apply_derivation(title=title)
@@ -1018,7 +1223,11 @@ def line_level_report(con, *, background: str = "public", background_path: Optio
     judge rated a MATCHING line (normalized containment either way -- neither side need quote the other
     exactly) `unmet` / `unclear` / `met`, or never listed a matching line at all. This is a finer-grained
     companion to `evaluate()`'s posting-level catch/agree rates: it names the specific line, so a miss can be
-    traced to the background sheet, a prompt rule, or the model -- not just "the call disagreed"."""
+    traced to the background sheet, a prompt rule, or the model -- not just "the call disagreed". §30.6: the
+    match against `judge2_lines` below is NOT filtered by `section`, so a gold unmet line is matched against a
+    `responsibility` line the judge rated exactly the same way it is matched against a `required` line --
+    this already covers §30.6's "also matches gold unmet lines against responsibility lines" with no code
+    change beyond the model now storing responsibility lines at all."""
     background_text = get_background(background, path=background_path)
     pv = prompt_version_override or prompt_version(background_text)
     gold_rows = con.execute("""

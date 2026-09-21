@@ -26,7 +26,17 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 20  # v20 (2026-09-20): the second judge answers line-by-line instead of an overall call
+SCHEMA_VERSION = 21  # v21 (2026-09-21): role shape from graded responsibilities (sprint plan §30). Additive
+                     #                  only -- `judge2_reviews` gains six nullable columns via the
+                     #                  `_add_missing_columns` pattern (`lines_fit`, `shape_fit`,
+                     #                  `shape_score`, `resp_met`, `resp_adjacent`, `resp_unmet`); old rows
+                     #                  keep NULL (0 for the three counts once rederived) until `judge2
+                     #                  rederive` fills them from stored lines. `judge2_lines` needs no new
+                     #                  column -- `section`/`verdict` are plain text and already accept the
+                     #                  new `responsibility` / `adjacent` values. `vw_judge2_latest` is
+                     #                  `SELECT r.*` from `judge2_reviews`, so it exposes the new columns with
+                     #                  no view edit needed;
+                     # v20 (2026-09-20): the second judge answers line-by-line instead of an overall call
                      #                  (sprint plan §29). New table `judge2_lines` (one row per rated JD
                      #                  line, PK posting_id+description_hash+prompt_version+line_no; CREATE
                      #                  IF NOT EXISTS below is enough, additive). `judge2_reviews` gains four
@@ -294,6 +304,18 @@ CREATE TABLE IF NOT EXISTS judge2_reviews (
     evidence_downgraded INTEGER NOT NULL DEFAULT 0, -- v20: count of `met` lines downgraded to `unclear` by the
                                                   -- evidence-substring guard -- 0 for 'overall' rows
     contract          VARCHAR NOT NULL DEFAULT 'overall', -- 'overall' (§25 rows) | 'lines' (§29 rows)
+    lines_fit         VARCHAR,                   -- v21 (§30.3): the Required-block-only call (§29.2 extended
+                                                  -- by the `adjacent` bridge rule), BEFORE role shape is
+                                                  -- folded in. NULL on every row written before §30 (old
+                                                  -- 'lines' rows fill it via `judge2 rederive`; 'overall' rows
+                                                  -- never will -- they have no stored lines to derive it from).
+    shape_fit         VARCHAR,                   -- v21 (§30.3): wrong | split | fits | NULL (fewer than
+                                                  -- SHAPE_MIN_LINES graded responsibility lines -- no opinion)
+    shape_score       DOUBLE,                    -- v21 (§30.3): (met + 0.5*adjacent) / (met+adjacent+unmet)
+                                                  -- over responsibility lines, or NULL alongside shape_fit
+    resp_met          INTEGER,                   -- v21: responsibility lines rated met (0 when none graded)
+    resp_adjacent     INTEGER,                   -- v21: responsibility lines rated adjacent
+    resp_unmet        INTEGER,                   -- v21: responsibility lines rated unmet
     PRIMARY KEY (posting_id, description_hash, prompt_version)
 );
 
@@ -842,6 +864,10 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                -- when `judge2_bar_passed` -- the latest STORED evaluation for j2.prompt_version passed the bar.
                j2.required_fit AS judge2_required, j2.unmet AS judge2_unmet, j2.held_clearance AS judge2_held_clearance,
                j2.prompt_version AS judge2_prompt_version,
+               -- v21 (sprint plan §30.4): `derive_why` says WHICH test decided the call (a required-line gate,
+               -- or role shape, or a bridge) -- read here only to give the Why text a brief shape-decided note
+               -- below (§30's item 5); `required_fit` stays the ONE value the rank itself reads.
+               j2.derive_why AS judge2_derive_why,
                je.passed AS judge2_bar_passed
         FROM postings p
         JOIN vw_screen_latest s USING (posting_id)
@@ -966,13 +992,23 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                coalesce(nullif(concat_ws(' + ', lens_phrase('process', grade_process, fit_process),
                                                 lens_phrase('technical', grade_technical, fit_technical),
                                                 lens_phrase('AI', grade_ai, fit_ai)), ''), 'no strong lens'),
+               -- §30's item 5: when ROLE SHAPE (not a required-line gate) decided the call, say so briefly --
+               -- `judge2_unmet_first` is empty in exactly that case (a shape-only or shape-downgraded call
+               -- has no unmet REQUIRED line to quote), so the fallback below already reaches for
+               -- `judge2_derive_why` (e.g. "shape: wrong (m/a/u = 2/3/6)", "bridged: <line>") instead of the
+               -- generic "see posting". This never adds a new rank input -- `judge2_required` (from
+               -- `required_fit`, §30.3's one combined call) remains the only value the rank reads.
                CASE WHEN effective_required_source = 'judge2' THEN
                         CASE judge2_required
                              WHEN 'meets' THEN 'Required: meets (2nd judge)'
+                                  || CASE WHEN judge2_derive_why LIKE 'shape:%' OR judge2_derive_why LIKE 'bridged:%'
+                                          THEN ' [' || judge2_derive_why || ']' ELSE '' END
                              WHEN 'partial' THEN 'Required partial (2nd judge): '
-                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''), 'see posting')
+                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''),
+                                              coalesce(judge2_derive_why, 'see posting'))
                              WHEN 'fails' THEN 'Required FAILS (2nd judge): '
-                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''), 'see posting')
+                                  || coalesce(nullif(left(judge2_unmet_first, 140), ''),
+                                              coalesce(judge2_derive_why, 'see posting'))
                         END
                     ELSE CASE required_fit
                         WHEN 'meets' THEN 'Required: meets'
@@ -1267,7 +1303,13 @@ def _add_missing_columns(con):
                                 ("judge2_reviews", "derive_why", "VARCHAR"),
                                 ("judge2_reviews", "lines_discarded", "INTEGER DEFAULT 0"),
                                 ("judge2_reviews", "evidence_downgraded", "INTEGER DEFAULT 0"),
-                                ("judge2_reviews", "contract", "VARCHAR DEFAULT 'overall'")):
+                                ("judge2_reviews", "contract", "VARCHAR DEFAULT 'overall'"),
+                                ("judge2_reviews", "lines_fit", "VARCHAR"),
+                                ("judge2_reviews", "shape_fit", "VARCHAR"),
+                                ("judge2_reviews", "shape_score", "DOUBLE"),
+                                ("judge2_reviews", "resp_met", "INTEGER"),
+                                ("judge2_reviews", "resp_adjacent", "INTEGER"),
+                                ("judge2_reviews", "resp_unmet", "INTEGER")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":

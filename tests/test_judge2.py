@@ -1265,11 +1265,75 @@ def test_derive_clearance_adjacent_fed_directly_not_bridgeable():
 
 
 def test_derive_adjacent_soft_line_counts_as_neither_met_nor_unmet():
+    # a second, MET soft line keeps the adjacent share at exactly half (not "more than half"), so the
+    # mostly-adjacent cap below does not fire and the point of this test -- adjacent is neither a gap nor an
+    # unclear -- still holds.
     lines = [_line(kind="years_function", verdict="met", line="L1", years=None),
+            _line(kind="skill", verdict="met", line="L2"),
             dict(_line(kind="tool", verdict="adjacent", line="Familiarity with a comparable BI tool"),
                 evidence="used a similar dashboard tool")]
     fit, _why = judge2.derive_required_fit(lines, title="Analyst")
     assert fit == "meets"   # the adjacent soft line is neither a gap nor an unclear -- meets is still reachable
+
+
+def test_derive_mostly_adjacent_soft_lines_cap_at_partial():
+    # user ruling, 2026-09-21: six soft required lines, all `adjacent`, no hard gates -- little is actually
+    # MET, so this is not a `meets` even though `adjacent` is neither an unmet gap nor an unclear.
+    lines = [_line(kind="skill", verdict="adjacent", line=f"L{i}") for i in range(6)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert why == "6 of 6 soft required lines adjacent"
+
+
+def test_derive_soft_lines_exactly_half_adjacent_still_meets():
+    lines = ([_line(kind="skill", verdict="adjacent", line=f"A{i}") for i in range(3)]
+             + [_line(kind="skill", verdict="met", line=f"M{i}") for i in range(3)])
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"   # exactly half -- not MORE than half -- so the cap does not fire
+
+
+def test_derive_soft_lines_more_than_half_adjacent_caps_partial():
+    lines = ([_line(kind="skill", verdict="adjacent", line=f"A{i}") for i in range(4)]
+             + [_line(kind="skill", verdict="met", line=f"M{i}") for i in range(2)])
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert "adjacent" in why
+
+
+def test_derive_one_soft_adjacent_among_mostly_met_soft_lines_still_meets():
+    # existing behaviour preserved: a lone adjacent soft line beside a met hard gate and mostly-met soft
+    # lines is well under the mostly-adjacent threshold.
+    lines = [_line(kind="years_function", verdict="met", line="H1"),
+            _line(kind="skill", verdict="adjacent", line="S1"),
+            _line(kind="skill", verdict="met", line="S2"), _line(kind="skill", verdict="met", line="S3"),
+            _line(kind="skill", verdict="met", line="S4")]
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"
+
+
+def test_derive_mostly_adjacent_soft_lines_cap_disabled_reaches_meets(monkeypatch):
+    monkeypatch.setattr(judge2, "SOFT_ADJACENT_MEETS_MAX_FRACTION", 1.0)
+    lines = [_line(kind="skill", verdict="adjacent", line=f"L{i}") for i in range(6)]
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"
+
+
+def test_derive_years_function_bridge_with_mostly_adjacent_soft_lines_still_partial():
+    # a bridged hard gate is also subject to the mostly-adjacent soft cap -- the bridge alone is not enough.
+    lines = ([_line(kind="years_function", verdict="adjacent", line="H1")]
+             + [_line(kind="skill", verdict="adjacent", line=f"A{i}") for i in range(3)]
+             + [_line(kind="skill", verdict="met", line="M1")])
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert "adjacent" in why and "bridged" not in why
+
+
+def test_derive_no_adjacent_verdicts_anywhere_output_unchanged():
+    # backward-compat: with no `adjacent` verdict anywhere, the new mostly-adjacent check can never fire.
+    lines = [_line(kind="years_function", verdict="met", line="H1"),
+            _line(kind="skill", verdict="met", line="S1"), _line(kind="skill", verdict="met", line="S2")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets" and why == "all hard gates met, no soft gap"
 
 
 def test_derive_shape_wrong_forces_fails_even_when_lines_fit_meets():

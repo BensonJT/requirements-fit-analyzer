@@ -505,6 +505,11 @@ SOFT_UNCLEAR_MEETS_MAX_FRACTION = 0.5   # ...and at most this fraction of soft r
                                     # skills"), and the evidence guard turns an unsupported `met` into
                                     # `unclear`, so counting every soft `unclear` as a gap would make `meets`
                                     # unreachable for an ordinary posting (orchestrator audit, 2026-09-20)
+SOFT_ADJACENT_MEETS_MAX_FRACTION = 0.5   # §30.3: a soft `adjacent` line counts as neither met nor unmet, but
+                                    # a posting whose soft required lines are MOSTLY `adjacent` (little actually
+                                    # `met`) is not a match either -- caps the call at `partial` when more than
+                                    # this fraction of ALL soft required lines are `adjacent` (user ruling,
+                                    # 2026-09-21)
 DISCARDED_LINES_CAP_MEETS = True    # a review with >= 1 entry dropped by validation can be at most `partial`:
                                     # a dropped entry may have been an unmet hard gate the model misquoted, so
                                     # `meets` cannot be confirmed (the §25 guard's spirit, kept under §29)
@@ -642,12 +647,16 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
         beside another hard gate not `met`, caps the call at `partial` (`"hard gate adjacent, not
         bridgeable: <line>"`). `adjacent` never produces `fails` by itself.
       - a soft required line (`tool`/`skill`/`degree`, not promoted to hard) rated `adjacent` counts as
-        NEITHER met nor unmet -- excluded from both the soft-unmet and soft-unclear tallies.
+        NEITHER met nor unmet -- excluded from both the soft-unmet and soft-unclear tallies, but when more
+        than `SOFT_ADJACENT_MEETS_MAX_FRACTION` (0.5) of the soft required lines are `adjacent` the call is
+        capped at `partial` (user ruling 2026-09-21) -- a mostly-`adjacent` soft block is not a match even
+        with no outright soft gap.
       - at most `SOFT_UNMET_MEETS_MAX` soft required lines `unmet` AND at most
-        `SOFT_UNCLEAR_MEETS_MAX_FRACTION` of the (non-adjacent) soft lines `unclear` -> `meets` (the "lone
-        learnable gap" §25/§29 both allow) -- unless `lines_discarded` > 0 and `DISCARDED_LINES_CAP_MEETS`,
-        which caps the call at `partial` (a dropped `required` entry may have been an unmet hard gate;
-        `lines_discarded` itself never counts a discarded `responsibility` entry -- see parse_response).
+        `SOFT_UNCLEAR_MEETS_MAX_FRACTION` of the (non-adjacent) soft lines `unclear` AND at most
+        `SOFT_ADJACENT_MEETS_MAX_FRACTION` of ALL soft lines `adjacent` -> `meets` (the "lone learnable gap"
+        §25/§29 both allow) -- unless `lines_discarded` > 0 and `DISCARDED_LINES_CAP_MEETS`, which caps the
+        call at `partial` (a dropped `required` entry may have been an unmet hard gate; `lines_discarded`
+        itself never counts a discarded `responsibility` entry -- see parse_response).
       - otherwise -> `partial`.
     """
     required = [l for l in lines if _get(l, "section") == "required"]
@@ -696,6 +705,11 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
         return "partial", f"{len(soft_unmet)} soft required lines unmet"
     if soft_scored and len(soft_unclear) > len(soft_scored) * SOFT_UNCLEAR_MEETS_MAX_FRACTION:
         return "partial", f"{len(soft_unclear)} of {len(soft_scored)} soft required lines unclear"
+    n_soft_adjacent = sum(1 for l in soft if _effective_verdict(l) == "adjacent")
+    if soft and n_soft_adjacent > len(soft) * SOFT_ADJACENT_MEETS_MAX_FRACTION:
+        # user ruling, 2026-09-21: a soft `adjacent` line is neither a gap nor a confirmed match -- a posting
+        # whose soft required lines are MOSTLY `adjacent` is not a `meets` even with no outright soft gap.
+        return "partial", f"{n_soft_adjacent} of {len(soft)} soft required lines adjacent"
     if lines_discarded and DISCARDED_LINES_CAP_MEETS:
         return "partial", f"{lines_discarded} line(s) dropped by validation; meets cannot be confirmed"
     if bridge_line is not None:

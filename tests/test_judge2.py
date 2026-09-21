@@ -1228,6 +1228,42 @@ def test_derive_adjacent_hard_gate_not_bridgeable_when_another_hard_gate_not_met
     assert fit == "partial"   # the clearance line's own unclear -> partial fires first, never meets
 
 
+def test_derive_title_tool_adjacent_alone_not_bridgeable():
+    # a `tool` hard gate promoted by _tool_is_the_job (the tool is named in the title) never bridges, even
+    # alone with no other hard gate to fail on (§30.3 grants the bridge to years_function only).
+    lines = [_line(kind="tool", verdict="adjacent", line="Experience with Tableau required.")]
+    fit, why = judge2.derive_required_fit(lines, title="Tableau Analyst")
+    assert fit == "partial"
+    assert "not bridgeable" in why
+
+
+def test_derive_title_tool_adjacent_with_years_function_met_still_partial():
+    lines = [_line(kind="years_function", verdict="met", line="L1"),
+            _line(kind="tool", verdict="adjacent", line="Experience with Tableau required.")]
+    fit, why = judge2.derive_required_fit(lines, title="Tableau Analyst")
+    assert fit == "partial"
+    assert "not bridgeable" in why
+
+
+def test_derive_years_function_adjacent_with_title_tool_met_bridges_to_meets():
+    # the years_function gate is the one rated adjacent this time -- it bridges, and the title-tool gate,
+    # rated met, is just another hard gate that is already met.
+    lines = [_line(kind="years_function", verdict="adjacent", line="L1"),
+            _line(kind="tool", verdict="met", line="Experience with Tableau required.")]
+    fit, why = judge2.derive_required_fit(lines, title="Tableau Analyst")
+    assert fit == "meets"
+    assert why.startswith("bridged:") and "L1" in why
+
+
+def test_derive_clearance_adjacent_fed_directly_not_bridgeable():
+    # parse_response coerces a clearance `adjacent` to `unmet` before it ever reaches here (§30.1), but
+    # lines_fit is a pure function and must not bridge on one even if fed in uncoerced.
+    lines = [_line(kind="clearance", verdict="adjacent", line="L1")]
+    fit, why = judge2.lines_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert "not bridgeable" in why
+
+
 def test_derive_adjacent_soft_line_counts_as_neither_met_nor_unmet():
     lines = [_line(kind="years_function", verdict="met", line="L1", years=None),
             dict(_line(kind="tool", verdict="adjacent", line="Familiarity with a comparable BI tool"),
@@ -1255,6 +1291,30 @@ def test_derive_zero_required_lines_shape_fits_meets():
     fit, why = judge2.derive_required_fit(lines, title="Analyst")
     assert fit == "meets"
     assert why.startswith("shape: fits")
+
+
+def test_derive_zero_required_lines_shape_fits_with_discarded_lines_caps_partial():
+    # rule 8's shape-only `meets` is still subject to the dropped-line guard: a discarded `required` entry
+    # may have been an unmet hard gate the model misquoted, and shape alone cannot rule that out either.
+    lines = [_resp(f"d{i}", "met") for i in range(4)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst", lines_discarded=2)
+    assert fit == "partial"
+    assert "dropped" in why and "shape: fits" in why
+
+
+def test_derive_zero_required_lines_shape_wrong_with_discarded_still_fails():
+    # a `wrong` shape still fails outright -- the discarded-line guard only ever softens `meets`.
+    lines = [_resp(f"d{i}", "unmet") for i in range(4)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst", lines_discarded=2)
+    assert fit == "fails"
+    assert why.startswith("shape: wrong")
+
+
+def test_derive_zero_required_lines_shape_fits_discarded_cap_disabled_reaches_meets(monkeypatch):
+    monkeypatch.setattr(judge2, "DISCARDED_LINES_CAP_MEETS", False)
+    lines = [_resp(f"d{i}", "met") for i in range(4)]
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst", lines_discarded=2)
+    assert fit == "meets"
 
 
 def test_derive_zero_required_lines_shape_split_partial():

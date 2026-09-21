@@ -25,9 +25,13 @@ ROW_COLUMNS = ("posting_id", "employer", "platform", "req_id", "title", "url", "
                "posted_at", "description_text", "first_seen_at", "description_fetched_at")
 
 # New, JD changed since the last screen, or screened under another rules/model version.
+# `p.track = 'fit'` (sprint plan §31.5): a bridge (place-scoped retail) posting is never screened,
+# which is what keeps it out of everything downstream that reads vw_screen_latest -- judge/judge2
+# selection, coverage, vw_lens_fit / rank, the report, retrain inputs -- without needing a
+# track filter re-applied at every one of those sites individually.
 RESCREEN_SQL = """
 SELECT p.posting_id FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
-WHERE p.status = 'active' AND (s.posting_id IS NULL OR s.rules_version IS DISTINCT FROM ?
+WHERE p.status = 'active' AND p.track = 'fit' AND (s.posting_id IS NULL OR s.rules_version IS DISTINCT FROM ?
       OR s.model_version IS DISTINCT FROM ? OR s.screened_at < p.description_fetched_at)"""
 
 
@@ -38,7 +42,7 @@ def _now():
 def _candidate_sql(rv: str, mv: str, since=None, limit=None, full: bool = False, columns: str = "p.posting_id"):
     """(sql, params) selecting `columns` for the rows to screen, newest first."""
     if full:
-        sql, params = "SELECT p.posting_id FROM postings p WHERE p.status = 'active'", []
+        sql, params = "SELECT p.posting_id FROM postings p WHERE p.status = 'active' AND p.track = 'fit'", []
     else:
         sql, params = RESCREEN_SQL, [rv, mv]
     sql = sql.replace("SELECT p.posting_id", f"SELECT {columns}", 1)

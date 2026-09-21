@@ -41,6 +41,22 @@ class Truncated(list):
     truncated = True
 
 
+class PlacesPulled(list):
+    """Result of a `places`-strategy pull (sprint plan §31.3): postings from a UNION of
+    place-scoped queries, each tagged on `_bridge_places` with the place name(s) that matched it.
+    `place_status` ({place: bool}) says which places came back clean (no error, no page-cap
+    truncation) -- the caller's close pass (store.record_bridge_board) closes a posting only when
+    every place it is tagged with is both attempted and True here. Never safe to close-pass with
+    the ORDINARY whole-board absence test (`truncated = True` is a defensive belt-and-suspenders
+    in case this ever reaches sweep.py's generic fit-track path by accident -- the bridge sweep
+    uses record_bridge_board, never record_board, for a PlacesPulled result)."""
+    truncated = True
+
+    def __init__(self, postings, place_status):
+        super().__init__(postings)
+        self.place_status = dict(place_status)
+
+
 def client():
     return httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=True)
 
@@ -172,12 +188,14 @@ def _workday_page_ids(postings):
     return ids
 
 
-def _workday_pull(c, url, public, applied, max_pages):
-    """(postings, truncated) for one filtered pull, paginating CXS to the end."""
+def _workday_pull(c, url, public, applied, max_pages, search_text=""):
+    """(postings, truncated) for one filtered pull, paginating CXS to the end. `search_text`
+    (sprint plan §31.3) is the bridge track's per-place free-text query; every whole-board pull
+    leaves it "" (unfiltered), exactly as before."""
     out, offset, limit, total, pages = [], 0, 20, None, 0     # CXS rejects limit > 20
     clamped, first_page_ids = False, None
     while True:
-        body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": ""}
+        body = {"appliedFacets": applied, "limit": limit, "offset": offset, "searchText": search_text}
         data = _request(c, "POST", url, json=body).json()
         postings = data.get("jobPostings") or []
         if total is None:
@@ -224,8 +242,65 @@ def _workday_probe_total(c, url):
     return workday_true_total(_request(c, "POST", url, json={"appliedFacets": {}, "limit": 1, "offset": 0}).json())
 
 
+def _workday_places_jobs(row, places, max_pages=None, log=print):
+    """PlacesPulled -- one CXS searchText query per place (sprint plan §31.3), unioned on req id
+    and location-checked in code (backend.ats.bridge.location_matches). `places` is
+    registry.load_bridge_places()'s list of {place, ring, search_text, state} dicts. Never a
+    whole-board pull: a board with no places configured is the CALLER's problem (sweep.py skips
+    it loudly), not this function's -- it simply pulls whatever `places` it is given."""
+    from . import bridge as B
+
+    tenant, wd, site = row["identifier_1"], row["identifier_2"], row["identifier_3"]
+    if not site:
+        raise ValueError(f"{row['employer']}: Workday row has no site slug (identifier_3)")
+    url = f"{_workday_host(tenant, wd)}/wday/cxs/{tenant}/{site}/jobs"
+    public = f"https://{tenant}.{wd}.myworkdayjobs.com/{site}"
+    page_cap = max_pages or B.PLACE_PAGE_CAP
+    seen, place_status = {}, {}
+    with client() as c:
+        for place in places:
+            search_text = place.get("search_text") or place["place"]
+            # Seam for a later facet-based lookup (sprint plan §31.3): a place row MAY carry an
+            # explicit facet key + ids once one is known for a given board; none of the boards
+            # probed so far needed one -- searchText alone was enough (§31.1).
+            applied = place.get("facet_applied") or {}
+            try:
+                got, truncated = _workday_pull(c, url, public, applied, page_cap, search_text=search_text)
+            except Exception as e:  # noqa: BLE001 — one bad place must not stop the others
+                log(f"    place {place['place']!r}: FAILED — {type(e).__name__}: {str(e)[:90]}")
+                place_status[place["place"]] = False
+                continue
+            if truncated:
+                log(f"    place {place['place']!r}: hit the {page_cap}-page cap -- not closing on this place")
+            place_status[place["place"]] = not truncated
+            city, parsed_state = B.parse_place(place["place"])
+            state = place.get("state") or parsed_state
+            dropped = 0
+            for p in got:
+                if not B.location_matches(p.get("location_primary") or "", city, state):
+                    dropped += 1
+                    continue
+                key = p.get("req_id") or p.get("url")
+                entry = seen.get(key)
+                if entry is None:
+                    entry = p
+                    entry["_bridge_places"] = []
+                    seen[key] = entry
+                if place["place"] not in entry["_bridge_places"]:
+                    entry["_bridge_places"].append(place["place"])
+            if dropped:
+                log(f"    place {place['place']!r}: dropped {dropped} result(s) whose location text "
+                    f"did not actually name this place")
+    return PlacesPulled(list(seen.values()), place_status)
+
+
 def workday_jobs(row, max_pages=None, scope=None):
-    """One board, pulled according to its stored `board_scope` plan (or a live probe when it has none)."""
+    """One board, pulled according to its stored `board_scope` plan (or a live probe when it has none).
+    A `places` scope (sprint plan §31.3, the bridge track) is a different pull shape entirely --
+    per-place searchText queries, never a live-discovered whole-board plan -- so it is handled by
+    _workday_places_jobs and returned immediately."""
+    if scope and scope.get("strategy") == "places":
+        return _workday_places_jobs(row, scope.get("places") or [], max_pages=max_pages)
     tenant, wd, site = row["identifier_1"], row["identifier_2"], row["identifier_3"]
     if not site:
         raise ValueError(f"{row['employer']}: Workday row has no site slug (identifier_3)")
@@ -867,7 +942,61 @@ def _eightfold_pages(c, url, host, max_pages):
         time.sleep(PAGE_DELAY)
 
 
-def eightfold_jobs(row, max_pages=None):
+def _eightfold_places_jobs(row, places, max_pages=None, log=print):
+    """PlacesPulled -- one Eightfold `query=` search per place (sprint plan §31.3), unioned on the
+    Eightfold id and location-checked in code, same shape as _workday_places_jobs."""
+    from . import bridge as B
+    from urllib.parse import quote as _q
+
+    host, domain = _eightfold_base(row)
+    page_cap = max_pages or B.PLACE_PAGE_CAP
+    seen, place_status = {}, {}
+    with client() as c:
+        base = None
+        for cand in (f"{host}/api/apply/v2/jobs?domain={domain}", f"{host}/api/pcsx/search?domain={domain}"):
+            resp = c.get(f"{cand}&start=0&num=1")
+            if resp.status_code == 403:
+                continue
+            resp.raise_for_status()
+            base = cand
+            break
+        if base is None:
+            raise RuntimeError(f"{row['employer']}: both Eightfold list endpoints refused (403)")
+        for place in places:
+            query = place.get("search_text") or place["place"]
+            try:
+                got, _total, truncated = _eightfold_pages(c, f"{base}&query={_q(query)}", host, page_cap)
+            except Exception as e:  # noqa: BLE001 — one bad place must not stop the others
+                log(f"    place {place['place']!r}: FAILED — {type(e).__name__}: {str(e)[:90]}")
+                place_status[place["place"]] = False
+                continue
+            if truncated:
+                log(f"    place {place['place']!r}: hit the {page_cap}-page cap -- not closing on this place")
+            place_status[place["place"]] = not truncated
+            city, parsed_state = B.parse_place(place["place"])
+            state = place.get("state") or parsed_state
+            dropped = 0
+            for p in got:
+                if not B.location_matches(p.get("location_primary") or "", city, state):
+                    dropped += 1
+                    continue
+                key = p.get("req_id") or p.get("url")
+                entry = seen.get(key)
+                if entry is None:
+                    entry = p
+                    entry["_bridge_places"] = []
+                    seen[key] = entry
+                if place["place"] not in entry["_bridge_places"]:
+                    entry["_bridge_places"].append(place["place"])
+            if dropped:
+                log(f"    place {place['place']!r}: dropped {dropped} result(s) whose location text "
+                    f"did not actually name this place")
+    return PlacesPulled(list(seen.values()), place_status)
+
+
+def eightfold_jobs(row, max_pages=None, scope=None):
+    if scope and scope.get("strategy") == "places":
+        return _eightfold_places_jobs(row, scope.get("places") or [], max_pages=max_pages)
     host, domain = _eightfold_base(row)
     with client() as c:
         base = None

@@ -42,6 +42,7 @@ Usage:
     .venv/bin/python finder.py judge2 rederive                  # §29.2/§29.3: re-derive required_fit from
                                                                    # stored judge2_lines, no API call
     .venv/bin/python finder.py judge2 status                    # counts, discard/downgrade rates, last eval
+    .venv/bin/python finder.py bridge [--max-ring N] [--new-only]  # bridge (place-scoped retail) track's open list (§31.6)
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
 """
@@ -131,6 +132,77 @@ def cmd_facets(con, a):
         return
     print(f"Discovering facets for {len(rows)} Workday board(s)...")
     facets_mod.discover_and_record(con, rows)
+
+
+def cmd_bridge(con, a):
+    """Prints the bridge (place-scoped retail) track's open list -- sprint plan §31.6. Advisory
+    only: nothing is hidden, `--hide-voice-high` is a convenience filter the user must ask for.
+    Sort: ring (ascending), then voice (low first, blank second, high last -- voice-heavy roles
+    are a poor fit, per the user's ruling), then employer preference
+    (registry/bridge_employer_order.csv, absent = no preference), then newest first.
+
+    `--max-ring` (2026-09-21 user ruling, replaces the earlier boolean `--ring2`): rings are any
+    positive integer now, not just 1|2 -- a row at ring > max_ring is left out of the list
+    entirely, same as it was never pulled.
+
+    `evergreen` places (2026-09-21 user ruling): a standing application pool (every site lists the
+    same titles under one shared posted date) makes `days_open` and a NEW mark actively
+    misleading. A posting matched ONLY by evergreen place(s) prints `pool` in place of days-open
+    and is never marked NEW. This is pure display logic driven by the registry's `evergreen`
+    column -- it is never inferred from the data itself."""
+    from backend.ats import bridge as B
+    from backend.ats.registry import load_bridge_employer_order, load_bridge_places
+
+    all_places = load_bridge_places(max_ring=None)  # every configured ring, for the ring/evergreen lookup
+    place_ring = {p["place"]: p["ring"] for p in all_places}
+    place_evergreen = {p["place"]: p["evergreen"] for p in all_places}
+    employer_order = load_bridge_employer_order()
+
+    prior_runs = con.execute(
+        "SELECT DISTINCT ran_at FROM board_runs WHERE track = 'bridge' ORDER BY ran_at DESC LIMIT 2").fetchall()
+    new_cutoff = prior_runs[1][0] if len(prior_runs) > 1 else None
+
+    cols = ("posting_id", "employer", "title", "location_primary", "bridge_place", "employment_type",
+            "pay_min", "pay_max", "pay_interval", "url", "first_seen_at", "days_open")
+    rows = con.execute(f"SELECT {', '.join(cols)} FROM vw_bridge_open").fetchall()
+
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        places = [p for p in (d["bridge_place"] or "").split("|") if p]
+        ring = min((place_ring.get(p, 1) for p in places), default=1)
+        if ring > a.max_ring:
+            continue
+        # A posting matched by SEVERAL places is a pool only when EVERY place it matched is
+        # evergreen -- if any one of them is a real, dated place, days-open/NEW still mean
+        # something for it.
+        is_pool = bool(places) and all(place_evergreen.get(p, False) for p in places)
+        voice = B.voice_flag(d["title"])
+        if voice == "high" and a.hide_voice_high:
+            continue
+        is_new = (not is_pool) and new_cutoff is not None and d["first_seen_at"] >= new_cutoff
+        if a.new_only and not is_new:
+            continue
+        emp_rank = employer_order.get((d["employer"] or "").lower(), len(employer_order) + 1)
+        out.append((ring, B.VOICE_SORT_ORDER.get(voice, 1), emp_rank, d, voice, is_new, is_pool))
+
+    out.sort(key=lambda t: (t[0], t[1], t[2], -(t[3]["first_seen_at"].timestamp())))
+
+    if not out:
+        print("bridge: nothing open" + (" (new-only)" if a.new_only else ""))
+        return
+    print(f"{'NEW':<4}{'ring':<5}{'voice':<6}{'employer':<24}{'title':<38}{'place':<22}{'pay':<16}{'days':<6}{'link'}")
+    for ring, _vs, _rank, d, voice, is_new, is_pool in out:
+        pay = ""
+        if d["pay_min"] or d["pay_max"]:
+            unit = f"/{d['pay_interval']}" if d["pay_interval"] else ""
+            pay = f"{d['pay_min'] or '?'}-{d['pay_max'] or '?'}{unit}"
+        time_type = {"full_time": "Full", "part_time": "Part"}.get(d["employment_type"], "")
+        days = "pool" if is_pool else str(d["days_open"])
+        print(f"{'NEW' if is_new else '':<4}{ring:<5}{voice:<6}{(d['employer'] or '')[:23]:<24}"
+              f"{(d['title'] or '')[:37]:<38}{(d['location_primary'] or '')[:21]:<22}{pay:<16}"
+              f"{days:<6}{d['url'] or ''}"
+              f"{'  [' + time_type + ']' if time_type else ''}")
 
 
 def cmd_report(con, a):
@@ -624,6 +696,15 @@ def main():
     s.add_argument("--discover", action="store_true", help="probe the boards live and rewrite board_scope")
     s.add_argument("--employer", help="limit discovery to boards whose name contains this")
     s.set_defaults(func=cmd_facets)
+
+    s = sub.add_parser("bridge", parents=[common],
+                       help="the bridge (place-scoped retail) track's open list -- sprint plan §31.6")
+    s.add_argument("--max-ring", type=int, default=1,
+                   help="highest bridge_places.csv ring to include (default 1 = ring-1 only)")
+    s.add_argument("--new-only", action="store_true", help="only rows new since the previous bridge run")
+    s.add_argument("--hide-voice-high", action="store_true",
+                   help="convenience filter, off by default -- advisory voice flag never hides a row unless asked")
+    s.set_defaults(func=cmd_bridge)
 
     s = sub.add_parser("report", parents=[common], help="write a Jobs_Found file")
     s.add_argument("--max-blocks", type=int, default=15)

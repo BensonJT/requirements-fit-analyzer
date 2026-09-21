@@ -234,6 +234,36 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 
 Set `source` to `unresolved` to keep a row in the file without sweeping it.
 
+### The bridge track (BUILT-NOT-RUN, sprint plan §31)
+
+A second, separate track for roles taken for income and benefits alongside the professional
+search -- large employers, store-level roles included -- kept out of the fit pipeline entirely (no
+screen, no judge, no rank, no training). A registry row opts in with an optional `track` column
+set to `bridge` (blank/absent means the ordinary `fit` track); one employer can carry both a `fit`
+row (its corporate board) and a `bridge` row (its store board) without colliding.
+
+A bridge row is **never** swept whole-board. It is pulled only for a short list of named places,
+one query per place, from a **private** `bridge_places.csv` beside the registry (never committed --
+see `registry/bridge_places.example.csv` for the shape with invented places). Each place has a
+`ring` (any positive integer -- keep as many as you like, e.g. a ring 3 of hard-commute places);
+only rings at or under `--max-ring` (default 1) are pulled. A place can also be marked `evergreen`
+(a standing application pool, same titles every time under one shared posted date -- "Any
+Position" and the like): the bridge list prints `pool` instead of days-open for it and never marks
+it NEW. That flag is set by you in the CSV, never guessed at from the data. A missing or empty
+places file for an employer skips that row loudly rather than falling back to a full pull. An
+optional, also private, `bridge_employer_order.csv` (`employer,rank`) sets a sort preference;
+absent means no preference.
+
+```bash
+.venv/bin/python sweep_ats.py --track bridge --max-ring 2      # sweep only the bridge rows, rings 1-2
+.venv/bin/python finder.py bridge --max-ring 2 --new-only       # the open list (advisory, nothing hidden)
+```
+
+`finder.py bridge` prints employer, title, place, location text, time type, posted pay when the
+list carries it, days open, a NEW mark, and an advisory `voice` flag (how public-facing the title
+sounds, from a keyword table -- never used to filter). Sort: ring, then voice (low first, high
+last), then employer preference, then newest; `--hide-voice-high` is an opt-in convenience filter.
+
 ## Make it yours
 
 Four things in this repo are tuned to the author's own search. Change them before you rely on the results:

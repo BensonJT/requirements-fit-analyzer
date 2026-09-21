@@ -45,11 +45,17 @@ def main():
     ap.add_argument("--no-report", action="store_true", help="screen and snapshot, but write no Jobs_Found file")
     ap.add_argument("--llm-top", type=int, default=0, help="LLM-score the top N shortlist rows (Phase 4)")
     ap.add_argument("--full-screen", action="store_true", help="re-screen every active posting, not just new/changed")
+    ap.add_argument("--track", choices=("fit", "bridge", "all"), default="all",
+                    help="which registry rows to sweep (default all): 'bridge' rows are always place-scoped, "
+                         "never a whole-board pull -- see backend/ats/sweep.sweep_bridge")
+    ap.add_argument("--max-ring", type=int, default=1,
+                    help="highest bridge_places.csv ring to pull for the bridge track (default 1 = ring-1 only; "
+                         "rings are any positive integer, e.g. a ring 3 of hard-commute places)")
     a = ap.parse_args()
     run(db_path=a.db, platform=a.platform, limit=a.limit, employer=a.employer, workers=a.workers,
         max_pages=a.max_pages, detail_budget=a.detail_budget, detail_all=a.detail_all, skip_sweep=a.skip_sweep,
         new_detail_cap=a.new_detail_cap, screen=not a.no_screen, report=not a.no_report, llm_top=a.llm_top,
-        full_screen=a.full_screen)
+        full_screen=a.full_screen, track=a.track, max_ring=a.max_ring)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,78 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def sweep_bridge(con, rows, max_ring=1, workers=8, max_pages=None, log=print):
+    """Pulls every `track=bridge` board in `rows` with the places strategy (sprint plan §31.3/§31.8)
+    -- NEVER a whole-board pull. A row with no places configured (bridge_places.csv missing or
+    empty for the requested ring selection) is skipped LOUDLY, one line per row, rather than
+    falling back to a full pull. Returns the run summary dict, same shape as `sweep`.
+
+    `max_ring` (2026-09-21 user ruling, replaces the earlier `ring2` boolean): only places with
+    `ring <= max_ring` are pulled (default 1). A place at a higher ring not attempted this run
+    closes nothing it covers -- the close-pass rule (record_bridge_board) is unchanged by this."""
+    from . import bridge as B
+    from .registry import load_bridge_places
+
+    run_id = str(uuid.uuid4())[:8]
+    started, t0 = _now(), time.monotonic()
+    stats = dict(run_id=run_id, attempted=len(rows), succeeded=0, failed=0, seen=0, new=0, reopened=0, closed=0)
+    places = load_bridge_places(max_ring=max_ring)
+    if not places:
+        log(f"Bridge sweep: no places configured in bridge_places.csv (max_ring={max_ring}) -- "
+            f"skipping all {len(rows)} bridge row(s). Nothing was pulled.")
+        stats["failed"] = len(rows)
+        stats["elapsed"], stats["started"] = time.monotonic() - t0, started
+        return stats
+    log(f"Sweeping {len(rows)} bridge board(s) against {len(places)} place(s) "
+        f"(max_ring={max_ring}, {workers} workers, run {run_id})...")
+    attempted_places = {p["place"] for p in places}
+    scope = {"strategy": "places", "places": places}
+
+    def pull(row):
+        t = time.monotonic()
+        try:
+            jobs = adapters.list_jobs(row, max_pages=max_pages, scope=scope)
+            return row, jobs, None, time.monotonic() - t
+        except Exception as e:  # noqa: BLE001 — every failure is logged per board
+            return row, None, e, time.monotonic() - t
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(pull, r) for r in rows]
+        for fut in as_completed(futures):
+            row, jobs, err, elapsed = fut.result()
+            done += 1
+            employer, platform, now = row["employer"], row["platform"], _now()
+            if err is not None:
+                stats["failed"] += 1
+                store.log_board(con, run_id, employer, platform, False, elapsed, now, error=str(err), track="bridge")
+                log(f"  [{done}/{len(rows)}] {employer} ({platform}) [bridge]: FAILED — {str(err)[:120]}")
+                continue
+            place_status = getattr(jobs, "place_status", {})
+            try:
+                seen, new, reopened, closed = store.record_bridge_board(
+                    con, employer, platform, jobs, now, attempted_places=attempted_places, place_status=place_status)
+            except Exception as e:  # noqa: BLE001
+                stats["failed"] += 1
+                store.log_board(con, run_id, employer, platform, False, elapsed, now, job_count=len(jobs),
+                                error=f"db: {e}", track="bridge")
+                log(f"  [{done}/{len(rows)}] {employer} ({platform}) [bridge]: DB WRITE FAILED — {str(e)[:120]}")
+                continue
+            stats["succeeded"] += 1
+            for k, v in (("seen", seen), ("new", new), ("reopened", reopened), ("closed", closed)):
+                stats[k] += v
+            truncated = any(not ok for ok in place_status.values())
+            store.log_board(con, run_id, employer, platform, True, elapsed, now, job_count=seen, new_count=new,
+                            closed_count=closed, truncated=truncated, track="bridge")
+            flag = "  [one or more places failed/capped]" if truncated else ""
+            log(f"  [{done}/{len(rows)}] {employer} ({platform}) [bridge]: {seen} live, {new} new, "
+                f"{reopened} reopened, {closed} taken down — {elapsed:.1f}s{flag}")
+
+    stats["elapsed"] = time.monotonic() - t0
+    stats["started"] = started
+    return stats
+
+
 def sweep(con, rows, workers=8, max_pages=None, log=print):
     """Pulls every board in `rows`, writes each as it lands. Returns the run summary dict."""
     run_id = str(uuid.uuid4())[:8]
@@ -161,7 +233,7 @@ def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PAT
 
 def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_pages=None,
         detail_budget=300, detail_all=False, skip_sweep=False, new_detail_cap=5000,
-        screen=True, report=True, llm_top=0, full_screen=False, log=print):
+        screen=True, report=True, llm_top=0, full_screen=False, track="all", max_ring=1, log=print):
     """One sweep plus two detail passes, then the finder stage:
     1. NEW postings from this run get their JD fetched automatically, every title, no
        prefilter, up to `new_detail_cap` (a safety cap for a board's first-ever sweep,
@@ -171,26 +243,37 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
     3. FINDER (`screen=True`): tracker sync, decision read-back, screen, Jobs_Found report
        (only when JOBSEARCH_VAULT_DIR is set and `report`), snapshots. A finder failure is
        logged and never costs the sweep its run log.
+
+    `track` (sprint plan §31.8): 'fit' | 'bridge' | 'all' (default) -- which registry rows to
+    sweep. A bridge row is ALWAYS pulled with the places strategy (sweep_bridge), never a whole-
+    board pull, and never gets a JD detail fetch (detail_candidates is unconditionally `fit`-only)
+    -- see the module docstring on sweep_bridge. `max_ring` is passed straight through to it.
     """
-    rows = load_registry()
+    all_rows = load_registry()
     if platform:
-        rows = [r for r in rows if r["platform"] == platform]
+        all_rows = [r for r in all_rows if r["platform"] == platform]
     if employer:
-        rows = [r for r in rows if employer.lower() in r["employer"].lower()]
+        all_rows = [r for r in all_rows if employer.lower() in r["employer"].lower()]
     if limit:
-        rows = rows[:limit]
+        all_rows = all_rows[:limit]
+    fit_rows = [r for r in all_rows if r.get("track", "fit") == "fit"]
+    bridge_rows = [r for r in all_rows if r.get("track", "fit") == "bridge"]
     con = store.connect(db_path)
     try:
-        stats = None
+        stats = bridge_stats = None
         details = 0
         if not skip_sweep:
-            stats = sweep(con, rows, workers=workers, max_pages=max_pages, log=log)
-            if new_detail_cap:
-                n, _ = fetch_details(con, rows, budget=new_detail_cap, title_pattern=None,
-                                     since=stats["started"], label="New-posting details")
-                details += n
-        if detail_budget:
-            n, _ = fetch_details(con, rows, budget=detail_budget,
+            if track in ("fit", "all") and fit_rows:
+                stats = sweep(con, fit_rows, workers=workers, max_pages=max_pages, log=log)
+                if new_detail_cap:
+                    n, _ = fetch_details(con, fit_rows, budget=new_detail_cap, title_pattern=None,
+                                         since=stats["started"], label="New-posting details")
+                    details += n
+            if track in ("bridge", "all") and bridge_rows:
+                bridge_stats = sweep_bridge(con, bridge_rows, max_ring=max_ring, workers=workers,
+                                            max_pages=max_pages, log=log)
+        if detail_budget and track in ("fit", "all"):
+            n, _ = fetch_details(con, fit_rows, budget=detail_budget,
                                  title_pattern=None if detail_all else DETAIL_TITLE_PATTERN,
                                  label="Backlog details")
             details += n
@@ -203,6 +286,16 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
             log(f"\nRun {stats['run_id']} done in {stats['elapsed'] / 60:.1f} min: "
                 f"{stats['succeeded']} boards ok, {stats['failed']} failed, {stats['seen']} live postings, "
                 f"{stats['new']} new, {stats['reopened']} reopened, {stats['closed']} taken down, {details} JDs fetched")
+        if bridge_stats:
+            # Bridge runs get their own run_id row too (0 JDs -- detail fetch never touches bridge).
+            store.log_run(con, bridge_stats["run_id"], bridge_stats["started"], _now(), bridge_stats["attempted"],
+                          bridge_stats["succeeded"], bridge_stats["failed"], bridge_stats["seen"],
+                          bridge_stats["new"], bridge_stats["reopened"], bridge_stats["closed"],
+                          0, bridge_stats["elapsed"])
+            log(f"\nBridge run {bridge_stats['run_id']} done in {bridge_stats['elapsed'] / 60:.1f} min: "
+                f"{bridge_stats['succeeded']} boards ok, {bridge_stats['failed']} failed, "
+                f"{bridge_stats['seen']} live postings, {bridge_stats['new']} new, "
+                f"{bridge_stats['reopened']} reopened, {bridge_stats['closed']} taken down")
         return stats
     finally:
         con.close()

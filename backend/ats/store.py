@@ -26,7 +26,21 @@ DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 21  # v21 (2026-09-21): role shape from graded responsibilities (sprint plan §30). Additive
+SCHEMA_VERSION = 22  # v22 (2026-09-21): the bridge-role track (sprint plan §31), place-scoped pulls kept
+                     #                  apart from the fit pipeline. Additive only: `postings.track`
+                     #                  (VARCHAR DEFAULT 'fit' -- every existing row is a fit row) and
+                     #                  `postings.bridge_place` (comma-joined place names currently matching a
+                     #                  bridge posting, NULL for a fit row) via `_add_missing_columns`;
+                     #                  `board_runs.track` likewise, so `vw_board_health` can tell a small
+                     #                  place-scoped bridge pull apart from the employer's own whole-board fit
+                     #                  pull instead of the newest of the two masking the other's health. No
+                     #                  existing table's primary key changes -- `posting_id` stays
+                     #                  sha1(employer|platform|req_id) for every fit row (the default `track`
+                     #                  argument), and only a bridge row's id folds `track` into the hash
+                     #                  (posting_id(..., track='bridge')), which is what lets a `bridge` row and
+                     #                  a `fit` row for the SAME employer+platform coexist under the same
+                     #                  posting_id space without colliding.
+# v21 (2026-09-21): role shape from graded responsibilities (sprint plan §30). Additive
                      #                  only -- `judge2_reviews` gains six nullable columns via the
                      #                  `_add_missing_columns` pattern (`lines_fit`, `shape_fit`,
                      #                  `shape_score`, `resp_met`, `resp_adjacent`, `resp_unmet`); old rows
@@ -545,12 +559,25 @@ CREATE OR REPLACE VIEW vw_dmv_or_remote_active AS
                              'remote|virginia|\\bVA\\b|maryland|\\bMD\\b|washington,? d\\.?c|\\bDC\\b|reston|herndon|vienna|mclean|tysons|arlington|alexandria|fairfax|leesburg|ashburn|sterling|chantilly|winchester|frederick|bethesda|rockville|silver spring', 'i'));
 
 -- Latest attempt per board, so a failing board is visible without reading logs.
+-- `track` is part of the partition (sprint plan §31.8 wiring): a bridge board's own small,
+-- place-scoped pull is its own health row, so its latest run never masks -- or gets masked by --
+-- the SAME employer/platform's whole-board `fit` pull. A small `ok=true` bridge pull is never
+-- flagged: nothing here judges health by job_count, only by the pull's own `ok` flag, and a
+-- bridge pull's `ok` reflects whether its PLACES came back cleanly, not the board's total size.
 CREATE OR REPLACE VIEW vw_board_health AS
-    SELECT employer, platform, ok, truncated, job_count, new_count, closed_count,
-           round(elapsed_seconds, 1) AS seconds, error, ran_at
+    SELECT employer, platform, coalesce(track, 'fit') AS track, ok, truncated, job_count, new_count,
+           closed_count, round(elapsed_seconds, 1) AS seconds, error, ran_at
     FROM board_runs
-    QUALIFY row_number() OVER (PARTITION BY employer, platform ORDER BY ran_at DESC) = 1
+    QUALIFY row_number() OVER (PARTITION BY employer, platform, coalesce(track, 'fit') ORDER BY ran_at DESC) = 1
     ORDER BY ok, employer;
+
+-- Active bridge (place-scoped) postings, newest first -- the `finder.py bridge` command's own
+-- source view (sprint plan §31.6). Advisory only: nothing here is hidden or filtered by voice.
+CREATE OR REPLACE VIEW vw_bridge_open AS
+    SELECT posting_id, employer, title, location_primary, bridge_place, employment_type, pay_min, pay_max,
+           pay_interval, url, first_seen_at, date_diff('day', first_seen_at, now()) AS days_open
+    FROM postings WHERE track = 'bridge' AND status = 'active'
+    ORDER BY first_seen_at DESC;
 
 -- How long postings stay up, per employer — the "closed_at - first_seen_at" corpus stat.
 CREATE OR REPLACE VIEW vw_posting_lifetimes AS
@@ -561,16 +588,18 @@ CREATE OR REPLACE VIEW vw_posting_lifetimes AS
 
 -- ---- Parameterized table macros: SELECT * FROM new_postings(7), etc. ----
 
--- New to us in the last N days (first_seen_at), regardless of what the ATS says.
+-- New to us in the last N days (first_seen_at), regardless of what the ATS says. `fit` track
+-- only (sprint plan §31.5, "report/top/new_postings-style professional outputs") -- see
+-- vw_bridge_open for the bridge track's own equivalent.
 CREATE OR REPLACE MACRO new_postings(days) AS TABLE
     SELECT * FROM postings
-    WHERE status = 'active' AND first_seen_at >= now() - to_days(days::INTEGER)
+    WHERE status = 'active' AND track = 'fit' AND first_seen_at >= now() - to_days(days::INTEGER)
     ORDER BY first_seen_at DESC;
 
--- Posted by the ATS's own date in the last N days (falls back to first_seen_at).
+-- Posted by the ATS's own date in the last N days (falls back to first_seen_at). `fit` track only.
 CREATE OR REPLACE MACRO posted_within(days) AS TABLE
     SELECT * FROM postings
-    WHERE status = 'active'
+    WHERE status = 'active' AND track = 'fit'
       AND coalesce(posted_at, first_seen_at::DATE) >= (current_date - days::INTEGER)
     ORDER BY coalesce(posted_at, first_seen_at::DATE) DESC;
 
@@ -877,7 +906,10 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
         LEFT JOIN vw_required_embed_latest re USING (posting_id)
         LEFT JOIN vw_judge2_latest j2 USING (posting_id)
         LEFT JOIN vw_judge2_eval_latest je ON je.prompt_version = j2.prompt_version
-        WHERE p.status = 'active'
+        -- `p.track = 'fit'` is belt-and-suspenders here (sprint plan §31.5): a bridge posting is
+        -- never screened in the first place (pipeline.py's candidate SQL is track-scoped), so the
+        -- INNER JOIN to vw_screen_latest above already excludes it on its own.
+        WHERE p.status = 'active' AND p.track = 'fit'
     ), placed AS (
         SELECT *,
                -- ONE source of truth for the Required question, in authority order human > second judge
@@ -1029,11 +1061,16 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
     FROM placed;
 
 -- Near misses coverage is calibrated against: 'pass --reason function' decisions plus the hard_negatives table.
+-- `fit` track only (sprint plan §31.5) -- LEFT joined to postings (a decision/hard_negatives row for
+-- a posting_id with no matching `postings` row at all -- a synthetic id, or a posting since purged --
+-- keeps its old behavior and is INCLUDED; only a row explicitly tagged `track = 'bridge'` is excluded).
 CREATE OR REPLACE VIEW vw_hard_negatives AS
-    SELECT posting_id, 'decision:function' AS source, reason AS note FROM vw_decisions
-    WHERE decision = 'pass' AND reason_code = 'function'
+    SELECT d.posting_id, 'decision:function' AS source, d.reason AS note
+    FROM vw_decisions d LEFT JOIN postings p USING (posting_id)
+    WHERE d.decision = 'pass' AND d.reason_code = 'function' AND coalesce(p.track, 'fit') = 'fit'
     UNION
-    SELECT posting_id, source, note FROM hard_negatives;
+    SELECT h.posting_id, h.source, h.note
+    FROM hard_negatives h LEFT JOIN postings p USING (posting_id) WHERE coalesce(p.track, 'fit') = 'fit';
 
 -- Active, not rejected, not decided, not already in the tracker; best first.
 CREATE OR REPLACE VIEW vw_shortlist AS
@@ -1049,7 +1086,8 @@ CREATE OR REPLACE VIEW vw_shortlist AS
     LEFT JOIN vw_coverage_latest c USING (posting_id)
     LEFT JOIN vw_decisions d USING (posting_id)
     LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
-    WHERE p.status = 'active' AND s.verdict != 'reject' AND d.posting_id IS NULL AND t.matched_posting_id IS NULL
+    WHERE p.status = 'active' AND p.track = 'fit'
+      AND s.verdict != 'reject' AND d.posting_id IS NULL AND t.matched_posting_id IS NULL
     ORDER BY s.final_score DESC, p.first_seen_at DESC;
 
 CREATE OR REPLACE MACRO vw_scored_new(days) AS TABLE
@@ -1065,7 +1103,7 @@ CREATE OR REPLACE VIEW vw_label_set AS
     SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
-    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL AND p.track = 'fit'
       -- A logistics/comp pass says the WORK was right and something else (location, pay) was wrong; it must
       -- never teach a lens model that the work itself is a negative (sprint plan §22.4/§22.3, Gap 2).
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
@@ -1079,7 +1117,7 @@ CREATE OR REPLACE VIEW vw_label_set AS
            CASE l.grade WHEN 'bullseye' THEN 1.0 WHEN 'adjacent' THEN 0.6 WHEN 'stretch' THEN 0.5 ELSE 1.0 END,
            l.grade
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
+    WHERE length(p.description_text) >= 800 AND p.track = 'fit' AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL;
 
 -- Per-lens training sets (sprint plan 18.8). Identical to vw_label_set except that the graded rows carry the
 -- lens grade instead of the averaged one, and only rows judged on that lens take part. The shared sources
@@ -1099,7 +1137,7 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
     SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
-    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL AND p.track = 'fit'
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
@@ -1112,7 +1150,7 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
            coalesce(h.grade, l.grade_process)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'process'
-    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_process) IS NOT NULL
+    WHERE length(p.description_text) >= 800 AND p.track = 'fit' AND coalesce(h.grade, l.grade_process) IS NOT NULL
       AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
     UNION ALL
     SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
@@ -1121,7 +1159,7 @@ CREATE OR REPLACE VIEW vw_label_set_process AS
            h2.grade
     FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
     LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
-    WHERE h2.lens = 'process' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
+    WHERE h2.lens = 'process' AND l2.posting_id IS NULL AND length(p.description_text) >= 800 AND p.track = 'fit';
 
 CREATE OR REPLACE VIEW vw_label_set_technical AS
     SELECT label_id, source, posting_id, company, title, text, label, weight, NULL AS grade
@@ -1130,7 +1168,7 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
     SELECT 'dec:' || d.posting_id, 'decision', p.posting_id, p.employer, p.title, p.description_text,
            CASE WHEN d.decision = 'build' THEN 1 ELSE 0 END, 1.0, NULL
     FROM vw_decisions d JOIN postings p USING (posting_id)
-    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL
+    WHERE d.decision IN ('build', 'pass') AND p.description_text IS NOT NULL AND p.track = 'fit'
       AND (d.decision != 'pass' OR d.reason_code NOT IN ('logistics', 'comp'))
     UNION ALL
     SELECT 'llm:' || l.posting_id,
@@ -1143,7 +1181,7 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
            coalesce(h.grade, l.grade_technical)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'technical'
-    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_technical) IS NOT NULL
+    WHERE length(p.description_text) >= 800 AND p.track = 'fit' AND coalesce(h.grade, l.grade_technical) IS NOT NULL
       AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
     UNION ALL
     SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
@@ -1152,7 +1190,7 @@ CREATE OR REPLACE VIEW vw_label_set_technical AS
            h2.grade
     FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
     LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
-    WHERE h2.lens = 'technical' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
+    WHERE h2.lens = 'technical' AND l2.posting_id IS NULL AND length(p.description_text) >= 800 AND p.track = 'fit';
 
 -- Applied-AI lens training set (21), same shape as vw_label_set_process / vw_label_set_technical, reading
 -- grade_ai. features.LENS_VIEWS["ai"] points here (Agent C wires the lens name in; this view can exist and
@@ -1179,7 +1217,7 @@ CREATE OR REPLACE VIEW vw_label_set_ai AS
            coalesce(h.grade, l.grade_ai)
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
     LEFT JOIN vw_human_lens_grades_current h ON h.posting_id = p.posting_id AND h.lens = 'ai'
-    WHERE length(p.description_text) >= 800 AND coalesce(h.grade, l.grade_ai) IS NOT NULL
+    WHERE length(p.description_text) >= 800 AND p.track = 'fit' AND coalesce(h.grade, l.grade_ai) IS NOT NULL
       AND (h.lens IS NOT NULL OR lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL)
     UNION ALL
     SELECT 'human:' || h2.posting_id, 'user_adjudicated', p.posting_id, p.employer, p.title, p.description_text,
@@ -1188,7 +1226,7 @@ CREATE OR REPLACE VIEW vw_label_set_ai AS
            h2.grade
     FROM vw_human_lens_grades_current h2 JOIN postings p ON p.posting_id = h2.posting_id
     LEFT JOIN vw_llm_labels_latest l2 ON l2.posting_id = h2.posting_id
-    WHERE h2.lens = 'ai' AND l2.posting_id IS NULL AND length(p.description_text) >= 800;
+    WHERE h2.lens = 'ai' AND l2.posting_id IS NULL AND length(p.description_text) >= 800 AND p.track = 'fit';
 
 -- The Required-block ranking model's training set (features.LENS_VIEWS["required"]). NOT a lens -- it answers
 -- a different question than process/technical/ai (does the candidate clear THIS posting's own Required block,
@@ -1208,7 +1246,7 @@ CREATE OR REPLACE VIEW vw_label_set_required AS
            1.0 AS weight,
            l.required_fit AS grade
     FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-    WHERE length(p.description_text) >= 800 AND l.required_fit IS NOT NULL;
+    WHERE length(p.description_text) >= 800 AND p.track = 'fit' AND l.required_fit IS NOT NULL;
 
 -- The `bullseye` model's training set (features.LENS_VIEWS["bullseye"]). NOT a lens -- like vw_label_set_required,
 -- this answers a different question than process/technical/ai: among postings already IN the candidate's lanes,
@@ -1229,7 +1267,7 @@ CREATE OR REPLACE VIEW vw_label_set_bullseye AS
                     WHEN 'wrong' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'wrong'
                     ELSE NULL END AS best_grade
         FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
-        WHERE length(p.description_text) >= 800
+        WHERE length(p.description_text) >= 800 AND p.track = 'fit'
           AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL
     )
     SELECT 'llm:' || posting_id AS label_id, source, posting_id, company, title, text,
@@ -1309,11 +1347,16 @@ def _add_missing_columns(con):
                                 ("judge2_reviews", "shape_score", "DOUBLE"),
                                 ("judge2_reviews", "resp_met", "INTEGER"),
                                 ("judge2_reviews", "resp_adjacent", "INTEGER"),
-                                ("judge2_reviews", "resp_unmet", "INTEGER")):
+                                ("judge2_reviews", "resp_unmet", "INTEGER"),
+                                ("postings", "track", "VARCHAR DEFAULT 'fit'"),
+                                ("postings", "bridge_place", "VARCHAR"),
+                                ("board_runs", "track", "VARCHAR DEFAULT 'fit'")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":
                 con.execute("UPDATE postings SET detail_attempts = 0 WHERE detail_attempts IS NULL")
+            if column == "track":  # both `postings` and `board_runs`: DEFAULT does not backfill old rows
+                con.execute(f"UPDATE {table} SET track = 'fit' WHERE track IS NULL")
             if table == "llm_labels" and column == "lens_grade_source":
                 con.execute("UPDATE llm_labels SET lens_grade_source = 'human' "
                            "WHERE scorer = 'user-adjudicated' AND lens_grade_source IS NULL")
@@ -1383,8 +1426,13 @@ def _migrate(db_path):
     con.close()
 
 
-def posting_id(employer, platform, req_id):
-    raw = f"{employer}|{platform}|{req_id}".lower()
+def posting_id(employer, platform, req_id, track="fit"):
+    """sha1(employer|platform|req_id), UNCHANGED for track='fit' (the default) -- every existing
+    posting_id in a pre-v22 database keeps hashing exactly the same way. A `bridge` row folds
+    `track` into the hash instead, so a bridge row and a fit row for the SAME employer/platform/
+    req_id (sprint plan §31.2: one employer, two registry rows) get two different posting_ids and
+    never collide in the upsert."""
+    raw = f"{employer}|{platform}|{req_id}".lower() if track == "fit" else f"{employer}|{platform}|{track}|{req_id}".lower()
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -1508,8 +1556,10 @@ def _migrate_v20_required_fit_nullable(con) -> None:
     con.execute("ALTER TABLE judge2_reviews ALTER COLUMN required_fit DROP NOT NULL")
 
 
-def _stage(con, employer, platform, jobs, now):
-    """Loads one board's postings into a temp table (deduped on posting_id)."""
+def _stage(con, employer, platform, jobs, now, track="fit", bridge_places_by_pid=None):
+    """Loads one board's postings into a temp table (deduped on posting_id). `track` decides the
+    posting_id hash (see posting_id); `bridge_places_by_pid` (posting_id -> '|'-joined place
+    names) fills `bridge_place` for a bridge pull only -- a fit pull leaves it NULL."""
     con.execute("CREATE OR REPLACE TEMP TABLE stage AS SELECT * FROM postings WHERE 1 = 0")
     cols = ", ".join(POSTING_COLUMNS)
     marks = ", ".join("?" for _ in POSTING_COLUMNS)
@@ -1517,7 +1567,7 @@ def _stage(con, employer, platform, jobs, now):
     for j in jobs:
         if not j.get("req_id"):
             continue
-        pid = posting_id(employer, platform, j["req_id"])
+        pid = posting_id(employer, platform, j["req_id"], track=track)
         rows.append([pid, employer, platform, str(j["req_id"]), j.get("title"), j.get("url"),
                      j.get("location_primary"), j.get("locations"), j.get("country"),
                      j.get("workplace_type"), j.get("employment_type"), j.get("job_family"), j.get("job_level"),
@@ -1531,29 +1581,14 @@ def _stage(con, employer, platform, jobs, now):
         )
         con.execute("""DELETE FROM stage WHERE rowid NOT IN (
                            SELECT min(rowid) FROM stage GROUP BY posting_id)""")
+        con.execute("UPDATE stage SET track = ?", [track])
+        if bridge_places_by_pid:
+            con.executemany("UPDATE stage SET bridge_place = ? WHERE posting_id = ?",
+                             [[places, pid] for pid, places in bridge_places_by_pid.items()])
     return len(rows)
 
 
-def record_board(con, employer, platform, jobs, now, truncated=False):
-    """Upserts one board's pull and closes what went missing — in ONE transaction.
-
-    Returns (seen, new, reopened, closed). `closed` is always 0 for a truncated pull.
-    """
-    con.execute("BEGIN")
-    try:
-        seen = _stage(con, employer, platform, jobs, now)
-        new = con.execute("""SELECT count(*) FROM stage s
-                             WHERE NOT EXISTS (SELECT 1 FROM postings p WHERE p.posting_id = s.posting_id)""").fetchone()[0]
-        reopened = con.execute("""SELECT count(*) FROM stage s JOIN postings p USING (posting_id)
-                                  WHERE p.status = 'closed'""").fetchone()[0]
-        cols = ", ".join(POSTING_COLUMNS)
-        con.execute(f"""
-            INSERT INTO postings ({cols}, description_fetched_at, first_seen_at, last_seen_at, closed_at, status)
-            SELECT {cols},
-                   CASE WHEN description_text IS NOT NULL THEN first_seen_at END,
-                   first_seen_at, last_seen_at, NULL, 'active'
-            FROM stage
-            ON CONFLICT (posting_id) DO UPDATE SET
+_UPSERT_COMMON_SETS = """
                 title            = excluded.title,
                 url              = excluded.url,
                 location_primary = coalesce(excluded.location_primary, postings.location_primary),
@@ -1581,15 +1616,116 @@ def record_board(con, employer, platform, jobs, now, truncated=False):
                 raw_json         = coalesce(excluded.raw_json, postings.raw_json),
                 last_seen_at     = excluded.last_seen_at,
                 closed_at        = NULL,
-                status           = 'active'
+                status           = 'active'"""
+
+
+def record_board(con, employer, platform, jobs, now, truncated=False, track="fit"):
+    """Upserts one board's pull and closes what went missing — in ONE transaction. Scoped to
+    `track` throughout (sprint plan §31.4): a `bridge` row for this same employer/platform is
+    never touched by a `fit` pull and vice versa, because both the upsert's conflict target
+    (posting_id, which folds track into its hash for a bridge row -- see posting_id) and the
+    close pass's WHERE clause are track-scoped.
+
+    Returns (seen, new, reopened, closed). `closed` is always 0 for a truncated pull. A bridge
+    pull needs per-PLACE success information this signature has no room for -- see
+    record_bridge_board, which this function does not call and is not called by.
+    """
+    con.execute("BEGIN")
+    try:
+        seen = _stage(con, employer, platform, jobs, now, track=track)
+        new = con.execute("""SELECT count(*) FROM stage s
+                             WHERE NOT EXISTS (SELECT 1 FROM postings p WHERE p.posting_id = s.posting_id)""").fetchone()[0]
+        reopened = con.execute("""SELECT count(*) FROM stage s JOIN postings p USING (posting_id)
+                                  WHERE p.status = 'closed'""").fetchone()[0]
+        cols = ", ".join(POSTING_COLUMNS) + ", track"
+        con.execute(f"""
+            INSERT INTO postings ({cols}, description_fetched_at, first_seen_at, last_seen_at, closed_at, status)
+            SELECT {cols},
+                   CASE WHEN description_text IS NOT NULL THEN first_seen_at END,
+                   first_seen_at, last_seen_at, NULL, 'active'
+            FROM stage
+            ON CONFLICT (posting_id) DO UPDATE SET
+                {_UPSERT_COMMON_SETS},
+                track = excluded.track
         """)
         closed = 0
         if not truncated:
             closed = con.execute("""
                 UPDATE postings SET status = 'closed', closed_at = ?
-                WHERE employer = ? AND platform = ? AND status = 'active'
+                WHERE employer = ? AND platform = ? AND track = ? AND status = 'active'
                   AND posting_id NOT IN (SELECT posting_id FROM stage)
-            """, [now, employer, platform]).fetchone()[0]
+            """, [now, employer, platform, track]).fetchone()[0]
+        con.execute("DROP TABLE stage")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    return seen, new, reopened, closed
+
+
+def record_bridge_board(con, employer, platform, jobs, now, attempted_places, place_status):
+    """Upserts one bridge board's PLACE-SCOPED pull and closes what genuinely went missing, per
+    sprint plan §31.4's data-loss guard.
+
+    Unlike `record_board`'s whole-board absence test, a bridge posting is closed only when EVERY
+    place it is tagged with was itself attempted AND pulled cleanly (no error, no page-cap
+    truncation) THIS run:
+    - `attempted_places` -- the set of place names actually queried this run (e.g. ring-1 only
+      unless `--max-ring` asked for more).
+    - `place_status` -- {place: True/False}, whether that place's own pull succeeded.
+    A place never attempted this run (a higher ring skipped, say) leaves every posting tagged with it
+    untouched, closed or not. A posting matched by two places keeps whichever tags this run did
+    not attempt (carried over from its prior `bridge_place`) UNION the places it matched THIS run
+    -- so a ring-1-only run can never quietly erase a posting's ring-2 tag and make it closeable
+    on some LATER ring-1-only run.
+
+    `jobs` is the union already computed by the caller (sweep.py's places-strategy pull); each
+    posting dict's `_bridge_places` holds the place names that matched it THIS run.
+    """
+    con.execute("BEGIN")
+    try:
+        prior = dict(con.execute(
+            "SELECT posting_id, bridge_place FROM postings WHERE employer = ? AND platform = ? AND track = 'bridge'",
+            [employer, platform]).fetchall())
+        bridge_places_by_pid = {}
+        for j in jobs:
+            if not j.get("req_id"):
+                continue
+            pid = posting_id(employer, platform, j["req_id"], track="bridge")
+            matched = set(j.get("_bridge_places") or [])
+            kept = {p for p in (prior.get(pid) or "").split("|") if p and p not in attempted_places}
+            bridge_places_by_pid[pid] = "|".join(sorted(matched | kept))
+
+        seen = _stage(con, employer, platform, jobs, now, track="bridge", bridge_places_by_pid=bridge_places_by_pid)
+        new = con.execute("""SELECT count(*) FROM stage s
+                             WHERE NOT EXISTS (SELECT 1 FROM postings p WHERE p.posting_id = s.posting_id)""").fetchone()[0]
+        reopened = con.execute("""SELECT count(*) FROM stage s JOIN postings p USING (posting_id)
+                                  WHERE p.status = 'closed'""").fetchone()[0]
+        cols = ", ".join(POSTING_COLUMNS) + ", track, bridge_place"
+        con.execute(f"""
+            INSERT INTO postings ({cols}, description_fetched_at, first_seen_at, last_seen_at, closed_at, status)
+            SELECT {cols},
+                   CASE WHEN description_text IS NOT NULL THEN first_seen_at END,
+                   first_seen_at, last_seen_at, NULL, 'active'
+            FROM stage
+            ON CONFLICT (posting_id) DO UPDATE SET
+                {_UPSERT_COMMON_SETS},
+                track = excluded.track,
+                bridge_place = excluded.bridge_place
+        """)
+        candidates = con.execute("""
+            SELECT posting_id, bridge_place FROM postings
+            WHERE employer = ? AND platform = ? AND track = 'bridge' AND status = 'active'
+              AND posting_id NOT IN (SELECT posting_id FROM stage)
+        """, [employer, platform]).fetchall()
+        closed = 0
+        for pid, places in candidates:
+            place_list = [p for p in (places or "").split("|") if p]
+            # Never close an untagged row (defensive only -- every bridge row gets a tag on write)
+            # and never close a row with ANY place this run did not attempt or did not clear.
+            if place_list and all(p in attempted_places and place_status.get(p) for p in place_list):
+                con.execute("UPDATE postings SET status = 'closed', closed_at = ? WHERE posting_id = ?", [now, pid])
+                closed += 1
         con.execute("DROP TABLE stage")
         con.execute("COMMIT")
     except Exception:
@@ -1599,11 +1735,12 @@ def record_board(con, employer, platform, jobs, now, truncated=False):
 
 
 def log_board(con, run_id, employer, platform, ok, elapsed, now, job_count=None, new_count=None,
-              closed_count=None, truncated=False, error=None):
+              closed_count=None, truncated=False, error=None, track="fit"):
     con.execute(
-        "INSERT INTO board_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO board_runs (run_id, employer, platform, ok, truncated, job_count, new_count, "
+        "closed_count, elapsed_seconds, error, ran_at, track) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [run_id, employer, platform, ok, truncated, job_count, new_count, closed_count, elapsed,
-         (error or "")[:300] or None, now],
+         (error or "")[:300] or None, now, track],
     )
 
 
@@ -1625,8 +1762,15 @@ def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=N
 
     A posting whose detail fetch came back empty (or errored) is retried, but not forever: once
     `detail_attempts` reaches DETAIL_MAX_ATTEMPTS it drops out of the pool so it stops eating the
-    budget every run. `retry_exhausted=True` lifts that floor for a deliberate re-check."""
-    where = "status = 'active' AND description_text IS NULL AND platform IN (SELECT unnest(?::VARCHAR[]))"
+    budget every run. `retry_exhausted=True` lifts that floor for a deliberate re-check.
+
+    `fit` track only (sprint plan §31.5): JD detail fetch is off for a bridge posting by default --
+    the bridge list payload is enough for `finder.py bridge`'s output, and no bridge row is ever
+    worth the request budget a fit-track posting is competing for. This is unconditional (no
+    parameter lifts it) rather than an opt-in flag, so every EXISTING caller of this function stays
+    correctly scoped to `fit` with no code change on their end."""
+    where = ("status = 'active' AND track = 'fit' AND description_text IS NULL "
+             "AND platform IN (SELECT unnest(?::VARCHAR[]))")
     params = [list(platforms)]
     if not retry_exhausted:
         where += " AND detail_attempts < ?"

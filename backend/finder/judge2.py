@@ -634,11 +634,13 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
         the hard-gate check alone: several soft gaps together are also disqualifying). `adjacent` is never
         counted as `unmet` here.
       - a hard gate rated `unclear` (and no `fails` condition above fired) -> `partial`, never `meets`.
-      - §30.3 BRIDGE: a hard gate (always `years_function` in practice -- `clearance`/`licence` adjacent is
-        coerced to `unmet` at parse time) rated `adjacent`: with every OTHER hard gate `met`, exactly one
-        adjacent hard gate leaves `meets` reachable (why says `bridged: <line>` when the call lands on
-        `meets`); two or more adjacent hard gates, or one adjacent hard gate beside another hard gate not
-        `met`, caps the call at `partial`. `adjacent` never produces `fails` by itself.
+      - §30.3 BRIDGE: ONLY a `years_function` hard gate rated `adjacent` can bridge (a `tool` hard gate
+        promoted by `_tool_is_the_job`, or a `clearance`/`licence` hard gate fed in as `adjacent` uncoerced,
+        never bridges): with every OTHER hard gate `met`, exactly one adjacent `years_function` gate leaves
+        `meets` reachable (why says `bridged: <line>` when the call lands on `meets`); two or more adjacent
+        hard gates, or a single adjacent hard gate of any OTHER kind, or one adjacent `years_function` gate
+        beside another hard gate not `met`, caps the call at `partial` (`"hard gate adjacent, not
+        bridgeable: <line>"`). `adjacent` never produces `fails` by itself.
       - a soft required line (`tool`/`skill`/`degree`, not promoted to hard) rated `adjacent` counts as
         NEITHER met nor unmet -- excluded from both the soft-unmet and soft-unclear tallies.
       - at most `SOFT_UNMET_MEETS_MAX` soft required lines `unmet` AND at most
@@ -676,7 +678,12 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
     if len(hard_adjacent) >= 2:
         return "partial", f"{len(hard_adjacent)} hard gates adjacent"
     if len(hard_adjacent) == 1:
-        bridge_line = hard_adjacent[0]
+        candidate = hard_adjacent[0]
+        if _get(candidate, "kind") != "years_function":
+            # §30.3: only a years_function hard gate bridges -- a title tool (or a clearance/licence gate fed
+            # in as adjacent uncoerced) never does, regardless of every other hard gate's verdict.
+            return "partial", f"hard gate adjacent, not bridgeable: {_get(candidate, 'line')}"
+        bridge_line = candidate
         others_met = all(_effective_verdict(l) == "met" for l in hard if l is not bridge_line)
         if not others_met:
             return "partial", f"hard gate adjacent, not bridgeable: {_get(bridge_line, 'line')}"
@@ -744,7 +751,10 @@ def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> 
       - `meets` if `lines_fit` is `meets` AND `shape_fit` is `fits` or `None` (no shape opinion).
       - otherwise `partial`.
       - Rule 8 (a posting with no qualifications section -- zero required lines -- and a non-NULL shape):
-        `fits` -> `meets`, `split` -> `partial`, `wrong` -> `fails`.
+        `fits` -> `meets`, unless `lines_discarded` and `DISCARDED_LINES_CAP_MEETS`, which caps it at
+        `partial` (a discarded `required` entry may have been an unmet hard gate the model misquoted, the
+        same reasoning `lines_fit` uses -- shape alone cannot confirm `meets` over that gap either); `split`
+        -> `partial`; `wrong` -> `fails`.
       - Zero required lines AND a NULL shape -> `(None, why)`, "no call", exactly as before §30.
     `why` names WHICH test decided: the existing `lines_fit` wording (kept verbatim for hard-gate/majority/
     soft-gap decisions, including `bridged: <line>` for a bridged `meets`) when `lines_fit` alone decided it;
@@ -760,6 +770,9 @@ def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> 
         if sfit is None:
             return None, why_l
         if sfit == "fits":
+            if lines_discarded and DISCARDED_LINES_CAP_MEETS:
+                return ("partial",
+                        f"{lines_discarded} line(s) dropped by validation; meets cannot be confirmed ({shape_why})")
             return "meets", shape_why
         if sfit == "split":
             return "partial", shape_why

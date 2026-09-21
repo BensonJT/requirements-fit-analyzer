@@ -616,6 +616,38 @@ def test_above_bar_judge2_overrides_first_judge(tmp_path):
     con.close()
 
 
+def test_rank_why_names_shape_when_it_decided_the_call(tmp_path):
+    """§30's item 5: when role shape (not a required-line gate) decided the call, the Why text says so briefly
+    -- `judge2_unmet_first` is empty for a shape-only fails (no required lines were even rated), so rank_why's
+    fallback reaches for `derive_why`. `required_fit` (`judge2_required` here) stays the ONE value the rank
+    itself reads -- this only changes the WORDS shown beside it."""
+    db = str(tmp_path / "t.duckdb")
+    con = store.connect(db)
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    _insert_judge_row(con, pid, dh, required_fit="meets", grade_process="bullseye")
+    pv = "shape-pv"
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract, shape_fit, shape_score, resp_met, resp_adjacent, resp_unmet)
+                   VALUES (?, ?, ?, 'gemini', 'm', 'fails', '[]', 0, false, true, NULL, 'high', '', 0, ?,
+                           'shape: wrong (m/a/u = 2/0/6)', 0, 0, 'lines', 'wrong', 0.25, 2, 0, 6)""",
+               [pid, dh, pv, NOW])
+    import uuid
+    con.execute("""INSERT INTO judge2_evals (run_id, prompt_version, evaluated_at, n_catch, n_catch_hits,
+                   catch_rate, n_catch_strict_hits, catch_rate_strict, n_all_fails, n_all_fails_hits,
+                   catch_rate_all_fails, n_agree, n_agree_hits, agree_rate, passed, reason)
+                   VALUES (?, ?, ?, 10, 8, 0.8, 8, 0.8, 10, 8, 0.8, 10, 9, 0.9, true, 'test')""",
+               [uuid.uuid4().hex, pv, NOW])
+    row = con.execute("SELECT judge2_required, judge2_unmet_first, rank_why FROM vw_lens_fit "
+                      "WHERE posting_id = ?", [pid]).fetchone()
+    assert row[0] == "fails"
+    assert row[1] is None   # no required-line quote to show -- the call came from shape alone
+    assert "shape: wrong" in row[2]
+    con.close()
+
+
 def test_stale_judge2_review_alone_falls_back_to_first_judge(tmp_path):
     """A judge2 review written under a hash that no longer matches the posting's CURRENT text is invisible
     (vw_judge2_latest), while the first judge's own (still-current-hash) call keeps ranking normally."""
@@ -976,3 +1008,308 @@ def test_derive_degree_ladder_is_any_of():
     assert judge2.derive_required_fit(weak, title="Analyst")[0] == "partial"
     all_unmet = [rung(l["line"], "unmet", "") for l in ladder]
     assert judge2.derive_required_fit(all_unmet, title="Analyst")[0] == "fails"
+
+
+# ==================================================================================================
+# §30 -- role shape from graded responsibilities, an `adjacent` verdict, eight reading rules
+# ==================================================================================================
+
+# ---------------------------------------------------------------- schema / migration (v21)
+def test_v21_migrates_cleanly_from_v20_keeping_old_rows_valid(tmp_path):
+    """§30.4: a v20 DB (judge2_reviews exists in its §29 shape -- no lines_fit/shape_fit/shape_score/
+    resp_met/resp_adjacent/resp_unmet columns) migrates to v21 without losing its old rows, which read back
+    with NULL in every new column; `vw_judge2_latest` (`SELECT r.*`) exposes them with no view edit; and
+    `judge2 rederive` fills `lines_fit` from the row's own stored `judge2_lines`, leaving `shape_fit`/
+    `shape_score` NULL when no `responsibility`-section lines were ever stored for it."""
+    db_path = str(tmp_path / "v20.duckdb")
+    con = store.connect(db_path)
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    # a §29-era ("lines" contract) row, written before v21's six new columns existed
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract) VALUES (?, ?, 'old-pv', 'gemini', 'm', 'fails', '[]', 0, false, false, NULL,
+                   'high', '', 0, ?, 'hard gate unmet: Active TS/SCI clearance required.', 0, 0, 'lines')""",
+               [pid, dh, NOW])
+    con.execute("""INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line,
+                   section, kind, verdict, evidence, years, evidence_downgraded)
+                   VALUES (?, ?, 'old-pv', 0, 'Active TS/SCI clearance required.', 'required', 'clearance',
+                          'unmet', '', NULL, false)""", [pid, dh])
+    con.close()
+
+    import duckdb
+    raw = duckdb.connect(db_path)
+    raw.execute("UPDATE schema_info SET version = 20")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN lines_fit")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN shape_fit")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN shape_score")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN resp_met")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN resp_adjacent")
+    raw.execute("ALTER TABLE judge2_reviews DROP COLUMN resp_unmet")
+    raw.close()
+
+    con2 = store.connect(db_path)
+    version = con2.execute("SELECT version FROM schema_info").fetchone()[0]
+    assert version == store.SCHEMA_VERSION
+
+    row = con2.execute("SELECT lines_fit, shape_fit, shape_score, resp_met, resp_adjacent, resp_unmet "
+                       "FROM judge2_reviews WHERE prompt_version = 'old-pv'").fetchone()
+    assert row == (None, None, None, None, None, None)
+
+    latest = con2.execute("SELECT lines_fit, shape_fit FROM vw_judge2_latest WHERE posting_id = ?",
+                          [pid]).fetchone()
+    assert latest == (None, None)   # vw_judge2_latest is `SELECT r.*` -- no view edit needed to expose these
+
+    out = judge2.rederive(con2, log=lambda *_: None)
+    assert out["updated"] == 1
+    row2 = con2.execute("SELECT required_fit, lines_fit, shape_fit, shape_score, resp_met, resp_adjacent, "
+                        "resp_unmet FROM judge2_reviews WHERE prompt_version = 'old-pv'").fetchone()
+    assert row2[0] == "fails" and row2[1] == "fails"   # a hard-gate-unmet required line, unchanged by rederive
+    assert row2[2] is None and row2[3] is None          # no responsibility lines were ever stored -> shape NULL
+    assert row2[4] == 0 and row2[5] == 0 and row2[6] == 0
+    con2.close()
+
+
+def test_rederive_fills_shape_from_stored_responsibility_lines(tmp_path):
+    """§30.4: `rederive` recomputes `shape_fit`/`shape_score`/`resp_*` from a row's OWN stored `judge2_lines`
+    (both required and responsibility sections), with no new API call."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    pv = "rederive-shape-pv"
+    con.execute("""INSERT INTO judge2_reviews (posting_id, description_hash, prompt_version, provider, model,
+                   required_fit, unmet, unmet_discarded, downgraded, held_clearance, years_gap, confidence,
+                   raw_response, prompt_chars, reviewed_at, derive_why, lines_discarded, evidence_downgraded,
+                   contract) VALUES (?, ?, ?, 'gemini', 'm', 'meets', '[]', 0, false, false, NULL, 'high', '',
+                   0, ?, 'stale why', 0, 0, 'lines')""", [pid, dh, pv, NOW])
+    con.execute("""INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line,
+                   section, kind, verdict, evidence, years, evidence_downgraded)
+                   VALUES (?, ?, ?, 0, '5+ years of experience.', 'required', 'years_function', 'met',
+                          '13 years (2012-2025)', NULL, false)""", [pid, dh, pv])
+    for i, v in enumerate(["unmet", "unmet", "unmet", "unmet"], start=1):
+        con.execute("""INSERT INTO judge2_lines (posting_id, description_hash, prompt_version, line_no, line,
+                       section, kind, verdict, evidence, years, evidence_downgraded)
+                       VALUES (?, ?, ?, ?, ?, 'responsibility', 'skill', ?, '', NULL, false)""",
+                   [pid, dh, pv, i, f"Duty {i}", v])
+    out = judge2.rederive(con, log=lambda *_: None)
+    assert out["updated"] == 1
+    row = con.execute("SELECT required_fit, lines_fit, shape_fit, shape_score, resp_met, resp_adjacent, "
+                      "resp_unmet FROM judge2_reviews WHERE prompt_version = ?", [pv]).fetchone()
+    assert row[1] == "meets"          # the required line alone still meets
+    assert row[2] == "wrong"          # but 4 of 4 responsibility lines unmet -> shape wrong
+    assert row[3] == 0.0
+    assert row[4:] == (0, 0, 4)
+    assert row[0] == "fails"          # shape wrong forces the COMBINED required_fit to fails
+    con.close()
+
+
+# ---------------------------------------------------------------- parse_response (§30.1)
+def test_parse_response_adjacent_needs_verbatim_evidence_like_met():
+    jd = "Required: Experience configuring Workday HCM."
+    bg = "Configured a different HR platform for five years across two employers."
+    good = json.dumps({"lines": [{"line": "Experience configuring Workday HCM.", "section": "required",
+                                  "kind": "skill", "verdict": "adjacent", "evidence": bg}],
+                       "held_clearance": False, "confidence": "high"})
+    review = judge2.parse_response(good, jd, bg)
+    assert review.lines[0].verdict == "adjacent"
+    assert review.lines[0].evidence == bg
+    assert review.lines[0].evidence_downgraded is False
+    assert review.evidence_downgraded == 0
+
+    no_evidence = json.dumps({"lines": [{"line": "Experience configuring Workday HCM.", "section": "required",
+                                         "kind": "skill", "verdict": "adjacent", "evidence": ""}],
+                              "held_clearance": False, "confidence": "high"})
+    review2 = judge2.parse_response(no_evidence, jd, bg)
+    assert review2.lines[0].verdict == "unclear"
+    assert review2.lines[0].evidence_downgraded is True
+    assert review2.evidence_downgraded == 1
+
+    fabricated = json.dumps({"lines": [{"line": "Experience configuring Workday HCM.", "section": "required",
+                                        "kind": "skill", "verdict": "adjacent",
+                                        "evidence": "a fabricated claim not in the background"}],
+                             "held_clearance": False, "confidence": "high"})
+    review3 = judge2.parse_response(fabricated, jd, bg)
+    assert review3.lines[0].verdict == "unclear"
+    assert review3.lines[0].evidence_downgraded is True
+
+
+def test_parse_response_adjacent_on_clearance_is_coerced_to_unmet():
+    jd = "Required: must hold an active TS/SCI clearance."
+    bg = "Holds an adjacent clearance level at a different agency."
+    raw = json.dumps({"lines": [{"line": "must hold an active TS/SCI clearance.", "section": "required",
+                                 "kind": "clearance", "verdict": "adjacent", "evidence": bg}],
+                      "held_clearance": False, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, bg)
+    assert review.lines[0].verdict == "unmet"
+    assert review.lines[0].evidence == ""
+    assert review.lines[0].evidence_downgraded is False   # coerced, not evidence-downgraded
+    assert review.evidence_downgraded == 0
+
+    jd2 = "Required: an active Project Management Professional (PMP) licence."
+    raw2 = json.dumps({"lines": [{"line": "an active Project Management Professional (PMP) licence.",
+                                  "section": "required", "kind": "licence", "verdict": "adjacent",
+                                  "evidence": "Holds a different, comparable certification."}],
+                       "held_clearance": False, "confidence": "high"})
+    review2 = judge2.parse_response(raw2, jd2, "Holds a different, comparable certification.")
+    assert review2.lines[0].verdict == "unmet"
+
+
+def test_parse_response_discarded_responsibility_line_does_not_cap_meets():
+    jd = ("Required: 5+ years of process improvement experience. "
+          "Responsibilities: Lead cross-functional process redesign initiatives.")
+    bg = "13 years leading process improvement work (2012-2025)."
+    raw = json.dumps({"lines": [
+        {"line": "5+ years of process improvement experience.", "section": "required", "kind": "years_function",
+         "verdict": "met", "evidence": bg},
+        {"line": "a paraphrased responsibility line invented by the model", "section": "responsibility",
+         "kind": "skill", "verdict": "met", "evidence": ""},
+    ], "held_clearance": False, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, bg)
+    assert review is not None
+    assert [l.section for l in review.lines] == ["required"]   # the responsibility entry was discarded
+    assert review.lines_discarded == 0   # discarded RESPONSIBILITY entries are never counted (§30.1/§30.3)
+    review.apply_derivation(title="Process Manager")
+    assert review.required_fit == "meets"   # never capped to partial by the discarded responsibility line
+
+    # a discarded REQUIRED entry, by contrast, still caps the call at partial (§29's guard, unchanged)
+    raw_required_discard = json.dumps({"lines": [
+        {"line": "5+ years of process improvement experience.", "section": "required", "kind": "years_function",
+         "verdict": "met", "evidence": bg},
+        {"line": "a paraphrased required line invented by the model", "section": "required", "kind": "skill",
+         "verdict": "unmet", "evidence": ""},
+    ], "held_clearance": False, "confidence": "high"})
+    review2 = judge2.parse_response(raw_required_discard, jd, bg)
+    assert review2.lines_discarded == 1
+    review2.apply_derivation(title="Process Manager")
+    assert review2.required_fit == "partial"
+
+
+def test_parse_response_caps_responsibility_lines_at_the_constant():
+    duties = [f"Own workstream number {i} end to end." for i in range(judge2.MAX_RESPONSIBILITY_LINES + 3)]
+    jd = "Required: 5+ years of experience. Responsibilities:\n" + "\n".join(duties)
+    entries = [{"line": "5+ years of experience.", "section": "required", "kind": "years_function",
+               "verdict": "unclear", "evidence": ""}]
+    entries += [{"line": d, "section": "responsibility", "kind": "skill", "verdict": "met", "evidence": ""}
+               for d in duties]
+    raw = json.dumps({"lines": entries, "held_clearance": False, "confidence": "high"})
+    review = judge2.parse_response(raw, jd, "")
+    resp = [l for l in review.lines if l.section == "responsibility"]
+    assert len(resp) == judge2.MAX_RESPONSIBILITY_LINES
+    assert [l.line for l in resp] == duties[:judge2.MAX_RESPONSIBILITY_LINES]   # document order, first N kept
+    assert review.lines_discarded == 0   # the overflow is never counted as a discard
+
+
+# ---------------------------------------------------------------- lines_fit / shape (§30.3, table-style)
+def _resp(line="a duty", verdict="met"):
+    return {"line": line, "section": "responsibility", "kind": "skill", "verdict": verdict, "years": None}
+
+
+def test_derive_bridge_one_adjacent_hard_gate_reaches_meets():
+    lines = [_line(kind="clearance", verdict="met", line="L1"),
+            _line(kind="years_function", verdict="adjacent", line="L2")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"
+    assert why.startswith("bridged:") and "L2" in why
+
+
+def test_derive_two_adjacent_hard_gates_partial_never_fails():
+    lines = [_line(kind="years_function", verdict="adjacent", line="L1"),
+            _line(kind="years_function", verdict="adjacent", line="L2")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert "adjacent" in why
+
+
+def test_derive_adjacent_hard_gate_not_bridgeable_when_another_hard_gate_not_met():
+    lines = [_line(kind="clearance", verdict="unclear", line="L1"),
+            _line(kind="years_function", verdict="adjacent", line="L2")]
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"   # the clearance line's own unclear -> partial fires first, never meets
+
+
+def test_derive_adjacent_soft_line_counts_as_neither_met_nor_unmet():
+    lines = [_line(kind="years_function", verdict="met", line="L1", years=None),
+            dict(_line(kind="tool", verdict="adjacent", line="Familiarity with a comparable BI tool"),
+                evidence="used a similar dashboard tool")]
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"   # the adjacent soft line is neither a gap nor an unclear -- meets is still reachable
+
+
+def test_derive_shape_wrong_forces_fails_even_when_lines_fit_meets():
+    lines = [_line(kind="years_function", verdict="met", line="L1")] + [_resp(f"d{i}", "unmet") for i in range(4)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "fails"
+    assert why.startswith("shape: wrong")
+
+
+def test_derive_shape_null_under_min_lines_has_no_effect():
+    lines = [_line(kind="years_function", verdict="met", line="L1")] + [_resp(f"d{i}", "unmet") for i in range(3)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"           # only 3 graded responsibility lines -- below SHAPE_MIN_LINES(4), no opinion
+    assert not why.startswith("shape:")
+
+
+def test_derive_zero_required_lines_shape_fits_meets():
+    lines = [_resp(f"d{i}", "met") for i in range(4)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "meets"
+    assert why.startswith("shape: fits")
+
+
+def test_derive_zero_required_lines_shape_split_partial():
+    lines = [_resp("d1", "met"), _resp("d2", "met"), _resp("d3", "unmet"), _resp("d4", "unmet")]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "partial"
+    assert why.startswith("shape: split")
+
+
+def test_derive_zero_required_lines_shape_wrong_fails():
+    lines = [_resp(f"d{i}", "unmet") for i in range(4)]
+    fit, why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit == "fails"
+    assert why.startswith("shape: wrong")
+
+
+def test_derive_zero_required_and_null_shape_is_no_call():
+    lines = [_resp("d1", "met"), _resp("d2", "unmet")]   # only 2 graded -- below SHAPE_MIN_LINES(4)
+    fit, _why = judge2.derive_required_fit(lines, title="Analyst")
+    assert fit is None
+
+
+def test_shape_score_ignores_unclear_lines():
+    lines = [_resp("d1", "met"), _resp("d2", "met"), _resp("d3", "unmet"), _resp("d4", "unmet"),
+            _resp("d5", "unclear"), _resp("d6", "unclear")]
+    score, counts = judge2.shape_score(lines)
+    assert counts == (2, 0, 2)   # unclear lines never enter met/adjacent/unmet
+    assert score == 0.5
+
+
+# ---------------------------------------------------------------- run(): unparseable diagnostics (§30.5)
+def test_unparseable_response_logs_finish_reason_and_token_counts_never_the_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
+    monkeypatch.setenv("GEMINI_API_MODEL", "m1")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+
+    def fake_transport(url, headers=None, json=None):
+        body = {"candidates": [{"content": {"parts": [{"text": "{\"lines\": [", "thought": False}]},
+                                "finishReason": "MAX_TOKENS"}],
+                "usageMetadata": {"promptTokenCount": 4000, "candidatesTokenCount": 8192,
+                                  "thoughtsTokenCount": 8000, "totalTokenCount": 12192}}
+        return _FakeResponse(200, body)
+
+    logs = []
+    result = judge2.run(con, top_n=5, dry_run=False, transport=fake_transport, sleep_fn=lambda s: None,
+                        log=logs.append)
+    assert result["unparseable"] == 1
+    diag = [l for l in logs if "unparseable diagnostics" in l]
+    assert len(diag) == 1
+    assert "finishReason=MAX_TOKENS" in diag[0]
+    assert "'thoughtsTokenCount': 8000" in diag[0]
+    assert "'totalTokenCount': 12192" in diag[0]
+    # never the raw response text -- confirm the sentinel fragment of the (unparseable) body text is absent
+    assert '"lines": [' not in diag[0]
+    con.close()

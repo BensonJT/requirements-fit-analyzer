@@ -1089,3 +1089,37 @@ DB only and must never be written to a tracked file, a fixture, a log committed 
 round 6 with the IDENTICAL prompt (noise floor) -> read line-level misses with the user -> tune the sheet,
 the prompt, or the §29.2 constants, in that order of preference (constants are free, the sheet is cheap, the
 prompt costs a run).
+
+## 30. Amendment — role shape from graded responsibilities, an `adjacent` verdict, and eight reading rules (2026-09-21, user rulings; binding, extends §29)
+**Why.** Round 7 (thinking on) did not help (catch 46% / agree 78% vs round 5's 62% / 78%), so the model setting is not the handicap. The user then re-graded 17 disputed gold rows line by line and changed 8 labels. Re-scored with no API call, round 5 is catch 62% / agree 85%. His sheet showed he applies TWO tests under one label, and the judge was only asked one: (a) requirement gates, which §29 covers, and (b) ROLE SHAPE: he grades every responsibility `met` / `adjacent` / `unmet` and fails a posting whose responsibilities are mostly work he has not done, even when every basic qualification is met. A third family (commute, pay, a coding assessment, an unrealistic scope) is logistics: it is recorded in notes and never moves `required_fit` (§22.5 ruling, unchanged).
+
+**30.1 What the model returns (additions to §29.1).**
+- `section` gains a third value: `required` | `preferred` | `responsibility`. The model rates up to `MAX_RESPONSIBILITY_LINES` (12) responsibility / duty lines, VERBATIM from the JD (same substring guard; a discarded responsibility line is counted but does NOT cap the call at `partial`, only a discarded `required` line does).
+- `verdict` gains `adjacent`: the background shows the same skill practised in a different domain, tool family or scale, so it would transfer but is not the thing asked. `adjacent` needs verbatim `evidence` exactly like `met` (no evidence -> `unclear`). `adjacent` is NOT allowed on `clearance` or `licence` lines (code coerces it to `unmet`).
+- A responsibility line uses `kind` = `skill` unless another kind plainly fits.
+
+**30.2 Reading rules, stated in the prompt as how to rate ONE line** (they replace §25/§29's or-list years wording; the tools rule stays):
+1. A domain qualifier applies to every item in its list. "N years in healthcare operations, strategy, analytics, technology or a related field" asks for each item INSIDE that domain; a generic item never satisfies the line on its own. The same holds when the posting's function supplies the domain ("relevant experience in HR operations, process design, HR technology").
+2. Systems named in a line set its context. "Experience with <named systems>, approval workflows, or process design and configuration" means that work IN those systems; if the background shows none of the named systems the line is `unmet` (or `adjacent` when the same work was done elsewhere).
+3. "N years of directly related / relevant experience" (degree ladders included) is judged against the posting's responsibilities: pick the rung the candidate's degree selects, then count only years spent doing the KIND of work the responsibilities describe.
+4. Clearance timing. "Ability to obtain", "eligible for", "required after day 1", "must obtain within N months" = obtainable after hire: `met` for a citizen with no disqualifier. "Active", "current", "required on day 1", "required to start", a polygraph, or a held level the background does not show = must already be held: `unmet`.
+5. A tool named in the posting title is a hard gate (unchanged from §29.2); trying a tool out, or using it only as an end user, is not experience building with it.
+6. A certification line that names its issuing bodies (especially with "verifiable in the issuer's database") is kind `licence`: `unmet` unless the background shows that issuer.
+7. Finance. "Experience with financial data", budgets, forecasts, cost or benefit models is met by budget-management work done outside a finance department. "In a finance organization", FP&A, accounting, named finance systems, or a role that sits inside the CFO organization is not.
+8. A posting with no qualifications section: the responsibilities ARE the requirements. The model still marks them `responsibility`; §30.3 derives the call from shape alone.
+
+**30.3 Derivation (pure functions, table-tested; constants tunable with `judge2 rederive`, no API call).**
+- `lines_fit` = §29.2's derivation over `required` lines, with `adjacent` handled as: soft line -> counts as neither met nor unmet; `years_function` hard gate -> a BRIDGE: exactly one adjacent hard gate with every other hard gate `met` leaves `meets` reachable (why string says `bridged: <line>`); two or more -> `partial`. `adjacent` never produces `fails` by itself.
+- `shape_score` = (met + 0.5 * adjacent) / (met + adjacent + unmet) over `responsibility` lines; `unclear` lines are ignored; fewer than `SHAPE_MIN_LINES` (4) graded lines -> shape is NULL (no opinion). `shape_fit` = `wrong` below `SHAPE_WRONG_BELOW` (0.45), `fits` from `SHAPE_FITS_FROM` (0.60), else `split`.
+- `required_fit` (the one call the rank and `evaluate` read): `fails` if `lines_fit` is `fails` OR `shape_fit` is `wrong`; `meets` if `lines_fit` is `meets` and `shape_fit` is `fits` or NULL; otherwise `partial`. With zero surviving required lines and a non-NULL shape (rule 8): `fits` -> `meets`, `split` -> `partial`, `wrong` -> `fails`. Zero required lines and NULL shape -> no call, as before.
+- `derive_why` names WHICH test decided: `gate: <line>`, `shape: wrong (m/a/u = 2/3/6)`, `bridged: <line>`.
+
+**30.4 Storage (schema v21; back up the live DB first).** `judge2_reviews` gains `lines_fit`, `shape_fit`, `shape_score`, and the counts `resp_met`, `resp_adjacent`, `resp_unmet`. `judge2_lines` needs no new column (`section` and `verdict` are text). `vw_judge2_latest` exposes the new columns; the J2 cell / Why text shows the shape when it decided the call. Old rows keep NULLs and stay valid; `rederive` fills `lines_fit` for `contract = 'lines'` rows and leaves shape NULL where no responsibility lines were stored.
+
+**30.5 Cost, pacing, diagnostics.** Output roughly doubles (about 10 more rated lines): default `MAX_OUTPUT_TOKENS` 8192 and `EXPECTED_OUTPUT_TOKENS` raised to match a measured dry estimate. NEW: when a response is unparseable, log `finishReason` and the `usageMetadata` token counts (never the text) before discarding it: round 7's four unparseable rows were `MAX_TOKENS` with the whole budget spent on thought tokens, and nothing in the log said so. Thinking stays `minimal` by default.
+
+**30.6 Evaluation.** Bar and sets unchanged. The line-level report also matches gold unmet lines against `responsibility` lines. Known limit: gold rows carry one combined human call, not a separate human shape call; a per-row human shape label is a later step if the combined call proves too coarse. Labels changed on 2026-09-21 came from a line-by-line second look at 17 rows; they are recorded `blind` on the user's statement, with the provenance in the gold manifest note.
+
+**30.7 Privacy and gates.** Unchanged from §29.6: same seven payload fields; responsibility lines come from the JD text already sent, so no new data leaves the machine. Tests use fake or recorded responses only and never open the live DB.
+
+**30.8 Order.** Branch `judge2-shape` in a worktree -> orchestrator audit -> back up DB -> merge (v21) -> dry run -> live round 8 (minimal thinking) -> read misses with the user -> tune constants, then sheet, then prompt.

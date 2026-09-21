@@ -149,7 +149,20 @@ def cmd_bridge(con, a):
     same titles under one shared posted date) makes `days_open` and a NEW mark actively
     misleading. A posting matched ONLY by evergreen place(s) prints `pool` in place of days-open
     and is never marked NEW. This is pure display logic driven by the registry's `evergreen`
-    column -- it is never inferred from the data itself."""
+    column -- it is never inferred from the data itself.
+
+    `--include-stale` (orchestrator audit 2026-09-21, letter E): by default, a posting whose
+    `last_seen_at` has not moved in `backend.ats.bridge.BRIDGE_STALE_DAYS` days is hidden (see
+    `vw_bridge_open` / `vw_bridge_open_all`) and a one-line summary reports how many were hidden.
+    `--include-stale` shows them anyway, with no summary line (nothing was hidden).
+
+    NEW-mark cutoff (orchestrator audit 2026-09-21, letter G): the cutoff is the START of the
+    previous bridge SWEEP -- one value per `board_runs.run_id`, not the per-board `ran_at`
+    timestamps a sweep's boards finish at slightly different times (the old query's `DISTINCT
+    ran_at` could pick two timestamps from the SAME sweep). "Previous sweep" = the latest bridge
+    run_id that is not the most recent one; its start is the min `ran_at` across its own board
+    rows. On the very first bridge sweep ever run, there is no previous sweep, so nothing is ever
+    marked NEW -- documented here rather than left to look like a bug."""
     from backend.ats import bridge as B
     from backend.ats.registry import load_bridge_employer_order, load_bridge_places
 
@@ -158,13 +171,20 @@ def cmd_bridge(con, a):
     place_evergreen = {p["place"]: p["evergreen"] for p in all_places}
     employer_order = load_bridge_employer_order()
 
-    prior_runs = con.execute(
-        "SELECT DISTINCT ran_at FROM board_runs WHERE track = 'bridge' ORDER BY ran_at DESC LIMIT 2").fetchall()
-    new_cutoff = prior_runs[1][0] if len(prior_runs) > 1 else None
+    run_starts = con.execute(
+        "SELECT run_id, min(ran_at) AS started FROM board_runs WHERE track = 'bridge' "
+        "GROUP BY run_id ORDER BY started DESC LIMIT 2").fetchall()
+    new_cutoff = run_starts[1][1] if len(run_starts) > 1 else None
 
     cols = ("posting_id", "employer", "title", "location_primary", "bridge_place", "employment_type",
             "pay_min", "pay_max", "pay_interval", "url", "first_seen_at", "days_open")
-    rows = con.execute(f"SELECT {', '.join(cols)} FROM vw_bridge_open").fetchall()
+    view = "vw_bridge_open_all" if a.include_stale else "vw_bridge_open"
+    rows = con.execute(f"SELECT {', '.join(cols)} FROM {view}").fetchall()
+    if not a.include_stale:
+        hidden = con.execute("SELECT count(*) FROM vw_bridge_open_all").fetchone()[0] - len(rows)
+        if hidden:
+            print(f"bridge: {hidden} stale posting(s) hidden (no confirmed sighting in "
+                  f"{B.BRIDGE_STALE_DAYS}+ days) -- rerun with --include-stale to see them")
 
     out = []
     for r in rows:
@@ -180,7 +200,7 @@ def cmd_bridge(con, a):
         voice = B.voice_flag(d["title"])
         if voice == "high" and a.hide_voice_high:
             continue
-        is_new = (not is_pool) and new_cutoff is not None and d["first_seen_at"] >= new_cutoff
+        is_new = (not is_pool) and new_cutoff is not None and d["first_seen_at"] > new_cutoff
         if a.new_only and not is_new:
             continue
         emp_rank = employer_order.get((d["employer"] or "").lower(), len(employer_order) + 1)
@@ -704,6 +724,8 @@ def main():
     s.add_argument("--new-only", action="store_true", help="only rows new since the previous bridge run")
     s.add_argument("--hide-voice-high", action="store_true",
                    help="convenience filter, off by default -- advisory voice flag never hides a row unless asked")
+    s.add_argument("--include-stale", action="store_true",
+                   help="show postings not re-confirmed in BRIDGE_STALE_DAYS+ days too (default: hidden)")
     s.set_defaults(func=cmd_bridge)
 
     s = sub.add_parser("report", parents=[common], help="write a Jobs_Found file")

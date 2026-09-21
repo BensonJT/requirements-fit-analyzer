@@ -37,7 +37,7 @@ def sweep_bridge(con, rows, max_ring=1, workers=8, max_pages=None, log=print):
     run_id = str(uuid.uuid4())[:8]
     started, t0 = _now(), time.monotonic()
     stats = dict(run_id=run_id, attempted=len(rows), succeeded=0, failed=0, seen=0, new=0, reopened=0, closed=0)
-    places = load_bridge_places(max_ring=max_ring)
+    places = load_bridge_places(max_ring=max_ring, log=log)
     if not places:
         log(f"Bridge sweep: no places configured in bridge_places.csv (max_ring={max_ring}) -- "
             f"skipping all {len(rows)} bridge row(s). Nothing was pulled.")
@@ -48,6 +48,20 @@ def sweep_bridge(con, rows, max_ring=1, workers=8, max_pages=None, log=print):
         f"(max_ring={max_ring}, {workers} workers, run {run_id})...")
     attempted_places = {p["place"] for p in places}
     scope = {"strategy": "places", "places": places}
+
+    # Orchestrator audit 2026-09-21, letter A.2: a row on a platform with no places-strategy
+    # adapter is skipped LOUDLY here, before any request -- never handed to the thread pool, so
+    # `adapters.list_jobs`'s own guard (letter A.1) is only ever the last line of defense.
+    pullable = [r for r in rows if r["platform"] in adapters.PLACES_PLATFORMS]
+    unsupported = [r for r in rows if r["platform"] not in adapters.PLACES_PLATFORMS]
+    for row in unsupported:
+        now = _now()
+        msg = (f"platform {row['platform']!r} has no places-scoped adapter "
+               f"(supported: {sorted(adapters.PLACES_PLATFORMS)})")
+        stats["failed"] += 1
+        store.log_board(con, run_id, row["employer"], row["platform"], False, 0.0, now, error=msg, track="bridge")
+        log(f"  {row['employer']} ({row['platform']}) [bridge]: SKIPPED -- {msg}")
+    rows = pullable
 
     def pull(row):
         t = time.monotonic()
@@ -72,7 +86,8 @@ def sweep_bridge(con, rows, max_ring=1, workers=8, max_pages=None, log=print):
             place_status = getattr(jobs, "place_status", {})
             try:
                 seen, new, reopened, closed = store.record_bridge_board(
-                    con, employer, platform, jobs, now, attempted_places=attempted_places, place_status=place_status)
+                    con, employer, platform, jobs, now, attempted_places=attempted_places,
+                    place_status=place_status, log=log)
             except Exception as e:  # noqa: BLE001
                 stats["failed"] += 1
                 store.log_board(con, run_id, employer, platform, False, elapsed, now, job_count=len(jobs),
@@ -254,6 +269,14 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
         all_rows = [r for r in all_rows if r["platform"] == platform]
     if employer:
         all_rows = [r for r in all_rows if employer.lower() in r["employer"].lower()]
+    # Orchestrator audit 2026-09-21, letter I: `--limit` is applied AFTER the `--track` filter, so
+    # `--track bridge --limit 5` means the first five BRIDGE rows -- applying it to the combined
+    # fit+bridge list first (the old order) could hand `--limit 5` a slice with zero bridge rows
+    # in it, even though bridge rows exist further down the registry.
+    if track == "fit":
+        all_rows = [r for r in all_rows if r.get("track", "fit") == "fit"]
+    elif track == "bridge":
+        all_rows = [r for r in all_rows if r.get("track", "fit") == "bridge"]
     if limit:
         all_rows = all_rows[:limit]
     fit_rows = [r for r in all_rows if r.get("track", "fit") == "fit"]

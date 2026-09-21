@@ -49,7 +49,10 @@ def _read_csv_rows(path):
     if not os.path.exists(path):
         return []
     rows = []
-    with open(path, newline="", encoding="utf-8") as f:
+    # utf-8-sig: a BOM'd header (Excel-saved CSV) would otherwise make the first column name
+    # come back as "﻿employer", which never matches row.get("employer") below (orchestrator
+    # audit 2026-09-21, letter B).
+    with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             employer = (row.get("employer") or "").strip()
             if not employer or employer.startswith("#"):
@@ -90,13 +93,16 @@ def load_registry(implemented_only=True, include_unresolved=False):
     return ordered
 
 
-def load_bridge_places(max_ring=1):
+def load_bridge_places(max_ring=1, log=None):
     """Places for the bridge track (sprint plan §31.2/§31.3), from the PRIVATE bridge_places.csv
     beside the registry (never in the repo -- see the module docstring). Columns: place, ring
     (any positive integer -- the user may keep as many rings as they like, e.g. a ring 3 of
     hard-commute places; NOT capped at 1|2), search_text (defaults to `place` when blank),
     state (defaults to the state parsed out of `place`'s "City, ST" shape when blank -- see
-    backend.ats.bridge.parse_place), evergreen (optional, truthy -- see below).
+    backend.ats.bridge.parse_place), evergreen (optional, truthy -- see below), allow_no_state
+    (optional, truthy -- orchestrator audit 2026-09-21, letter C.3: opts a place into matching a
+    city-only location string with no state at all, e.g. a per-store facet board's
+    "Springfield (0350)"; default off, since that shape is otherwise too easy to false-match).
 
     Only rows with `ring <= max_ring` are included (default 1: ring-1 only; 2026-09-21 user
     ruling replaced the earlier `ring2` boolean flag with this so a THIRD ring, or more, needs no
@@ -106,6 +112,12 @@ def load_bridge_places(max_ring=1):
     caller (a bridge sweep) must treat that as "nothing to pull for this employer", loudly, never
     as license to fall back to a whole-board pull (sprint plan §31, item 8).
 
+    `log` (orchestrator audit 2026-09-21, letter B): when the file has rows but NONE of them has a
+    usable `place` value, this calls `log(...)` with the specific cause (a header mismatch --
+    'place' column missing or misspelled) rather than leaving the caller to print the generic "no
+    places configured" line, which is also true of a genuinely-empty/missing file but means
+    something different to fix.
+
     `evergreen` (2026-09-21 user ruling): some employers post standing application pools -- every
     site lists the same titles under one shared posted date, including generic titles like "Any
     Position" -- where a NEW mark or a days-open count is actively misleading. A place row's
@@ -113,11 +125,13 @@ def load_bridge_places(max_ring=1):
     detected heuristically -- the user names which rows are pools."""
     from . import bridge as B
 
-    rows = []
-    for row in _read_bridge_csv_rows(BRIDGE_PLACES_CSV):
+    raw_rows = _read_bridge_csv_rows(BRIDGE_PLACES_CSV)
+    rows, any_place = [], False
+    for row in raw_rows:
         place = (row.get("place") or "").strip()
         if not place:
             continue
+        any_place = True
         try:
             ring = int((row.get("ring") or "1").strip() or "1")
         except ValueError:
@@ -131,8 +145,12 @@ def load_bridge_places(max_ring=1):
         if not state:
             _, state = B.parse_place(place)
         evergreen = (row.get("evergreen") or "").strip().lower() in ("1", "true", "yes", "y")
+        allow_no_state = (row.get("allow_no_state") or "").strip().lower() in ("1", "true", "yes", "y")
         rows.append({"place": place, "ring": ring, "search_text": search_text, "state": state,
-                     "evergreen": evergreen})
+                     "evergreen": evergreen, "allow_no_state": allow_no_state})
+    if not any_place and raw_rows and log:
+        log(f"bridge_places.csv has {len(raw_rows)} row(s) but none has a usable 'place' value -- "
+            f"check the header spelling (expected column 'place') in {BRIDGE_PLACES_CSV}")
     return rows
 
 
@@ -154,10 +172,22 @@ def load_bridge_employer_order():
 
 
 def _read_bridge_csv_rows(path):
+    """Rows from a private bridge CSV (bridge_places.csv / bridge_employer_order.csv), skipping
+    blank rows and lines whose FIRST field starts with '#' -- same comment convention
+    _read_csv_rows uses for ats_registry.csv (orchestrator audit 2026-09-21, letter B). Opened
+    utf-8-sig for the same BOM'd-header reason as _read_csv_rows."""
     if not os.path.exists(path):
         return []
-    with open(path, newline="", encoding="utf-8") as f:
-        return [row for row in csv.DictReader(f) if any((v or "").strip() for v in row.values())]
+    rows = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            if not any((v or "").strip() for v in row.values()):
+                continue
+            first = next(iter(row.values()), "")
+            if (first or "").strip().startswith("#"):
+                continue
+            rows.append(row)
+    return rows
 
 
 if __name__ == "__main__":

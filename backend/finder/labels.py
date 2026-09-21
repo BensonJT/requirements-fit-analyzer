@@ -269,7 +269,13 @@ class PostingIndex:
     URL, then company keys + similar title (newest first_seen_at wins). Active and closed rows."""
 
     def __init__(self, con):
-        rows = con.execute("SELECT posting_id, employer, title, url, req_id, first_seen_at FROM postings").fetchall()
+        # `track = 'fit'` (orchestrator audit 2026-09-21, letter F): a vault application/passed
+        # doc can only ever be for a real job the user applied to, never a bridge (place-scoped
+        # retail) posting, so matching against bridge rows was always a false-positive risk with
+        # no upside -- and it kept a bridge row eligible to be swept into a positive label set.
+        rows = con.execute(
+            "SELECT posting_id, employer, title, url, req_id, first_seen_at FROM postings "
+            "WHERE coalesce(track, 'fit') = 'fit'").fetchall()
         self.by_url = {r[3]: r[0] for r in rows if r[3]}
         self.by_employer = defaultdict(list)
         for pid, employer, title, url, req_id, first_seen in rows:
@@ -329,9 +335,12 @@ def pseudo_negatives(con, n: int = 1500, seed: int = 7, exclude: Optional[set] =
                          "locations", "country", "workplace_type", "employment_type", "job_level", "pay_min",
                          "pay_max", "pay_interval", "description_text")
     while len(docs) < n:
+        # `track = 'fit'` (orchestrator audit 2026-09-21, letter F): a bridge posting must never
+        # become a pseudo-negative even if a future adapter starts returning JD text inline for
+        # one -- the bridge track is never a training input.
         batch = con.execute(f"""
             SELECT {', '.join(cols)} FROM postings
-            WHERE status = 'active' AND length(description_text) >= {MIN_TEXT}
+            WHERE status = 'active' AND track = 'fit' AND length(description_text) >= {MIN_TEXT}
             ORDER BY hash(posting_id || ?), posting_id LIMIT ? OFFSET ?""", [str(seed), page, offset]).fetchall()
         if not batch:
             break

@@ -1,6 +1,7 @@
-place,ring,search_text,state,evergreen
-"Springfield, XX",1,"Springfield, XX",XX,
-"Rivertown, YY",1,"Rivertown, YY",YY,
-"Lakeside, YY",2,"Lakeside, YY",YY,
-"Hilltown, ZZ",3,"Hilltown, ZZ",ZZ,
-Remote,1,Remote,remote,true
+place,ring,search_text,state,evergreen,allow_no_state
+"Springfield, XX",1,"Springfield, XX",XX,,
+"Rivertown, YY",1,"Rivertown, YY",YY,,
+"Lakeside, YY",2,"Lakeside, YY",YY,,
+"Hilltown, ZZ",3,"Hilltown, ZZ",ZZ,,
+Remote,1,Remote,remote,true,
+"Oldtown, ZZ",1,"Oldtown, ZZ",ZZ,,true

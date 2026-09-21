@@ -764,6 +764,41 @@ def test_cmd_bridge_new_cutoff_uses_the_previous_sweeps_run_id_not_per_board_ran
     assert not old1_line.startswith("NEW")
 
 
+def test_cmd_bridge_does_not_mark_the_previous_sweeps_later_boards_new(tmp_path, monkeypatch, capsys):
+    """Re-audit 2026-09-21: a posting first seen by the SECOND board of the previous sweep sits after
+    that sweep's start, so a cutoff at the previous sweep's start kept printing it NEW one sweep
+    later. NEW is only what the latest sweep saw for the first time."""
+    import finder
+    from argparse import Namespace
+    from backend.ats import registry as R
+
+    places = [{"place": "Springfield, XX", "ring": 1, "search_text": "Springfield, XX", "state": "XX",
+              "evergreen": False}]
+    monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
+    monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
+    con = store.connect(str(tmp_path / "t26.duckdb"))
+    kw = dict(attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
+
+    a1, a2 = datetime(2026, 9, 20, 10, 0, 0), datetime(2026, 9, 20, 10, 0, 30)
+    store.record_bridge_board(con, "Acme Co", "workday", [_bjob("A1", title="Clerk Alpha")], a1, **kw)
+    store.log_board(con, "run-a", "Acme Co", "workday", True, 1.0, a1, track="bridge")
+    store.record_bridge_board(con, "Zeta Co", "workday", [_bjob("Z1", title="Clerk Zulu")], a2, **kw)
+    store.log_board(con, "run-a", "Zeta Co", "workday", True, 1.0, a2, track="bridge")
+
+    b1, b2 = datetime(2026, 9, 21, 10, 0, 0), datetime(2026, 9, 21, 10, 0, 30)
+    store.record_bridge_board(con, "Acme Co", "workday", [_bjob("A1", title="Clerk Alpha"), _bjob("A2", title="Clerk Bravo")], b1, **kw)
+    store.log_board(con, "run-b", "Acme Co", "workday", True, 1.0, b1, track="bridge")
+    store.record_bridge_board(con, "Zeta Co", "workday", [_bjob("Z1", title="Clerk Zulu")], b2, **kw)
+    store.log_board(con, "run-b", "Zeta Co", "workday", True, 1.0, b2, track="bridge")
+
+    capsys.readouterr()
+    finder.cmd_bridge(con, Namespace(max_ring=1, new_only=False, hide_voice_high=False, include_stale=False))
+    lines = capsys.readouterr().out.splitlines()
+    assert next(l for l in lines if "Clerk Bravo" in l).startswith("NEW")      # first board of the latest sweep
+    assert not next(l for l in lines if "Clerk Zulu" in l).startswith("NEW")  # second board of the PREVIOUS sweep
+    assert not next(l for l in lines if "Clerk Alpha" in l).startswith("NEW")
+
+
 def test_cmd_bridge_marks_nothing_new_on_the_very_first_sweep(tmp_path, monkeypatch, capsys):
     import finder
     from argparse import Namespace

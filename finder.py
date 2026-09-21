@@ -156,13 +156,14 @@ def cmd_bridge(con, a):
     `vw_bridge_open` / `vw_bridge_open_all`) and a one-line summary reports how many were hidden.
     `--include-stale` shows them anyway, with no summary line (nothing was hidden).
 
-    NEW-mark cutoff (orchestrator audit 2026-09-21, letter G): the cutoff is the START of the
-    previous bridge SWEEP -- one value per `board_runs.run_id`, not the per-board `ran_at`
-    timestamps a sweep's boards finish at slightly different times (the old query's `DISTINCT
-    ran_at` could pick two timestamps from the SAME sweep). "Previous sweep" = the latest bridge
-    run_id that is not the most recent one; its start is the min `ran_at` across its own board
-    rows. On the very first bridge sweep ever run, there is no previous sweep, so nothing is ever
-    marked NEW -- documented here rather than left to look like a bug."""
+    NEW-mark cutoff (orchestrator audit 2026-09-21, letter G; corrected in the re-audit): NEW means
+    "first seen in the LATEST bridge sweep", so the cutoff is the START of the latest sweep -- one
+    value per `board_runs.run_id` (the min `ran_at` across its board rows), not the per-board
+    `ran_at` timestamps a sweep's boards finish at slightly different times. The start of the
+    PREVIOUS sweep is the wrong cutoff: every posting first seen by that sweep's second and later
+    boards sits after it, and would still print NEW one sweep later. On the very first bridge
+    sweep ever run there is no earlier sweep to be new against, so nothing is marked NEW --
+    documented here rather than left to look like a bug."""
     from backend.ats import bridge as B
     from backend.ats.registry import load_bridge_employer_order, load_bridge_places
 
@@ -174,7 +175,7 @@ def cmd_bridge(con, a):
     run_starts = con.execute(
         "SELECT run_id, min(ran_at) AS started FROM board_runs WHERE track = 'bridge' "
         "GROUP BY run_id ORDER BY started DESC LIMIT 2").fetchall()
-    new_cutoff = run_starts[1][1] if len(run_starts) > 1 else None
+    new_cutoff = run_starts[0][1] if len(run_starts) > 1 else None
 
     cols = ("posting_id", "employer", "title", "location_primary", "bridge_place", "employment_type",
             "pay_min", "pay_max", "pay_interval", "url", "first_seen_at", "days_open")
@@ -200,7 +201,7 @@ def cmd_bridge(con, a):
         voice = B.voice_flag(d["title"])
         if voice == "high" and a.hide_voice_high:
             continue
-        is_new = (not is_pool) and new_cutoff is not None and d["first_seen_at"] > new_cutoff
+        is_new = (not is_pool) and new_cutoff is not None and d["first_seen_at"] >= new_cutoff
         if a.new_only and not is_new:
             continue
         emp_rank = employer_order.get((d["employer"] or "").lower(), len(employer_order) + 1)

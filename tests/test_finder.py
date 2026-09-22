@@ -3454,3 +3454,28 @@ def test_residence_restriction_boilerplate_cut_at_inc_and_country_with_a_second_
                                    "Acme, Inc")[0] == "none"
     assert S.residence_restriction("Must reside in the United States, and work must be performed within the "
                                    "United States")[0] == "none"
+
+
+def test_full_screen_ignores_the_sweep_since_window(monkeypatch):
+    """`sweep_ats.py --full-screen` must screen the whole active corpus, not just the rows the sweep
+    it rode along with had touched. In `_candidate_sql` the `full` branch and the `since` window are
+    ANDed, so `daily()` has to drop `since` when `full` is set -- the pairing coverage_stage already
+    used. Regression: on 2026-09-21 a --full-screen sweep screened 7,625 of 85,893 active rows."""
+    from backend.finder import pipeline
+    seen = {}
+
+    def fake_screen(con, *, since=None, full=False, **kw):
+        seen["since"], seen["full"] = since, full
+        return {"screened": 0}
+
+    monkeypatch.setattr(pipeline, "screen", fake_screen)
+    monkeypatch.setattr(pipeline, "coverage_stage", lambda con, since=None, log=None: {})
+    monkeypatch.setattr(pipeline, "required_embed_stage", lambda con, log=None: {})
+    monkeypatch.setattr(pipeline.report_mod, "snapshots", lambda con, out_dir=None: [])
+    since = datetime(2026, 9, 21, 20, 6)
+
+    pipeline.daily(None, since=since, vault_dir=None, full=True, use_model=False, report=False)
+    assert seen == {"since": None, "full": True}, seen
+
+    pipeline.daily(None, since=since, vault_dir=None, full=False, use_model=False, report=False)
+    assert seen == {"since": since, "full": False}, seen

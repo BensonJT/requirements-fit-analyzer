@@ -1312,6 +1312,12 @@ def connect(db_path=None):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     _migrate(db_path)
     con = duckdb.connect(db_path)
+    # DuckDB's own default memory_limit is 80% of RAM (6.2 GiB of this 8 GB WSL VM), which leaves too
+    # little for a stage that ALSO holds a sentence-transformer encoder in the same process: the
+    # required-embed scoring stage took the whole VM down on 2026-09-21. DuckDB spills to
+    # `temp_directory` when it hits the limit, so a lower cap costs speed on a big rescreen, never
+    # correctness. Override with JOBSEARCH_DUCKDB_MEMORY_LIMIT (e.g. '6GB' on a bigger machine).
+    con.execute(f"SET memory_limit = '{os.environ.get('JOBSEARCH_DUCKDB_MEMORY_LIMIT', '3500MB')}'")
     con.execute(SCHEMA)
     if not con.execute("SELECT count(*) FROM schema_info").fetchone()[0]:
         con.execute("INSERT INTO schema_info VALUES (?)", [SCHEMA_VERSION])

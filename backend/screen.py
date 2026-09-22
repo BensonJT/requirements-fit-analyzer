@@ -78,9 +78,14 @@ def annual_top(job: Listing) -> Optional[float]:
 # "manage remote field teams", "supports remote sites", "virtual teams" -- never counts as the posting's
 # own location. "virtual" added 2026-09-19 (B2 amendment): "virtual teams" is duties vocabulary, not a
 # workplace statement, same as "remote teams".
+# 2026-09-22: assistant/agent/chatbot/recruiter added. McKesson JR0153473 (hybrid, four non-commutable
+# cities) was read as remote off one line of recruiting boilerplate -- "McKesson does rely on a virtual
+# assistant (Gia) for certain recruiting-related communications with candidates" -- so the commute rule
+# never ran. A virtual assistant is a piece of software, not a workplace.
 _REMOTE_DUTY_RE = re.compile(
     r"\b(?:remote|virtual)\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
-    r"office|offices|customer|customers|client|clients|user|users|support)\b|\bremote\s+sensing\b", re.I)
+    r"office|offices|customer|customers|client|clients|user|users|support|assistant|assistants|agent|"
+    r"agents|chatbot|chatbots|recruiter|recruiters)\b|\bremote\s+sensing\b", re.I)
 # Locations too generic for an ATS on-site/hybrid flag to be trusted at all (Microsoft's
 # "United States, Multiple Locations" onsite tag being the case that surfaced this).
 _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
@@ -483,9 +488,19 @@ def clearance_call(blob: str) -> tuple:
 
 
 def commutable_locations(job: Listing) -> list:
-    """The listing locations that name a commutable place, headline location first; [] when none do."""
-    return [loc for loc in [job.location, *job.locations]
-            if loc and place_matches(loc, P.COMMUTABLE_PLACES)]
+    """The listing locations that name a commutable place, headline location first; [] when none do.
+
+    COMMUTE_REMOTE_ONLY_PLACES are dropped when the ATS says the role sits in an office: a place can be
+    close enough to satisfy a remote role's residence restriction and still be a punishing commute several
+    days a week (2026-09-22 user ruling, on M&T R88502). Only an explicit hybrid/onsite flag triggers the
+    narrowing -- an unknown workplace keeps every place, so this never rejects on a guess. §23's residence
+    check reads P.COMMUTABLE_PLACES directly and is deliberately unaffected.
+    """
+    places = P.COMMUTABLE_PLACES
+    remote_only = set(getattr(P, "COMMUTE_REMOTE_ONLY_PLACES", None) or ())
+    if remote_only and job.extra.get("workplace_type") in ("hybrid", "onsite"):
+        places = [p for p in places if p not in remote_only]
+    return [loc for loc in [job.location, *job.locations] if loc and place_matches(loc, places)]
 
 
 def is_commutable(job: Listing) -> bool:

@@ -354,6 +354,14 @@ COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state
 # commute gate, and only when the ATS explicitly says hybrid or onsite; an unknown workplace keeps them,
 # so the rule never rejects on a guess. Entries must be spelled exactly as in COMMUTABLE_PLACES.
 COMMUTE_REMOTE_ONLY_PLACES = []
+# 2026-09-22 (user ruling): entries of COMMUTABLE_PLACES that are acceptable for an in-office role but a long
+# drive depending on the exact site. They still pass the commute gate; the local/hybrid flag says "long
+# commute" so the user checks the site and the in-office days before applying.
+COMMUTE_FLAG_PLACES = []
+# Per-employer exceptions: {employer name or registry slug: [places]}. For that employer those places are a
+# plain commute -- neither remote-only nor flagged (e.g. an office the user would drive to for that employer
+# only). Matched on the normalized company name, exactly as EMPLOYER_RESIDENCE_NOTES is.
+COMMUTE_EMPLOYER_PLACES = {}
 
 # Per-employer residence knowledge the JD text never states (§23 amendment): some employers restrict
 # remote hires to residents near one of a handful of hub offices without writing that policy into the

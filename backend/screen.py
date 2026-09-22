@@ -129,9 +129,26 @@ _REMOTE_BARE_HEADING_RE = re.compile(r"^\s*(?:remote|hybrid|on-?site|telework)\s
 _REMOTE_VIRTUAL_MODE_RE = re.compile(
     r"\bvirtually\b|\b(?:in.person or virtual|virtual or in.person)\b|\bvirtual\b(?:\s+\w+){0,2}\s+"
     r"(?:interview|interviews|meeting|meetings)\b", re.I)
+# 8. 2026-09-22: a remote mention scoped to a NAMED POPULATION, or hedged across the employer's reqs in
+#    general, is not a statement about THIS posting's workplace. Found on USAA R0120810 (HR Integration &
+#    Planning Principal), which reached `candidate` with zero reasons: the only "remote" in its 8,199
+#    characters is the military-spouse clause USAA runs on every req -- "We are proud to support
+#    active-duty military spouses. USAA roles may offer remote or hybrid flexibility for active-duty
+#    military spouses consistent with applicable policy and business needs." The posting's own workplace
+#    sentence says the opposite ("requires an individual to be in the office 4 days per week", four named
+#    cities, none commutable). It slipped past exclusions 1-7: only two of the three workplace words
+#    appear, so the enumeration rule needs a third; and the sentence carries none of the EEO rule's
+#    vocabulary. Two shapes are matched, both deliberately narrow:
+#      (a) an offer scoped to a named group ("for active-duty military spouses"), and
+#      (b) a hedged plural-subject sentence ("USAA roles may offer ...") -- about the req population, not
+#          this req. Plural only: a singular "this position may offer remote work" is a real per-posting
+#          fact and is left to _REMOTE_CONDITIONAL_RE below, which counts it as remote and flags it.
+_REMOTE_POPULATION_SCOPED_RE = re.compile(
+    r"\bfor\s+(?:active[-\s]?duty\s+)?military\s+spouses?\b|"
+    r"\b(?:roles|positions|jobs|opportunities)\s+may\s+(?:offer|include|provide)\b", re.I)
 _REMOTE_BOILERPLATE_RES = (_REMOTE_NEGATION_RE, _REMOTE_ENUMERATION_RE, _REMOTE_GLOSSARY_RE,
                            _REMOTE_PAY_BAND_RE, _REMOTE_EEO_RE, _REMOTE_BARE_HEADING_RE,
-                           _REMOTE_VIRTUAL_MODE_RE)
+                           _REMOTE_VIRTUAL_MODE_RE, _REMOTE_POPULATION_SCOPED_RE)
 
 # 2026-09-19 amendment (user ruling): conditional remote phrasing is a GENUINE possible-remote fact, not
 # boilerplate -- "remote work may be considered for the right candidate" means the door is open, even
@@ -169,6 +186,17 @@ def conditional_remote_phrase(text: str) -> Optional[str]:
     return m.group(0).strip() if m else None
 
 
+# A location that carries a street address, suite/building token or an address separator is ONE office,
+# however many of them an ATS lists. Used to keep the multi-city remote signature in is_remote() off
+# employer office directories (Accenture, RTX) -- see the comment at its call site.
+# A street-type word must FOLLOW a word ("Accenture Tower", "Duncan Avenue"), so a city that opens with
+# one ("St. Louis, MO") is not read as an address. "fl" is deliberately absent: it is Florida far more
+# often than a floor number.
+_ADDRESS_LIKE_RE = re.compile(
+    r"\d{2,}\s+\w|~|(?<=\w)\s+(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|"
+    r"pkwy|parkway|hwy|highway|ste|suite|bldg|building|plaza|tower)\b\.?", re.I)
+
+
 def is_remote(job: Listing) -> bool:
     workplace = job.extra.get("workplace_type")
     if workplace == "remote":  # the ATS's own flag (finder rows)
@@ -192,9 +220,23 @@ def is_remote(job: Listing) -> bool:
         # States", nationwide), or the JD itself explicitly states remote -- the JD read wins.
     if jd_remote:
         return True
-    # Same company + title posted in 3+ states is the multi-city "remote" signature (e.g. Coinbase).
-    states = {loc.split(",")[-1].strip().lower() for loc in job.locations if "," in loc}
-    return len(states) >= 3
+    # Same company + title posted in 3+ STATES is the multi-city "remote" signature (e.g. Coinbase).
+    # Reworked 2026-09-22 after Guidehouse 39017 (three WA offices) was read as remote, which skips the
+    # commute rule entirely. Three corrections, all found on real rows:
+    #   1. Count STATES, not comma tails. The old parse took the text after the last comma as the state,
+    #      silently assuming every ATS writes "City, ST". Guidehouse writes it reversed ("US - WA, Seattle"
+    #      / "US - WA, Tacoma" / "US - WA, Olympia"), so three offices in ONE state parsed as three
+    #      "states" -- {seattle, tacoma, olympia}. states_in() resolves codes and names in either order.
+    #   2. Skip office DIRECTORIES. Accenture lists 43 street addresses ("Milwaukee, 790 N Milwaukee St,
+    #      Corp"), RTX three plant addresses ("US-AZ-TUCSON-807A ~ 1151 E Hermans Rd ~ BLDG 807A"): both
+    #      span many states and neither is remote -- you sit at one of the buildings. Correction 1 would
+    #      otherwise have started waving them through, since the old parse only missed them by accident
+    #      (it read "Corp" / nothing as the state). A street address is the tell.
+    #   3. Require 3+ entries: one field naming three states is an address or a coverage area, not a spread.
+    if sum(_ADDRESS_LIKE_RE.search(loc or "") is not None for loc in job.locations) * 2 >= len(job.locations):
+        return False
+    states = set().union(*(states_in(loc) for loc in job.locations)) if job.locations else set()
+    return len(job.locations) >= 3 and len(states) >= 3
 
 
 _STATES = {
@@ -440,11 +482,17 @@ def clearance_call(blob: str) -> tuple:
     return None, None   # unreachable (calls is always non-empty here)
 
 
+def commutable_locations(job: Listing) -> list:
+    """The listing locations that name a commutable place, headline location first; [] when none do."""
+    return [loc for loc in [job.location, *job.locations]
+            if loc and place_matches(loc, P.COMMUTABLE_PLACES)]
+
+
 def is_commutable(job: Listing) -> bool:
     """A commutable place is named in one of the listing's locations (each checked on its own, so a
     state in one location never vouches for a city in another). A `hybrid` workplace flag alone is
     not commutable: hybrid in another metro is still out of the area."""
-    return any(place_matches(loc, P.COMMUTABLE_PLACES) for loc in [job.location, *job.locations] if loc)
+    return bool(commutable_locations(job))
 
 
 # ---------------------------------------------------------------- §23: residence-restricted remote
@@ -777,7 +825,18 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
     elif not remote and not local:
         reasons.append("not remote and outside the commute area (per listing)")
     if local and not remote:
-        flags.append("local/hybrid -- judge on route, not radius")
+        # Name the location that carried the match. On a multi-site posting the headline location is
+        # routinely out of the area while one alternate site is inside it (M&T R88502: headline
+        # Wilmington, DE, one of its eight sites inside COMMUTABLE_PLACES). Without the detail the flag
+        # reads as if the commute rule had ignored the other sites, when it walked all of them and found
+        # a hit -- a false bug report the reviewer then has to chase. Verdict-neutral: the "^local/hybrid"
+        # prefix is what UNPENALIZED_FLAG_PATTERNS anchors on, so scoring is untouched either way.
+        hits = commutable_locations(job)
+        if hits and not place_matches(job.location or "", P.COMMUTABLE_PLACES):
+            flags.append(f"local/hybrid via {hits[0]} (headline: {job.location}) "
+                         f"-- judge on route, not radius")
+        else:
+            flags.append("local/hybrid -- judge on route, not radius")
     # 2026-09-19 amendment: conditional remote phrasing ("remote work may be considered for the right
     # candidate") is a genuine possible-remote fact, not boilerplate -- it must never cost the posting a
     # reject, but it is worth surfacing so the user verifies before assuming a flat remote offer.

@@ -127,7 +127,11 @@ def travel_rule(title: str, text: str) -> RuleResult:
     if worst_single is not None and (not worst_span or worst_single > worst_span[1]):
         n = worst_single
         notes["travel_pct"] = n
-        if n > 2 * limit:
+        # >= , not >: the span branch above rejects at exactly 2x the limit ("doubles the limit"), so a
+        # flat "50% travel" against a 25% limit must reject too. With > , the identical burden written
+        # two ways split the verdict -- "travel 0-50%" rejected while "up to 50% travel" only flagged
+        # (Guidehouse 39017 reached review on the flag alone).
+        if n >= 2 * limit:
             reasons.append(f"travel {n}% (limit {limit}%)")
         elif n > limit:
             flags.append(f"travel ceiling {n}% (limit {limit}%)")

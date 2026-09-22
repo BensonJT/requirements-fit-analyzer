@@ -1256,6 +1256,117 @@ def test_screen_row_flags_conditional_remote_without_rejecting():
     assert "not remote and outside the commute area" not in "; ".join(rec.reasons)
 
 
+def test_population_scoped_remote_offer_is_not_this_postings_workplace():
+    """2026-09-22: a remote mention scoped to a named group, or hedged across the employer's reqs in
+    general, says nothing about THIS posting. USAA runs the military-spouse clause on all 226 of its reqs;
+    Invisible Technologies' sentence actively says most of its roles are NOT remote."""
+    for text in ("We are proud to support active-duty military spouses. USAA roles may offer remote or "
+                 "hybrid flexibility for active-duty military spouses consistent with applicable policy "
+                 "and business needs.",
+                 "While some roles may offer remote flexibility, most positions involve in-office "
+                 "collaboration and are tied to specific locations.",
+                 "Certain positions may provide telework arrangements for military spouses."):
+        assert not S._remote_in_context(text), text
+    # Narrow by design: a singular per-posting statement is a real fact and must survive.
+    assert S._remote_in_context("This position may offer remote work.")
+
+
+def test_screen_row_usaa_military_spouse_clause_still_rejects_on_commute():
+    """USAA R0120810 / R0120809 reached `candidate` with zero reasons: their only "remote" was the
+    military-spouse boilerplate, while the JD states four days in office across four non-commutable
+    cities. The commute rule must fire."""
+    row = _row(employer="USAA", location_primary="San Antonio Home Office I", workplace_type=None,
+              locations='["San Antonio Home Office I", "Tampa Campus", "Charlotte, NC - CENTS", '
+                         '"Phoenix Campus (Main)"]',
+              description_text="We offer a flexible work environment that requires an individual to be in "
+                                "the office 4 days per week. This position can be based in one of the "
+                                "following locations: San Antonio, TX, Charlotte, NC, Tampa, FL or "
+                                "Phoenix, AZ. We are proud to support active-duty military spouses. USAA "
+                                "roles may offer remote or hybrid flexibility for active-duty military "
+                                "spouses consistent with applicable policy and business needs.")
+    rec = rules.screen_row(row)
+    assert "not remote and outside the commute area (per listing)" in rec.reasons
+
+
+def test_local_hybrid_flag_names_the_site_that_carried_the_match():
+    """M&T R88502: headline Wilmington, DE (out of area) with Washington, DC among eight sites. The rule
+    correctly reads it local -- the flag must say WHICH site, or the row reads as a commute-rule failure."""
+    row = _row(employer="Acme Bank", location_primary="Wilmington, DE", workplace_type="hybrid",
+              locations='["Wilmington, DE", "Springfield, IL", "Buffalo, NY", "Boston, MA"]',
+              description_text="Hybrid role.")
+    rec = rules.screen_row(row)
+    flag = [f for f in rec.flags if f.startswith("local/hybrid")]
+    assert flag and "Springfield, IL" in flag[0] and "Wilmington, DE" in flag[0]
+    assert "not remote and outside the commute area" not in "; ".join(rec.reasons)
+    # Unchanged shape when the headline location itself is the commutable one.
+    plain = rules.screen_row(_row(location_primary="Springfield, IL", workplace_type="hybrid",
+                                  locations=None, description_text="Hybrid role."))
+    assert "local/hybrid -- judge on route, not radius" in plain.flags
+
+
+def test_multi_city_remote_signature_counts_states_not_comma_tails():
+    """2026-09-22, Guidehouse 39017: "US - WA, Seattle" / "US - WA, Tacoma" / "US - WA, Olympia" is three
+    offices in ONE state. Reading the text after the last comma as the state made that look like three
+    states, so the posting read remote and skipped the commute rule."""
+    one_state = _row(employer="Acme Consulting", location_primary="US - WA, Seattle", workplace_type=None,
+                     locations='["US - WA, Seattle", "US - WA, Tacoma", "US - WA, Olympia"]',
+                     description_text="On-site consulting role.")
+    assert not S.is_remote(rules.listing_from_row(one_state))
+    assert "not remote and outside the commute area (per listing)" in rules.screen_row(one_state).reasons
+    # A genuine 3+ state spread still reads as the multi-city remote signature, in either field order.
+    for locs in ('["Denver, CO", "Austin, TX", "Atlanta, GA"]',
+                 '["Colorado - Denver", "Texas - Austin", "Georgia - Atlanta"]'):
+        spread = _row(location_primary="Denver, CO", workplace_type=None, locations=locs,
+                      description_text="Team role.")
+        assert S.is_remote(rules.listing_from_row(spread)), locs
+    # One field naming several states is an address or a coverage area, not the multi-city signature.
+    single = _row(location_primary="Serving CO, TX and GA", workplace_type=None,
+                  locations='["Serving CO, TX and GA"]', description_text="Territory role.")
+    assert not S.is_remote(rules.listing_from_row(single))
+
+
+def test_office_directory_is_not_the_multi_city_remote_signature():
+    """An employer that lists every office as a STREET ADDRESS spans many states and is not remote -- you
+    sit at one building. Accenture posts 43 such addresses, RTX three plant addresses. Parsing states
+    correctly (above) would have started reading both as remote; the address shape is the tell."""
+    accenture = _row(employer="Acme Consulting", location_primary="Milwaukee, 790 N Milwaukee St, Corp",
+                     workplace_type=None, description_text="Consulting role.",
+                     locations='["Milwaukee, 790 N Milwaukee St, Corp", "New York, One Manhattan West, '
+                                'Corp", "Chicago, Acme Tower, Corp", "Denver, 999 18th St, Corp"]')
+    assert not S.is_remote(rules.listing_from_row(accenture))
+    assert "not remote and outside the commute area (per listing)" in rules.screen_row(accenture).reasons
+    plants = _row(employer="Acme Defense", location_primary="US-AZ-TUCSON-807A ~ 1151 E Hermans Rd",
+                  workplace_type=None, description_text="Plant role.",
+                  locations='["US-AZ-TUCSON-807A ~ 1151 E Hermans Rd ~ BLDG 807A", '
+                             '"US-MA-TEWKSBURY-TB1 ~ 50 Apple Hill Dr ~ ASSABET BLDG", '
+                             '"US-TX-MCKINNEY-513PW ~ 2501 W University Dr ~ PW BLDG"]')
+    assert not S.is_remote(rules.listing_from_row(plants))
+    # Guards on the address shape itself: a city that opens with a street-type word, and the FL/Florida
+    # collision, must not read as addresses.
+    for plain in ("Miami, FL", "St. Louis, MO", "Denver, CO", "Virginia - Ashburn", "US - WA, Seattle"):
+        assert not S._ADDRESS_LIKE_RE.search(plain), plain
+    for addr in ("Milwaukee, 790 N Milwaukee St, Corp", "Chicago, Acme Tower, Corp",
+                 "US-AZ-TUCSON-807A ~ 1151 E Hermans Rd ~ BLDG 807A"):
+        assert S._ADDRESS_LIKE_RE.search(addr), addr
+    # A minority of address-shaped entries does not make the whole list a directory.
+    mixed = _row(location_primary="CA-WOODLAND HILLS, 21215 BURBANK BLVD", workplace_type=None,
+                 description_text="Role.",
+                 locations='["CA-WOODLAND HILLS, 21215 BURBANK BLVD", "Colorado - Denver", '
+                            '"Georgia - Atlanta", "Virginia - Ashburn"]')
+    assert S.is_remote(rules.listing_from_row(mixed))
+
+
+def test_travel_rejects_at_exactly_double_the_limit_single_and_span_alike():
+    """A flat "50% travel" and a "0-50%" span carry the same burden; before 2026-09-22 the single branch
+    used > and the span branch >=, so only the span rejected against a 25% limit (Guidehouse 39017)."""
+    assert rules.travel_rule("t", "Travel up to 50% of the time.")[0] == ["travel 50% (limit 25%)"]
+    assert rules.travel_rule("t", "Travel 0-50% of the time.")[0] == ["travel span 0-50% doubles the limit"]
+    # Just under the doubling threshold still only flags, from either shape.
+    assert rules.travel_rule("t", "Travel up to 49% of the time.")[0] == []
+    assert rules.travel_rule("t", "Travel 0-49% of the time.")[0] == []
+    assert rules.travel_rule("t", "Travel up to 49% of the time.")[1] == ["travel ceiling 49% (limit 25%)"]
+
+
 def test_screen_row_rtx_style_enumeration_still_rejects_when_not_commutable():
     """The RTX-shaped posting (enumeration boilerplate, no genuine remote signal, non-commutable location)
     must be rejected on location, not waved through as remote."""

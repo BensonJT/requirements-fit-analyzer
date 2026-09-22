@@ -85,7 +85,8 @@ def annual_top(job: Listing) -> Optional[float]:
 _REMOTE_DUTY_RE = re.compile(
     r"\b(?:remote|virtual)\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
     r"office|offices|customer|customers|client|clients|user|users|support|assistant|assistants|agent|"
-    r"agents|chatbot|chatbots|recruiter|recruiters)\b|\bremote\s+sensing\b", re.I)
+    r"agents|chatbot|chatbots|recruiter|recruiters|collaboration|machine|machines|doctor|visit|visits)\b|"
+    r"\bremote\s+sensing\b|\bvirtuali[sz]\w*", re.I)
 # Locations too generic for an ATS on-site/hybrid flag to be trusted at all (Microsoft's
 # "United States, Multiple Locations" onsite tag being the case that surfaced this).
 _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
@@ -101,8 +102,12 @@ _US_OFFSITE_RE = re.compile(r"\bus\s+off-?site\b", re.I)
 # an actual remote/telework offer; each trips one of these four boilerplate shapes instead.
 #
 # 1. Explicit negation: "not a remote position", "no remote", "telework eligible: no".
+#    2026-09-22: "will not have the ability to be located remotely" (Novartis, on 20+ reqs) and "Remote is
+#    currently not available" (McKesson) -- both read as remote offers before, the opposite of what they say.
 _REMOTE_NEGATION_RE = re.compile(
-    r"\bnot\s+(?:a\s+)?remote\b|\bno\s+remote\b|\btelework\s+eligible\s*:?\s*no\b", re.I)
+    r"\bnot\s+(?:a\s+)?remote\b|\bno\s+remote\b|\btelework\s+eligible\s*:?\s*no\b|"
+    r"\bnot\s+(?:have\s+the\s+ability|be\s+able|able)\s+to\s+(?:be\s+)?(?:located|based|work)\s+remote|"
+    r"\bremote\s+(?:work\s+)?is\s+(?:currently\s+)?not\s+(?:available|an\s+option|offered|permitted)\b", re.I)
 # 2. A generic three-way workplace-type enumeration ("designated as on-site, hybrid or remote") that
 #    classifies the CONCEPT without committing to which one this posting is -- the RTX case: "...regardless
 #    of whether the role is designated as on-site, hybrid or remote."
@@ -112,12 +117,16 @@ _REMOTE_ENUMERATION_RE = re.compile(
 # 3. A policy glossary explaining what "remote" WOULD mean if this posting were tagged that way -- the Booz
 #    Allen case: "Remote: If this position is listed as remote, there may still be occasions..." (standard
 #    boilerplate run on every req, not a per-posting fact).
+#    2026-09-22: ServiceNow's "Work personas (flexible, remote, or required in office) are categories..." and
+#    RTX's "Employees who are working in Remote roles will work primarily offsite" are the same shape.
 _REMOTE_GLOSSARY_RE = re.compile(
-    r"\bif\s+this\s+(?:position|role|job)\s+is\s+(?:listed|designated|classified)\s+as\s+remote\b", re.I)
+    r"\bif\s+this\s+(?:position|role|job)\s+is\s+(?:listed|designated|classified)\s+as\s+remote\b|"
+    r"\bwork\s+personas?\b|\b(?:employees|associates)\s+(?:who\s+are\s+)?(?:working\s+)?in\s+remote\s+roles\b",
+    re.I)
 # 4. A pay-transparency paragraph listing "remote workers" as one of several geographic compensation bands
 #    -- the T. Rowe Price case: "$122,000 - $209,000 for the location of: Maryland, Colorado, Washington
 #    and remote workers" -- a disclosure clause, not a statement of where THIS role sits.
-_REMOTE_PAY_BAND_RE = re.compile(r"\bfor the location of\b", re.I)
+_REMOTE_PAY_BAND_RE = re.compile(r"\bfor the location of\b|\bfor\s+\W?remote\W?\s+positions\b", re.I)
 # 5. Benefits / EEO paragraphs that happen to mention a remote term in passing (accommodation language,
 #    equal-opportunity boilerplate) rather than describing the job's own workplace.
 _REMOTE_EEO_RE = re.compile(
@@ -132,8 +141,15 @@ _REMOTE_BARE_HEADING_RE = re.compile(r"^\s*(?:remote|hybrid|on-?site|telework)\s
 # interview format), not WHERE the job sits -- distinct from _REMOTE_DUTY_RE's "virtual teams" (a duties
 # noun phrase); this is the adverb/communication-mode usage.
 _REMOTE_VIRTUAL_MODE_RE = re.compile(
-    r"\bvirtually\b|\b(?:in.person or virtual|virtual or in.person)\b|\bvirtual\b(?:\s+\w+){0,2}\s+"
-    r"(?:interview|interviews|meeting|meetings)\b", re.I)
+    r"\bvirtually\b|\b(?:in.person\s+(?:or|and)\s+virtual|virtual\s+(?:or|and)\s+in.person)\b|"
+    r"\bvirtual\b(?:\s+\w+){0,2}\s+(?:interview|interviews|meeting|meetings)\b", re.I)
+# "virtual training/sessions" is a delivery mode too, but it shares sentences with real offers -- CVS runs
+# "This is a remote work from home role anywhere in the US with virtual training" -- so it only excludes a
+# line that makes no remote offer of its own.
+_REMOTE_VIRTUAL_TRAINING_RE = re.compile(
+    r"^(?!.*(?:\bremote\b[^.]{0,40}\b(?:role|position|job)\b|\banywhere\s+in\s+the\s+(?:us|u\.s|united\s+states)\b|"
+    r"\bfully\s+remote\b|\bwork\s+from\s+home\b))"
+    r".*?(?:\bvirtual\b(?:\s+\w+){0,2}\s+(?:training|sessions)\b|\blive\s*/\s*virtual\b)", re.I)
 # 8. 2026-09-22: a remote mention scoped to a NAMED POPULATION, or hedged across the employer's reqs in
 #    general, is not a statement about THIS posting's workplace. Found on USAA R0120810 (HR Integration &
 #    Planning Principal), which reached `candidate` with zero reasons: the only "remote" in its 8,199
@@ -151,9 +167,43 @@ _REMOTE_VIRTUAL_MODE_RE = re.compile(
 _REMOTE_POPULATION_SCOPED_RE = re.compile(
     r"\bfor\s+(?:active[-\s]?duty\s+)?military\s+spouses?\b|"
     r"\b(?:roles|positions|jobs|opportunities)\s+may\s+(?:offer|include|provide)\b", re.I)
+# 9 + 10. 2026-09-22: a sentence describing a HYBRID arrangement is not a remote offer. Found on the
+#    first post-fix Top_Jobs report: McKesson Irving TX reqs ("on-site at our Las Colinas office a minimum
+#    of two (2) days per week, with the remaining days worked remotely"), State Street ("Onsite 4 days a
+#    week in office and one day remote"), Wells Fargo ("three days in office two days remote") and
+#    Elevance's hybrid-policy paragraph -- one line of which says the OPPOSITE of remote: "candidates not
+#    within a reasonable commuting distance from the posting location(s) will not be considered". Each of
+#    these read as remote, so the commute rule never ran on postings in non-commutable cities.
+#    9 = an office cadence (N days in office / onsite, the "remaining days" remote, work-from-home capped at
+#        N days or a share of the week, the office once a week, remote only on a named weekday).
+#    10 = hybrid-policy boilerplate (a "policy on hybrid/virtual work", a commuting-distance condition,
+#        "unless specified as primarily virtual", a blend of office engagement and virtual work, a
+#        "hybrid work schedule/role").
+#    GUARD: neither fires on a line that also makes a strong remote offer ("fully remote", "open to remote",
+#    "remote will be considered", ...) -- the 2026-09-19 ruling that conditional remote is a real signal
+#    wins, so "hybrid in Atlanta but open to remote" still reads remote.
+_STRONG_REMOTE_GUARD = (r"^(?!.*(?:\bfully\s+remote\b|\b100\s*%\s+remote\b|\bopen\s+to\s+(?:remote|considering\s+remote)|"
+                        r"\bremote\s+(?:will|may|can)\s+be\s+considered|\bconsider(?:ing)?\s+remote\b|"
+                        r"\bremote\s+candidates\b))")
+_N_DAYS = r"(?:\d|one|two|three|four|five)\s*(?:\(\d\)\s*)?(?:\+\s*)?days?"
+_REMOTE_HYBRID_CADENCE_RE = re.compile(
+    _STRONG_REMOTE_GUARD + r".*?(?:"
+    r"\bremaining\s+(?:\w+\s+){0,2}days?\b|"
+    r"\b" + _N_DAYS + r"\s+(?:(?:a|per|each)\s+week\s+)?(?:in[-\s]office|in\s+the\s+office|in\s+office|on[-\s]?site|in[-\s]person)\b|"
+    r"\b(?:work\s+from\s+home|remote(?:ly)?|telework)\b[^.]{0,25}\b" + _N_DAYS + r"\s+(?:a|per|each)\s+week\b|"
+    r"\bwork\s+from\s+home\s+up\s+to\s+(?:\d+\s*%|half)|"
+    r"\b(?:office|location|on[-\s]?site)\b[^.]{0,60}\b(?:at\s+least\s+)?once\s+(?:a|per)\s+week\b|"
+    r"\bremote\s+(?:work\s+)?on\s+(?:mon|tues|wednes|thurs|fri)days?\b)", re.I)
+_REMOTE_HYBRID_POLICY_RE = re.compile(
+    _STRONG_REMOTE_GUARD + r".*?(?:"
+    r"\bpolicy\s+on\s+hybrid\b|\bnot\s+within\s+(?:a\s+)?reasonable\s+commut|"
+    r"\bunless\s+(?:specified|designated)\s+as\s+(?:primarily\s+)?(?:virtual|remote)\b|"
+    r"\boffice\s+engagement\b[^.]{0,60}\bvirtual\s+work\b|"
+    r"\bhybrid\s+(?:work\s+)?(?:schedule|role|position)\b)", re.I)
 _REMOTE_BOILERPLATE_RES = (_REMOTE_NEGATION_RE, _REMOTE_ENUMERATION_RE, _REMOTE_GLOSSARY_RE,
                            _REMOTE_PAY_BAND_RE, _REMOTE_EEO_RE, _REMOTE_BARE_HEADING_RE,
-                           _REMOTE_VIRTUAL_MODE_RE, _REMOTE_POPULATION_SCOPED_RE)
+                           _REMOTE_VIRTUAL_MODE_RE, _REMOTE_VIRTUAL_TRAINING_RE, _REMOTE_POPULATION_SCOPED_RE,
+                           _REMOTE_HYBRID_CADENCE_RE, _REMOTE_HYBRID_POLICY_RE)
 
 # 2026-09-19 amendment (user ruling): conditional remote phrasing is a GENUINE possible-remote fact, not
 # boilerplate -- "remote work may be considered for the right candidate" means the door is open, even
@@ -563,9 +613,15 @@ _RESIDENCE_REGISTERED_ENTITY_RE = re.compile(
     # the sentence splitter cuts "...a state where Acme, Inc. has a registered entity" at "Inc.", so the
     # opening alone has to be enough: an employer-defined set of states names no place to check
     r"|\b(?:live|reside|be\s+located|be\s+based)\s+in\s+a\s+(?:state|location)\s+where\b", re.I)
+# The hybrid cadence/policy exclusions (9, 10) answer "is this a remote offer?" -- no. They must NOT be
+# reused here: for the residence question a hybrid sentence IS the restriction ("Hybrid role, must live
+# near the Las Colinas office"; "candidates not within a reasonable commuting distance ... will not be
+# considered").
+_REMOTE_NOT_RESIDENCE_RES = tuple(rx for rx in _REMOTE_BOILERPLATE_RES
+                                  if rx not in (_REMOTE_HYBRID_CADENCE_RE, _REMOTE_HYBRID_POLICY_RE))
 _RESIDENCE_EXCLUSION_RES = (_RESIDENCE_PAY_TRANSPARENCY_RE, _RESIDENCE_CANNOT_HIRE_RE, _RESIDENCE_OPTION_RE,
                             _RESIDENCE_TIMEZONE_PREFERRED_RE, _RESIDENCE_CONDITIONAL_RE, _RESIDENCE_PREFERENCE_RE,
-                            _RESIDENCE_REGISTERED_ENTITY_RE, *_REMOTE_BOILERPLATE_RES)
+                            _RESIDENCE_REGISTERED_ENTITY_RE, *_REMOTE_NOT_RESIDENCE_RES)
 
 # Generic words that show up in the tail of a restriction sentence but never name a place -- filtered out
 # of the extracted place list ("one of our hubs: A, B, C" -> "A, B, C", not "one of our hubs A B C").

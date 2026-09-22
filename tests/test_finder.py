@@ -1230,6 +1230,55 @@ def test_virtual_assistant_recruiting_boilerplate_is_not_a_remote_statement():
     assert "not remote and outside the commute area (per listing)" in rules.screen_row(hybrid).reasons
 
 
+def test_hybrid_cadence_and_policy_language_is_not_a_remote_offer():
+    """2026-09-22: a sentence describing a HYBRID arrangement read as a remote offer, so the commute rule
+    never ran -- McKesson Irving TX, State Street, Wells Fargo, Elevance's hybrid-policy paragraph."""
+    for text in ("Expected to work on-site at our Las Colinas office a minimum of two (2) days per week, "
+                 "with the remaining days worked remotely.",
+                 "Onsite 4 days a week in office and one day remote.",
+                 "This position offers a hybrid work schedule for three days in office two days remote.",
+                 "Days onsite at our Wilmington location, with the flexibility to work from home one day per week.",
+                 "This role is flexible in that you may work from home up to 40% of the time.",
+                 "Per our policy on hybrid/virtual work, candidates not within a reasonable commuting distance "
+                 "from the posting location(s) will not be considered for employment.",
+                 "Unless specified as primarily virtual by the hiring manager, associates are required to work "
+                 "at an Acme location at least once per week.",
+                 "This role is mostly remote, but you should be able to report to the Jacksonville office once a week.",
+                 "Remote work on Fridays may be permitted based on project priorities."):
+        assert not S._remote_in_context(text), text
+    # A delivery-mode word never takes a real offer down with it.
+    assert S._remote_in_context("This is a remote work from home role anywhere in the US with virtual training.")
+    # The guard: a hybrid line that ALSO makes a strong remote offer still reads remote.
+    assert S._remote_in_context("Highly preferred to be hybrid in ATL but open to remote.")
+    assert S._remote_in_context("Hybrid role, 3 days in office; fully remote considered for the right candidate.")
+    # A primarily-remote role with occasional office visits is still remote.
+    assert S._remote_in_context("While this role is primarily remote, there is the possibility of regular "
+                                "onsite presence in our downtown office.")
+
+
+def test_more_false_remote_shapes_found_in_the_same_audit():
+    """Negations, glossaries and vocabulary that are not remote offers at all."""
+    for text in ("This position is based in East Hanover, NJ and will not have the ability to be located remotely.",
+                 "Remote is currently not available.",
+                 "Work personas (flexible, remote, or required in office) are categories assigned to employees.",
+                 "Employees who are working in Remote roles will work primarily offsite (from home).",
+                 "For 'remote' positions, salary to be offered is geographic dependent.",
+                 "Strong understanding of networking, virtualization, and storage.",
+                 "This role operates across office, remote collaboration, and data center environments.",
+                 "Doctor on Demand, virtual doctor visits.",
+                 "Ability to participate in virtual and in-person meetings for extended periods.",
+                 "Experience delivering live/virtual training."):
+        assert not S._remote_in_context(text), text
+
+
+def test_screen_row_hybrid_cadence_rejects_when_not_commutable():
+    row = _row(employer="Acme Health", location_primary="USA, TX, Irving", workplace_type="hybrid",
+               locations='["USA, TX, Irving"]',
+               description_text="The selected candidate is expected to work on-site at our Las Colinas office a "
+                                "minimum of two (2) days per week, with the remaining days worked remotely.")
+    assert "not remote and outside the commute area (per listing)" in rules.screen_row(row).reasons
+
+
 def test_eeo_boilerplate_mentioning_remote_is_not_a_remote_statement():
     text = ("Our Equal Employment Opportunity policy provides reasonable accommodation regardless of "
            "national origin; some accommodations may include remote arrangements case by case.")

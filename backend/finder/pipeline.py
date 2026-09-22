@@ -483,7 +483,11 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
         lens_models = features.load_lens_models(con, log=log)
         required_model = features.load_required_model(con, log=log)   # NOT a lens; see features.REQUIRED_MODEL
         bullseye_model = features.load_bullseye_model(con, log=log)   # NOT a lens; see features.BULLSEYE_MODEL
-    out["screen"] = screen(con, since=since, full=full, model=model, lens_models=lens_models,
+    # `since=None if full else since`, the same pairing coverage_stage below already uses: in
+    # _candidate_sql the `full` branch and the `since` window are ANDed, so passing both meant
+    # `sweep_ats.py --full-screen` silently screened only the rows this sweep had just touched
+    # (7,625 of 85,893 on 2026-09-21) instead of the whole active corpus the flag promises.
+    out["screen"] = screen(con, since=None if full else since, full=full, model=model, lens_models=lens_models,
                            required_model=required_model, bullseye_model=bullseye_model, log=log)
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)

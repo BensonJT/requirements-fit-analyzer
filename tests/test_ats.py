@@ -848,3 +848,20 @@ def test_close_expired_postings_never_touches_other_platforms(tmp_path):
     n = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, t1)
     assert n == 0
     assert con.execute("SELECT status FROM postings WHERE req_id = 'R1'").fetchone()[0] == "active"
+
+
+def test_connect_caps_duckdb_memory_and_honours_the_env_override(tmp_path, monkeypatch):
+    """DuckDB defaults memory_limit to 80% of RAM (6.2 GiB of this 8 GB WSL VM), which leaves too
+    little for a stage holding a sentence-transformer encoder in the SAME process -- that combination
+    took the VM down on 2026-09-21 during required-embed scoring. connect() caps it, and
+    JOBSEARCH_DUCKDB_MEMORY_LIMIT overrides the cap on a bigger machine."""
+    monkeypatch.delenv("JOBSEARCH_DUCKDB_MEMORY_LIMIT", raising=False)
+    con = store.connect(str(tmp_path / "cap.duckdb"))
+    default = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+    con.close()
+    assert default == "3.2 GiB", default          # 3500MB (DuckDB reads MB as 10^6) reported back as GiB
+
+    monkeypatch.setenv("JOBSEARCH_DUCKDB_MEMORY_LIMIT", "1200MB")
+    con = store.connect(str(tmp_path / "cap2.duckdb"))
+    assert con.execute("SELECT current_setting('memory_limit')").fetchone()[0] == "1.1 GiB"
+    con.close()

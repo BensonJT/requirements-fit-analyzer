@@ -547,10 +547,35 @@ def commutable_locations(job: Listing) -> list:
     check reads P.COMMUTABLE_PLACES directly and is deliberately unaffected.
     """
     places = P.COMMUTABLE_PLACES
-    remote_only = set(getattr(P, "COMMUTE_REMOTE_ONLY_PLACES", None) or ())
+    remote_only = set(getattr(P, "COMMUTE_REMOTE_ONLY_PLACES", None) or ()) - set(_employer_commute_places(job.company))
     if remote_only and job.extra.get("workplace_type") in ("hybrid", "onsite"):
         places = [p for p in places if p not in remote_only]
     return [loc for loc in [job.location, *job.locations] if loc and place_matches(loc, places)]
+
+
+def _employer_commute_places(company: str) -> list:
+    """COMMUTE_EMPLOYER_PLACES entry for `company` -- exact normalized-name match, as for residence notes."""
+    table = getattr(P, "COMMUTE_EMPLOYER_PLACES", None) or {}
+    if not table or not (company or "").strip():
+        return []
+    mine = set(company_keys(company)) | {norm_company(company)}
+    for raw_key, places in table.items():
+        if mine & set(company_keys(raw_key)):
+            return list(places)
+    return []
+
+
+def long_commute_site(job: Listing, hits: list) -> Optional[str]:
+    """The site to name when EVERY commutable location is a COMMUTE_FLAG_PLACES one (2026-09-22 ruling):
+    fine for an office role, a long drive depending on the exact site. None when any hit is closer, or when
+    the employer has that place as a plain commute (COMMUTE_EMPLOYER_PLACES)."""
+    flag_places = [p for p in (getattr(P, "COMMUTE_FLAG_PLACES", None) or [])
+                   if p not in _employer_commute_places(job.company)]
+    if not hits or not flag_places:
+        return None
+    if all(place_matches(h, flag_places) for h in hits):
+        return hits[0]
+    return None
 
 
 def is_commutable(job: Listing) -> bool:
@@ -903,7 +928,11 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         # a hit -- a false bug report the reviewer then has to chase. Verdict-neutral: the "^local/hybrid"
         # prefix is what UNPENALIZED_FLAG_PATTERNS anchors on, so scoring is untouched either way.
         hits = commutable_locations(job)
-        if hits and not place_matches(job.location or "", P.COMMUTABLE_PLACES):
+        far = long_commute_site(job, hits)
+        if far:
+            # Still the "^local/hybrid" prefix, so scoring is untouched -- this only changes what the user reads.
+            flags.append(f"local/hybrid via {far} -- long commute: check the exact site and in-office days")
+        elif hits and not place_matches(job.location or "", P.COMMUTABLE_PLACES):
             flags.append(f"local/hybrid via {hits[0]} (headline: {job.location}) "
                          f"-- judge on route, not radius")
         else:

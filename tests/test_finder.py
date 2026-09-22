@@ -1453,6 +1453,37 @@ def test_remote_only_place_does_not_satisfy_an_in_office_commute(monkeypatch):
     assert "not remote and outside the commute area" not in "; ".join(rules.screen_row(ok).reasons)
 
 
+def test_long_commute_places_are_kept_and_flagged_with_employer_exceptions(monkeypatch):
+    """2026-09-22 user ruling: some commutable places are fine for an office role but a long drive depending
+    on the site -- kept, flagged. One employer can make a place a plain commute (NFCU's Vienna campus)."""
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il", "chatham, il?", "peoria, il"])
+    monkeypatch.setattr(P, "COMMUTE_FLAG_PLACES", ["peoria, il"])
+    monkeypatch.setattr(P, "COMMUTE_EMPLOYER_PLACES", {"acme payments": ["peoria, il"]})
+    def screened(employer, locs):
+        return rules.screen_row(_row(employer=employer, location_primary=locs[0], workplace_type="hybrid",
+                                     locations=json.dumps(locs), description_text="Hybrid role."))
+    far = screened("Other Co", ["Peoria, IL"])
+    assert "not remote and outside the commute area" not in "; ".join(far.reasons)
+    assert "local/hybrid via Peoria, IL -- long commute: check the exact site and in-office days" in far.flags
+    # a closer site on the same posting wins -- no long-commute flag
+    near = screened("Other Co", ["Peoria, IL", "Springfield, IL"])
+    assert not any("long commute" in f for f in near.flags)
+    # the employer exception makes it a plain commute
+    exc = screened("ACME PAYMENTS INC.", ["Peoria, IL"])
+    assert "local/hybrid -- judge on route, not radius" in exc.flags
+
+
+def test_employer_exception_lifts_a_remote_only_place(monkeypatch):
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il", "chicago, il"])
+    monkeypatch.setattr(P, "COMMUTE_REMOTE_ONLY_PLACES", ["chicago, il"])
+    monkeypatch.setattr(P, "COMMUTE_EMPLOYER_PLACES", {"acme payments": ["chicago, il"]})
+    def reasons(employer):
+        return rules.screen_row(_row(employer=employer, location_primary="Chicago, IL", workplace_type="hybrid",
+                                     locations='["Chicago, IL"]', description_text="Hybrid role.")).reasons
+    assert "not remote and outside the commute area (per listing)" in reasons("Other Co")
+    assert "not remote and outside the commute area (per listing)" not in reasons("Acme Payments")
+
+
 def test_screen_row_rtx_style_enumeration_still_rejects_when_not_commutable():
     """The RTX-shaped posting (enumeration boilerplate, no genuine remote signal, non-commutable location)
     must be rejected on location, not waved through as remote."""

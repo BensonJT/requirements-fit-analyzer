@@ -8,6 +8,10 @@ COMMUTABLE_PLACES = ["springfield, il", "chatham, il?", "rochester, il"]   # "na
 # Of those, the ones you would live near or visit for a REMOTE role but not commute to several days a
 # week. Ignored by the commute gate on an explicit hybrid/onsite posting; counted everywhere else.
 COMMUTE_REMOTE_ONLY_PLACES = []
+# Of those, the ones fine for an office role but a long drive depending on the site: kept, flagged "long commute".
+COMMUTE_FLAG_PLACES = []
+# Places that are a plain commute for ONE employer only, e.g. {"acme payments": ["chatham, il?"]}.
+COMMUTE_EMPLOYER_PLACES = {}
 # Private, per-employer residence knowledge the JD text never states (§23 amendment). Uncomment and
 # fill in only what you actually know; leave it out entirely and the rule is simply skipped.
 # EMPLOYER_RESIDENCE_NOTES = {

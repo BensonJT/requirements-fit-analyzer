@@ -1216,6 +1216,20 @@ def test_virtual_meeting_mode_is_not_a_remote_statement():
         assert not S._remote_in_context(text), text
 
 
+def test_virtual_assistant_recruiting_boilerplate_is_not_a_remote_statement():
+    """2026-09-22, McKesson JR0153473: a hybrid posting across four non-commutable cities was read as
+    remote off one recruiting-boilerplate line about a chatbot, so the commute rule never ran."""
+    text = ("Note that Acme does rely on a virtual assistant (Gia) for certain recruiting-related "
+            "communications with candidates.")
+    assert not S._remote_in_context(text)
+    assert not S._remote_in_context("You will lead a team of remote agents across three centers.")
+    hybrid = _row(employer="Acme Health", location_primary="USA, OH, Columbus", workplace_type="hybrid",
+                  locations='["USA, OH, Columbus", "USA, GA, Atlanta", "USA, GA, Alpharetta", '
+                             '"USA, TX, Irving"]',
+                  description_text="Hybrid role in one of our offices. " + text)
+    assert "not remote and outside the commute area (per listing)" in rules.screen_row(hybrid).reasons
+
+
 def test_eeo_boilerplate_mentioning_remote_is_not_a_remote_statement():
     text = ("Our Equal Employment Opportunity policy provides reasonable accommodation regardless of "
            "national origin; some accommodations may include remote arrangements case by case.")
@@ -1365,6 +1379,29 @@ def test_travel_rejects_at_exactly_double_the_limit_single_and_span_alike():
     assert rules.travel_rule("t", "Travel up to 49% of the time.")[0] == []
     assert rules.travel_rule("t", "Travel 0-49% of the time.")[0] == []
     assert rules.travel_rule("t", "Travel up to 49% of the time.")[1] == ["travel ceiling 49% (limit 25%)"]
+
+
+def test_remote_only_place_does_not_satisfy_an_in_office_commute(monkeypatch):
+    """2026-09-22 user ruling (M&T R88502): a place can be near enough to satisfy a REMOTE role's
+    residence restriction and still be a commute you would not make several days a week. Such places are
+    ignored by the commute gate on an explicit hybrid/onsite posting, and counted everywhere else."""
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il", "chicago, il"])
+    monkeypatch.setattr(P, "COMMUTE_REMOTE_ONLY_PLACES", ["chicago, il"])
+    def row(wt):
+        return _row(location_primary="Wilmington, DE", workplace_type=wt,
+                    locations='["Wilmington, DE", "Chicago, IL", "Buffalo, NY"]',
+                    description_text="A role.")
+    # Hybrid / onsite: the remote-only place no longer carries the posting.
+    for wt in ("hybrid", "onsite"):
+        rec = rules.screen_row(row(wt))
+        assert "not remote and outside the commute area (per listing)" in rec.reasons, wt
+    # Unknown workplace keeps it -- the rule never rejects on a guess.
+    unknown = rules.screen_row(row(None))
+    assert "not remote and outside the commute area" not in "; ".join(unknown.reasons)
+    # A place that is not remote-only still carries a hybrid posting.
+    ok = _row(location_primary="Wilmington, DE", workplace_type="hybrid",
+              locations='["Wilmington, DE", "Springfield, IL"]', description_text="A role.")
+    assert "not remote and outside the commute area" not in "; ".join(rules.screen_row(ok).reasons)
 
 
 def test_screen_row_rtx_style_enumeration_still_rejects_when_not_commutable():

@@ -448,24 +448,75 @@ def oracle_orc_detail(row, posting):
 
 
 # ================================================================ Greenhouse
+# 2026-09-22: Stripe's Greenhouse feed says only "US" for most US roles, which the screen reads as a
+# nationwide listing -- flagged, never rejected -- so an office-only role in Chicago surfaced exactly like a
+# remote one. Stripe's own careers index carries the real locations for every listing in ONE request: each
+# listing's greenhouseId plus indices into a location table whose entries are marked remote or office.
+# Stripe's published rule (on every remote listing): "A remote location is defined as being 35 miles
+# (56 kilometers) or more from one of our offices"; office-assigned staff spend at least 50% of the month
+# in their office -- hence remote vs hybrid below.
+_STRIPE_INDEX_URL = "https://stripe.com/jobs/search"
+_NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
+
+
+def _stripe_location_index(c):
+    """{greenhouse id: [{"name", "remote", "countryCode"}, ...]} for every listing on stripe.com."""
+    html = _request(c, "GET", _STRIPE_INDEX_URL).text
+    data = json.loads(_NEXT_DATA_RE.search(html).group(1))["props"]["pageProps"]["jobIndexData"]
+    table = data["filters"]["locations"]
+    return {str(l["greenhouseId"]): [table[i] for i in (l.get("locationIndices") or []) if 0 <= i < len(table)]
+            for l in data["listings"]}
+
+
+# Greenhouse board token -> a function returning a per-job location index from the employer's own site.
+_GREENHOUSE_LOCATION_INDEX = {"stripe": _stripe_location_index}
+
+
+def _indexed_location(entries):
+    """(location_primary, [locations], workplace_type) from an employer-index entry list, or None."""
+    names = [e.get("name") for e in entries if e.get("name")]
+    if not names:
+        return None
+    if any(e.get("remote") and e.get("countryCode") == "US" for e in entries):
+        workplace = "remote"
+    elif any(not e.get("remote") for e in entries):
+        workplace = "hybrid"
+    else:
+        workplace = None   # remote only outside the US -- leave it to the country rules
+    return names[0], names, workplace
+
+
 def greenhouse_jobs(row, max_pages=None):
     token = quote(row["identifier_1"], safe="")
     url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
     with client() as c:
         data = _request(c, "GET", url).json()
+        index = None
+        indexer = _GREENHOUSE_LOCATION_INDEX.get(row["identifier_1"])
+        if indexer is not None:
+            try:
+                index = indexer(c)
+            except Exception:  # noqa: BLE001 -- the feed's own location is still a valid (if thin) fallback
+                index = None
     out = []
     for j in data.get("jobs") or []:
         loc = (j.get("location") or {}).get("name")
         offices = [o.get("name") for o in (j.get("offices") or [])]
         text = N.html_to_text(j.get("content"))
         pay = N.pay_from_text(text)
+        real = _indexed_location((index or {}).get(str(j.get("id"))) or [])
+        if real:
+            loc_primary, loc_list, workplace = real
+        else:
+            loc_primary, loc_list = loc, [loc] + offices
+            workplace = N.workplace_type(None, loc, *offices)
         out.append(N.base(
             req_id=str(j.get("id")),
             title=j.get("title"),
             url=j.get("absolute_url"),
-            location_primary=loc,
-            locations=N.locations_json([loc] + offices),
-            workplace_type=N.workplace_type(None, loc, *offices),
+            location_primary=loc_primary,
+            locations=N.locations_json(loc_list),
+            workplace_type=workplace,
             job_family=", ".join(d.get("name") for d in (j.get("departments") or []) if d.get("name")) or None,
             posted_at=N.parse_date(j.get("first_published") or j.get("updated_at")),
             posting_end_at=N.parse_date(j.get("application_deadline")),

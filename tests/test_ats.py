@@ -1,4 +1,5 @@
 """Unit tests for the ATS ingestion layer — no network, temp DuckDB file."""
+import json
 import os
 import sys
 from datetime import date, datetime
@@ -865,3 +866,60 @@ def test_connect_caps_duckdb_memory_and_honours_the_env_override(tmp_path, monke
     con = store.connect(str(tmp_path / "cap2.duckdb"))
     assert con.execute("SELECT current_setting('memory_limit')").fetchone()[0] == "1.1 GiB"
     con.close()
+
+
+# ---------------------------------------------------------------- employer location index (Stripe)
+class _PageResp:
+    def __init__(self, payload=None, text=""):
+        self._payload, self.text = payload, text
+
+    def json(self):
+        return self._payload
+
+
+def _stripe_page(listings, table):
+    data = {"props": {"pageProps": {"jobIndexData": {"filters": {"locations": table}, "listings": listings}}}}
+    return f'<html><script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script></html>'
+
+
+def test_indexed_location_reads_remote_and_office_entries():
+    from backend.ats import adapters as A
+    assert A._indexed_location([{"name": "Remote in United States", "remote": True, "countryCode": "US"}]) == (
+        "Remote in United States", ["Remote in United States"], "remote")
+    assert A._indexed_location([{"name": "Chicago", "countryCode": "US"}, {"name": "Seattle", "countryCode": "US"}]) == (
+        "Chicago", ["Chicago", "Seattle"], "hybrid")
+    # remote only outside the US is not a remote offer for a US search -- left to the country rules
+    assert A._indexed_location([{"name": "Remote in Canada", "remote": True, "countryCode": "CA"}])[2] is None
+    assert A._indexed_location([]) is None
+
+
+def test_greenhouse_uses_the_employer_index_over_the_thin_feed_location(monkeypatch):
+    """2026-09-22: Stripe's feed says "US" for an office-only Chicago role; its careers index says Chicago."""
+    from backend.ats import adapters as A
+    feed = {"jobs": [{"id": 1, "title": "Ops Lead", "absolute_url": "u1", "location": {"name": "US"}, "content": "x"},
+                     {"id": 2, "title": "Ops Lead", "absolute_url": "u2", "location": {"name": "US"}, "content": "x"},
+                     {"id": 3, "title": "Ops Lead", "absolute_url": "u3", "location": {"name": "US"}, "content": "x"}]}
+    table = [{"name": "Chicago", "countryCode": "US"},
+             {"name": "Remote in United States", "remote": True, "countryCode": "US"}]
+    page = _stripe_page([{"greenhouseId": 1, "locationIndices": [0]}, {"greenhouseId": 2, "locationIndices": [1, 0]}], table)
+
+    def fake(c, method, url, **kw):
+        return _PageResp(text=page) if "stripe.com" in url else _PageResp(payload=feed)
+    monkeypatch.setattr(A, "_request", fake)
+    jobs = {j["req_id"]: j for j in A.greenhouse_jobs({"identifier_1": "stripe", "employer": "Stripe"})}
+    assert (jobs["1"]["location_primary"], jobs["1"]["workplace_type"]) == ("Chicago", "hybrid")
+    assert json.loads(jobs["2"]["locations"]) == ["Remote in United States", "Chicago"]
+    assert jobs["2"]["workplace_type"] == "remote"
+    assert jobs["3"]["location_primary"] == "US"          # not in the index -> the feed's own location
+
+
+def test_greenhouse_falls_back_to_the_feed_when_the_index_fails(monkeypatch):
+    from backend.ats import adapters as A
+    feed = {"jobs": [{"id": 1, "title": "Ops Lead", "absolute_url": "u1", "location": {"name": "US"}, "content": "x"}]}
+
+    def fake(c, method, url, **kw):
+        if "stripe.com" in url:
+            raise RuntimeError("index down")
+        return _PageResp(payload=feed)
+    monkeypatch.setattr(A, "_request", fake)
+    assert A.greenhouse_jobs({"identifier_1": "stripe", "employer": "Stripe"})[0]["location_primary"] == "US"

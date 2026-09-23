@@ -63,6 +63,8 @@ fi
 #   retrain            finder.py retrain (gated + ledgered; promotes AND rescreens only if a model passes)
 #   sweep:<args>       sweep_ats.py <args> -- sweep, JD fetch, tracker sync, screen, coverage,
 #                      required-embed, [Gemma judge if --llm-top N], Jobs_Found, snapshots
+#                      (with --skip-sweep --no-screen it is only a JD fetch: the directional backfill preset;
+#                      the next FULL run screens those rows because their JD is newer than their screen)
 #   sync               finder.py sync (mirror Application_Tracker.md)
 #   top                finder.py top (the END-of-pipeline Top_Jobs file)
 #   judge2run          finder.py judge2 run --eval-set: Gemma judges every blind human-graded gold row
@@ -80,16 +82,18 @@ LABELS=(
   "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
   "Overnight LIGHT           sweep + screen + coverage + Top_Jobs; no Gemma judge"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
+  "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
   "Report only               tracker sync + Top_Jobs (minutes)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~2 min" "seconds")
+ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~5 min per 1,200 JDs" "~2 min" "seconds")
 PRESETS=(
   "sweep:--llm-top 100|top"
   "sweep:--llm-top 100|judge2run|judge2eval|top"
   "retrain|sweep:--llm-top 100|top"
   "sweep:|top"
   "judge2run|judge2eval"
+  "sweep:--skip-sweep --detail-pattern directional --detail-budget 1300 --no-screen"
   "sync|top"
   "@dryrun"
 )

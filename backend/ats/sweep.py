@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from . import adapters, store
-from .prefilter import DETAIL_TITLE_PATTERN
+from .prefilter import DETAIL_TITLE_PATTERN, DIRECTIONAL_EXCLUDE_PATTERN, DIRECTIONAL_TITLE_PATTERN
 from .registry import load_registry
 
 
@@ -170,13 +170,14 @@ def sweep(con, rows, workers=8, max_pages=None, log=print):
 
 
 def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PATTERN, workers=6, log=print,
-                  since=None, label="Detail stage"):
+                  since=None, label="Detail stage", exclude_pattern=None):
     """Fills description_text (and locations/dates/pay) for postings that still lack
     one, newest first, up to `budget` requests. A 404 closes the posting.
     `since` limits it to postings first seen at or after that time (this run's new ones)."""
     by_employer = {(r["employer"], r["platform"]): r for r in registry_rows}
     cands = store.detail_candidates(con, adapters.DETAIL_PLATFORMS, title_pattern, budget,
-                                    employers=[r["employer"] for r in registry_rows], since=since)
+                                    employers=[r["employer"] for r in registry_rows], since=since,
+                                    exclude_pattern=exclude_pattern)
     if not cands:
         log(f"{label}: nothing to fetch.")
         return 0, 0
@@ -248,13 +249,16 @@ def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PAT
 
 def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_pages=None,
         detail_budget=300, detail_all=False, skip_sweep=False, new_detail_cap=5000,
-        screen=True, report=True, llm_top=0, full_screen=False, track="all", max_ring=1, log=print):
+        screen=True, report=True, llm_top=0, full_screen=False, track="all", max_ring=1, log=print,
+        detail_pattern=None):
     """One sweep plus two detail passes, then the finder stage:
     1. NEW postings from this run get their JD fetched automatically, every title, no
        prefilter, up to `new_detail_cap` (a safety cap for a board's first-ever sweep,
        where every posting counts as new). Anything over the cap falls to the backlog.
     2. BACKLOG: up to `detail_budget` older postings still missing a JD, newest first,
-       title-prefiltered unless `detail_all`.
+       title-prefiltered unless `detail_all`. `detail_pattern` widens or replaces the prefilter for
+       this run only: 'directional' = prefilter.DIRECTIONAL_TITLE_PATTERN minus
+       DIRECTIONAL_EXCLUDE_PATTERN (the `vw_jd_missing` directional tier), anything else a regex.
     3. FINDER (`screen=True`): tracker sync, decision read-back, screen, Jobs_Found report
        (only when JOBSEARCH_VAULT_DIR is set and `report`), snapshots. A finder failure is
        logged and never costs the sweep its run log.
@@ -296,9 +300,13 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
                 bridge_stats = sweep_bridge(con, bridge_rows, max_ring=max_ring, workers=workers,
                                             max_pages=max_pages, log=log)
         if detail_budget and track in ("fit", "all"):
-            n, _ = fetch_details(con, fit_rows, budget=detail_budget,
-                                 title_pattern=None if detail_all else DETAIL_TITLE_PATTERN,
-                                 label="Backlog details")
+            pattern, exclude = (None if detail_all else DETAIL_TITLE_PATTERN), None
+            if detail_pattern == "directional":
+                pattern, exclude = DIRECTIONAL_TITLE_PATTERN, DIRECTIONAL_EXCLUDE_PATTERN
+            elif detail_pattern:
+                pattern = detail_pattern
+            n, _ = fetch_details(con, fit_rows, budget=detail_budget, title_pattern=pattern,
+                                 exclude_pattern=exclude, label="Backlog details")
             details += n
         if screen:
             _run_finder(con, stats, report=report, llm_top=llm_top, full_screen=full_screen, log=log)

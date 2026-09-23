@@ -1855,7 +1855,7 @@ DETAIL_MAX_ATTEMPTS = 3  # a posting whose fetch keeps coming back empty/errorin
 
 
 def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=None, since=None,
-                       retry_exhausted=False):
+                       retry_exhausted=False, exclude_pattern=None):
     """Active postings still missing a JD, least-tried and newest first. `title_pattern` (regex) is a
     BUDGETING device — it decides which postings get a detail request first, not which ones matter.
 
@@ -1883,6 +1883,9 @@ def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=N
     if title_pattern:
         where += " AND regexp_matches(coalesce(title, ''), ?, 'i')"
         params.append(title_pattern)
+    if exclude_pattern:  # RE2 has no lookahead, so a "directional minus sales" tier needs a second test
+        where += " AND NOT regexp_matches(coalesce(title, ''), ?, 'i')"
+        params.append(exclude_pattern)
     params.append(limit)
     return con.execute(f"""
         SELECT posting_id, employer, platform, req_id, url, location_primary, locations,

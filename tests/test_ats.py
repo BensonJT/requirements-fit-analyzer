@@ -969,3 +969,16 @@ def test_vw_jd_missing_tags_titles_and_fetchability(tmp_path):
     assert fetch["F"] is True and fetch["G"] is False  # greenhouse lists carry the JD; no detail adapter
     con.execute("UPDATE postings SET detail_attempts = ? WHERE req_id = 'P'", [store.DETAIL_MAX_ATTEMPTS])
     assert con.execute("SELECT fetchable FROM vw_jd_missing WHERE req_id = 'P'").fetchone()[0] is False
+
+
+def test_detail_candidates_exclude_pattern(tmp_path):
+    """`--detail-pattern directional` = DIRECTIONAL minus DIRECTIONAL_EXCLUDE: a retail sales
+    "consultant" never spends backlog budget."""
+    from backend.ats import prefilter
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    store.record_board(con, "Acme", "workday", [_job("A", "Technical Project Manager"),
+                                                 _job("B", "Retail Sales Consultant"),
+                                                 _job("C", "Mechanical Thermal Engineer I")], datetime(2026, 9, 23))
+    got = store.detail_candidates(con, ["workday"], prefilter.DIRECTIONAL_TITLE_PATTERN, 100,
+                                  exclude_pattern=prefilter.DIRECTIONAL_EXCLUDE_PATTERN)
+    assert [r[3] for r in got] == ["A"]

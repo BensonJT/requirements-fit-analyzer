@@ -351,8 +351,8 @@ COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state
 # 2026-09-22 (user ruling): entries of COMMUTABLE_PLACES that are reachable for a REMOTE role -- close
 # enough to satisfy a residence restriction, or to go in occasionally -- but not a commute you would make
 # several days a week. They keep counting everywhere COMMUTABLE_PLACES is read EXCEPT the in-office
-# commute gate, and only when the ATS explicitly says hybrid or onsite; an unknown workplace keeps them,
-# so the rule never rejects on a guess. Entries must be spelled exactly as in COMMUTABLE_PLACES.
+# commute gate for a posting that does not read as remote (stated hybrid/onsite, or no workplace given).
+# Entries must be spelled exactly as in COMMUTABLE_PLACES.
 COMMUTE_REMOTE_ONLY_PLACES = []
 # 2026-09-22 (user ruling): entries of COMMUTABLE_PLACES that are acceptable for an in-office role but a long
 # drive depending on the exact site. They still pass the commute gate; the local/hybrid flag says "long

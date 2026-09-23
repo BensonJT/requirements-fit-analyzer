@@ -343,6 +343,8 @@ Views:
 | `vw_posting_lifetimes` | average days a posting stays up, per employer |
 | `vw_jd_missing` | open postings still without a JD, with `title_match` = function / prefilter / directional / none and `fetchable`; `SELECT title_match, count(*) FROM vw_jd_missing GROUP BY 1` says what the detail backfill is leaving behind |
 
+**Disk maintenance.** `bash scripts/db_maintenance.sh` (menu) / `--auto` (what every overnight `launch.sh` preset ends with) / `--report`. DuckDB never gives free blocks back to the filesystem, so the file only grows; `--auto` rewrites it into a fresh file (`COPY FROM DATABASE`, row counts verified, then swapped in) whenever ≥10% of blocks are free, removes scratch DuckDB files, prunes worktrees and merged branches, and drops in-repo `db/jobsearch.duckdb.*` backups older than 7 days. First run 2026-09-23: 2.1 GB → 1.3 GB in 105 s.
+
 Macros and views compose:
 
 ```sql

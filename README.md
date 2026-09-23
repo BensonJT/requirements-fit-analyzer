@@ -341,6 +341,7 @@ Views:
 | `vw_pay_annualized` | postings with pay, hourly converted at × 2,000 |
 | `vw_board_health` | each board's latest pull: ok or failed, job count, error |
 | `vw_posting_lifetimes` | average days a posting stays up, per employer |
+| `vw_jd_missing` | open postings still without a JD, with `title_match` = function / prefilter / directional / none and `fetchable`; `SELECT title_match, count(*) FROM vw_jd_missing GROUP BY 1` says what the detail backfill is leaving behind |
 
 Macros and views compose:
 

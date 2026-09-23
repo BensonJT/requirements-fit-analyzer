@@ -1461,20 +1461,83 @@ def test_long_commute_places_are_kept_and_flagged_with_employer_exceptions(monke
     """2026-09-22 user ruling: some commutable places are fine for an office role but a long drive depending
     on the site -- kept, flagged. One employer can make a place a plain commute (NFCU's Vienna campus)."""
     monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il", "chatham, il?", "peoria, il"])
-    monkeypatch.setattr(P, "COMMUTE_FLAG_PLACES", ["peoria, il"])
+    monkeypatch.setattr(P, "COMMUTE_FAR_PLACES", ["peoria, il"])
     monkeypatch.setattr(P, "COMMUTE_EMPLOYER_PLACES", {"acme payments": ["peoria, il"]})
     def screened(employer, locs):
         return rules.screen_row(_row(employer=employer, location_primary=locs[0], workplace_type="hybrid",
                                      locations=json.dumps(locs), description_text="Hybrid role."))
     far = screened("Other Co", ["Peoria, IL"])
     assert "not remote and outside the commute area" not in "; ".join(far.reasons)
-    assert "local/hybrid via Peoria, IL -- long commute: check the exact site and in-office days" in far.flags
+    assert "local/hybrid via Peoria, IL -- long commute (office days not stated): check the exact site" in far.flags
     # a closer site on the same posting wins -- no long-commute flag
     near = screened("Other Co", ["Peoria, IL", "Springfield, IL"])
     assert not any("long commute" in f for f in near.flags)
     # the employer exception makes it a plain commute
     exc = screened("ACME PAYMENTS INC.", ["Peoria, IL"])
     assert "local/hybrid -- judge on route, not radius" in exc.flags
+
+
+def test_office_days_reads_the_stated_in_office_cadence():
+    """2026-09-22: real phrasings from today's corpus audit."""
+    cases = {
+        "Expected to work on-site at our Las Colinas office a minimum of two (2) days per week, with the "
+        "remaining days worked remotely.": 2,
+        "Onsite 4 days a week in office and one day remote.": 4,
+        "Hybrid, with 3 days onsite and 2 days remote.": 3,
+        "Four days onsite at our Buffalo location, with the flexibility to work from home one day per week.": 4,
+        "You may work from home up to 40% of the time.": 3,
+        "Associates work at an Acme location at least once per week, and potentially several times per week.": 2,
+        "Mostly remote, but you should report to the Jacksonville office once a week.": 1,
+        "Office-assigned staff spend at least 50% of the time in a given month in their local office.": 3,
+        "On-site presence Tuesday through Thursday, with remote work available Monday and Friday.": 3,
+        "Travel to our DC office a couple of days a month for team meetings.": 0.5,
+        "This role is onsite and may have flexibility for some situational remote work days.": 5,
+        "Must be available within 30 days of the offer.": None,
+        "This is a remote position.": None,
+        "The Office of the CFO supports planning as needed.": None,
+    }
+    for text, want in cases.items():
+        assert S.office_days(text) == want, text
+
+
+def test_far_place_cadence_decides_reject_or_flag(monkeypatch):
+    """2026-09-22 ruling: a far place is fine at one day a week or less, the user's call at two, a no-go at three+;
+    unstated cadence is kept and flagged, never rejected on a guess. A closer site or an employer exception wins."""
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["springfield, il", "peoria, il"])
+    monkeypatch.setattr(P, "COMMUTE_FAR_PLACES", ["peoria, il"])
+    monkeypatch.setattr(P, "FAR_COMMUTE_OK_DAYS", 1)
+    monkeypatch.setattr(P, "FAR_COMMUTE_REJECT_DAYS", 3)
+    monkeypatch.setattr(P, "COMMUTE_EMPLOYER_PLACES", {"acme payments": ["peoria, il"]})
+    def rec(desc, wt="hybrid", employer="Other Co", locs='["Peoria, IL"]'):
+        return rules.screen_row(_row(employer=employer, location_primary="Peoria, IL", workplace_type=wt,
+                                     locations=locs, description_text=desc))
+    assert "far commute: Peoria, IL, 3 days/week in office" in rec("In the office 3 days a week.").reasons
+    assert "far commute: Peoria, IL, fully on-site" in rec("A process role.", wt="onsite").reasons
+    for desc, tag in (("In the office one day a week.", "light: 1 day/week"),
+                      ("Visit our Peoria office a couple of days a month.", "light: a few days a month"),
+                      ("Hybrid, 2 days in-office and 3 days remote.", "2 days/week: your call"),
+                      ("A process role.", "office days not stated")):
+        r = rec(desc)
+        assert not any("commute" in x for x in r.reasons), desc
+        assert f"local/hybrid via Peoria, IL -- long commute ({tag}): check the exact site" in r.flags, desc
+    # a closer site on the posting, or the employer exception, makes it an ordinary commute
+    assert not rec("In the office 4 days a week.", locs='["Peoria, IL", "Springfield, IL"]').reasons
+    assert not rec("In the office 4 days a week.", employer="Acme Payments").reasons
+
+
+def test_a_takeable_remote_location_entry_makes_the_posting_remote(monkeypatch):
+    """2026-09-22: Salesforce tags postings onsite yet lists "<State> - Remote" locations. Only an entry the user
+    can take counts -- US-wide, the home state, or the DC metro; never another state or another country."""
+    monkeypatch.setattr(P, "HOME", "Springfield, IL")
+    def remote(extra):
+        return S.is_remote(rules.listing_from_row(_row(location_primary="Chicago, IL", workplace_type="onsite",
+                                                       locations=json.dumps(["Chicago, IL", extra]),
+                                                       description_text="A role.")))
+    for ok in ("Illinois - Remote", "United States - Remote", "Remote (Any State)", "Remote in United States",
+               "Maryland - Washington DC Metro - Remote"):
+        assert remote(ok), ok
+    for no in ("Arizona - Remote", "Remote in Ireland", "Peoria, IL"):
+        assert not remote(no), no
 
 
 def test_employer_exception_lifts_a_remote_only_place(monkeypatch):

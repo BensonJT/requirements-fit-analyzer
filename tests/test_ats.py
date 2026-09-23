@@ -923,3 +923,11 @@ def test_greenhouse_falls_back_to_the_feed_when_the_index_fails(monkeypatch):
         return _PageResp(payload=feed)
     monkeypatch.setattr(A, "_request", fake)
     assert A.greenhouse_jobs({"identifier_1": "stripe", "employer": "Stripe"})[0]["location_primary"] == "US"
+
+
+def test_usajobs_telework_flags_set_the_workplace():
+    """2026-09-22: not telework-eligible = full-time in person (onsite); eligible = hybrid; remote wins."""
+    from backend.ats import adapters as A
+    assert A._usajobs_workplace({"RemoteIndicator": True, "TeleworkEligible": False}) == "remote"
+    assert A._usajobs_workplace({"RemoteIndicator": False, "TeleworkEligible": False}) == "onsite"
+    assert A._usajobs_workplace({"RemoteIndicator": "false", "TeleworkEligible": "true"}) == "hybrid"

@@ -904,7 +904,10 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                s.reasons, s.flags,
                g.grade, g.grade_process, g.grade_technical, g.grade_ai, g.blocker, g.scorer, g.required_fit,
                g.required_unmet, g.lens_grade_source,
-               d.posting_id IS NOT NULL AS decided,
+               -- 2026-09-22 (user): a `hold` means "not ready to build yet, may build later" -- it must keep
+               -- surfacing, so only a build/pass (the LATEST decision, vw_decisions) counts as decided.
+               (d.posting_id IS NOT NULL AND d.decision <> 'hold') AS decided,
+               coalesce(d.decision = 'hold', FALSE) AS held,
                t.matched_posting_id IS NOT NULL AS in_tracker,
                -- The "second layer" (backend/finder/required_embed.py): NOT a lens, never read here except
                -- through the coalesce(embed_required, fit_required) calls below, which only ever stand in for

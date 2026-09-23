@@ -9,6 +9,7 @@ Verdicts:
     review    -- worth a human look, but carries a flag (discipline, clearance, tracker, ...)
     reject    -- fails a hard rule; reason recorded
 """
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -252,9 +253,32 @@ _ADDRESS_LIKE_RE = re.compile(
     r"pkwy|parkway|hwy|highway|ste|suite|bldg|building|plaza|tower)\b\.?", re.I)
 
 
+# 2026-09-22: an ATS location ENTRY that names remote ("United States - Remote", "Remote (Any State)",
+# "Virginia - Remote", "Maryland - Washington DC Metro - Remote") is a remote option even when the posting-level
+# tag says onsite/hybrid (Salesforce tags onsite and lists "<State> - Remote" locations; 77 rows were missed).
+# Only an entry the user can actually take counts: US-wide, the home state, or the DC metro -- never
+# "Remote in Ireland", and never "Arizona - Remote", which means remote if you live in Arizona.
+_REMOTE_ENTRY_RE = re.compile(r"(?:^|[\s,(/-])remote\b", re.I)
+_FOREIGN_REMOTE_RE = re.compile(r"\bremote\s+in\s+(?!(?:the\s+)?(?:us\b|u\.s|usa\b|united\s+states))", re.I)
+_DC_METRO_RE = re.compile(r"\b(?:washington\s+)?d\.?c\.?\s+metro\b", re.I)
+
+
+def _remote_location_entry(job: Listing) -> bool:
+    home = states_in(P.HOME or "")
+    for entry in [job.location, *(job.locations or [])]:
+        if not entry or not _REMOTE_ENTRY_RE.search(entry) or _FOREIGN_REMOTE_RE.search(entry):
+            continue
+        named = states_in(entry)
+        if not named or (named & home) or _DC_METRO_RE.search(entry):
+            return True
+    return False
+
+
 def is_remote(job: Listing) -> bool:
     workplace = job.extra.get("workplace_type")
     if workplace == "remote":  # the ATS's own flag (finder rows)
+        return True
+    if _remote_location_entry(job):
         return True
     # "US Off-Site" as a location segment always means remote, whichever field carries it (sec 20.3).
     offsite_blob = "\n".join([job.location or "", *(job.locations or []), job.description or ""])
@@ -567,11 +591,93 @@ def _employer_commute_places(company: str) -> list:
     return []
 
 
+# ---------------------------------------------------------------- in-office cadence (far places)
+# 2026-09-22 user ruling: a far place (COMMUTE_FAR_PLACES) is acceptable for a hybrid role that asks for one
+# day a week or less, a question for the user at two days, and a no-go at three or more. office_days() reads
+# the JD's own statement of how many days a week the role sits in an office. It returns the HIGHEST office
+# cadence the text states (the binding requirement), 0.5 for "a few days a month / occasionally", or None when
+# the JD says nothing -- None is never read as a reject.
+_WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+_N = r"(?<![\d.])(\d|one|two|three|four|five)(?:\s*\(\d\))?"
+_OFFICE_W = (r"(?:in[-\s]?(?:the\s+)?office|on[-\s]?site|in[-\s]person|"
+             r"at\s+(?:our|the|an?|one\s+of\s+our)\s+[\w\s,&'-]{0,40}?(?:office|campus|site|location|hub)\b|"
+             r"report(?:ing)?\s+(?:in|to\s+(?:the|our|an?)\s+[\w\s,'-]{0,30}?office))")
+_REMOTE_W = r"(?:remote(?:ly)?|from\s+home|work[-\s]from[-\s]home|telework(?:ing)?|telecommut\w*|virtual(?:ly)?|wfh)"
+_DAYS_RE = re.compile(_N + r"\s*(?:\+\s*)?days?\b(?:\s+(?:a|per|each)\s+week|\s*/\s*(?:week|wk))?", re.I)
+_OFFICE_RE = re.compile(_OFFICE_W, re.I)
+_REMOTE_W_RE = re.compile(_REMOTE_W, re.I)
+_ONCE_WEEK_RE = re.compile(r"\b(?:at\s+least\s+)?once\s+(?:a|per|each)\s+week\b", re.I)
+_SEVERAL_WEEK_RE = re.compile(r"\bseveral\s+(?:times|days)\s+(?:a|per|each)\s+week\b", re.I)
+_WEEKDAYS = ["mon", "tues", "wednes", "thurs", "fri"]
+_WEEKDAY_RANGE_RE = re.compile(r"\b(mon|tues|wednes|thurs|fri)(?:day)?s?\s*(?:through|thru|to|-|–)\s*(mon|tues|wednes|thurs|fri)(?:day)?s?\b", re.I)
+_FULL_ONSITE_RE = re.compile(
+    r"\b(?:fully|100\s*%|full[-\s]time)\s+(?:on[-\s]?site|in[-\s]office|in\s+the\s+office)\b|"
+    r"\b(?:role|position|job)\s+is\s+(?:an?\s+)?(?:100\s*%\s+)?on[-\s]?site\b|\bon[-\s]?site\s+(?:role|position)\b", re.I)
+_WFH_PCT_RE = re.compile(r"\b(?:work\s+from\s+home|remote(?:ly)?|telework)\s+(?:up\s+to\s+)?(?:(\d{1,3})\s*%|half)", re.I)
+_OFFICE_PCT_RE = re.compile(r"\b(\d{1,3})\s*%\s+(?:of\s+(?:the|their|your)\s+(?:time|week|month)[^.]{0,40}?)?"
+                            r"(?:in\s+(?:the|their|your)?\s*(?:local\s+)?office|on[-\s]?site)", re.I)
+_LIGHT_RE = re.compile(
+    r"\b(?:a\s+)?(?:few|couple(?:\s+of)?|one|two|1|2)\s+(?:days?|times?)\s+(?:a|per|each)\s+month\b|"
+    r"\bonce\s+(?:a|per)\s+month\b|\bmonthly\b|\bquarterly\b|\boccasional(?:ly)?\b|\bas\s+needed\b|"
+    r"\bperiodic(?:ally)?\b|\binfrequent(?:ly)?\b", re.I)
+
+
+def _num(tok: str) -> int:
+    return int(tok) if tok.isdigit() else _WORDNUM[tok.lower()]
+
+
+def office_days(text: str) -> Optional[float]:
+    """In-office days a week the JD states, or None. See the block comment above."""
+    found = []
+    for sent in re.split(r"(?<=[.;!?])\s+|\n+", text or ""):
+        low = sent.lower()
+        has_office = bool(_OFFICE_RE.search(low))
+        if _FULL_ONSITE_RE.search(low):
+            found.append(5.0)
+        for m in _DAYS_RE.finditer(low):
+            n = _num(m.group(1))
+            if not 1 <= n <= 5:
+                continue
+            after, before = low[m.end():m.end() + 30], low[max(0, m.start() - 60):m.start()]
+            if re.match(r"\s*(?:(?:a|per|each)\s+week\s+)?(?:in[-\s]?(?:the\s+)?office|on[-\s]?site|in[-\s]person|working\s+on[-\s]?site)", after):
+                found.append(float(n)); continue
+            if re.match(r"\s*(?:(?:a|per|each)\s+week\s+)?(?:\w+\s+)?" + _REMOTE_W, after):
+                if n <= 4: found.append(float(5 - n))
+                continue
+            o = [x.end() for x in _OFFICE_RE.finditer(before)]
+            r = [x.end() for x in _REMOTE_W_RE.finditer(before)]
+            if o and (not r or max(o) > max(r)):
+                found.append(float(n))
+            elif r and n <= 4 and "week" in low[m.start():m.end() + 12]:
+                found.append(float(5 - n))
+        if has_office and _ONCE_WEEK_RE.search(low):
+            found.append(1.0)
+        if has_office and _SEVERAL_WEEK_RE.search(low):
+            found.append(2.0)
+        if has_office:
+            for a, b in _WEEKDAY_RANGE_RE.findall(low):
+                i, j = _WEEKDAYS.index(a.lower()), _WEEKDAYS.index(b.lower())
+                if j > i: found.append(float(j - i + 1))
+        for m in _WFH_PCT_RE.finditer(low):
+            pct = 50 if m.group(1) is None else int(m.group(1))
+            if 0 < pct < 100: found.append(float(math.ceil(5 * (100 - pct) / 100)))
+        for m in _OFFICE_PCT_RE.finditer(low):
+            pct = int(m.group(1))
+            if 0 < pct <= 100: found.append(float(math.ceil(5 * pct / 100)))
+        # a light reading can only KEEP a row, so any office word will do here ("into the office", "to our DC office")
+        if re.search(r"\b(?:the|our|an?|your|their|local)\s+(?:[\w-]+\s+){0,2}(?:offices?|campus)\b(?!\s+of\b)|on[-\s]?site|in[-\s]person", low) and _LIGHT_RE.search(low) and not found:
+            found.append(0.5)
+    if not found:
+        return None
+    hard = [x for x in found if x >= 1]
+    return max(hard) if hard else 0.5
+
+
 def long_commute_site(job: Listing, hits: list) -> Optional[str]:
     """The site to name when EVERY commutable location is a COMMUTE_FLAG_PLACES one (2026-09-22 ruling):
     fine for an office role, a long drive depending on the exact site. None when any hit is closer, or when
     the employer has that place as a plain commute (COMMUTE_EMPLOYER_PLACES)."""
-    flag_places = [p for p in (getattr(P, "COMMUTE_FLAG_PLACES", None) or [])
+    flag_places = [p for p in (getattr(P, "COMMUTE_FAR_PLACES", None) or [])
                    if p not in _employer_commute_places(job.company)]
     if not hits or not flag_places:
         return None
@@ -932,8 +1038,22 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         hits = commutable_locations(job)
         far = long_commute_site(job, hits)
         if far:
-            # Still the "^local/hybrid" prefix, so scoring is untouched -- this only changes what the user reads.
-            flags.append(f"local/hybrid via {far} -- long commute: check the exact site and in-office days")
+            # The JD's own in-office cadence decides a far place (2026-09-22 ruling; thresholds in profile.py).
+            days = office_days(f"{job.title}\n{job.description}")
+            if days is None and job.extra.get("workplace_type") == "onsite":
+                days = 5.0
+            ok, reject_at = getattr(P, "FAR_COMMUTE_OK_DAYS", None), getattr(P, "FAR_COMMUTE_REJECT_DAYS", None)
+            if days is not None and reject_at is not None and days >= reject_at:
+                reasons.append(f"far commute: {far}, " + ("fully on-site" if days >= 5 else f"{days:g} days/week in office"))
+            else:
+                if days is None:
+                    tag = "office days not stated"
+                elif ok is not None and days <= ok:
+                    tag = "light: a few days a month" if days < 1 else f"light: {days:g} day/week"
+                else:
+                    tag = f"{days:g} days/week: your call"
+                # Still the "^local/hybrid" prefix, so scoring is untouched -- this only changes what the user reads.
+                flags.append(f"local/hybrid via {far} -- long commute ({tag}): check the exact site")
         elif hits and not place_matches(job.location or "", P.COMMUTABLE_PLACES):
             flags.append(f"local/hybrid via {hits[0]} (headline: {job.location}) "
                          f"-- judge on route, not radius")

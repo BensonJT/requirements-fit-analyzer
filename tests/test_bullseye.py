@@ -288,3 +288,20 @@ def test_bullseye_backfill_touches_only_latest_row_of_in_population_postings(tmp
     assert new_row is not None
     assert rej_row is None                 # rejected postings are excluded from the population
     con.close()
+
+
+def test_a_hold_is_not_decided_but_a_later_build_or_pass_is(tmp_path):
+    """2026-09-22 (user): a hold means "not ready to build yet, may build later" -- it keeps surfacing (marked
+    held); only the LATEST decision counts, so a build or pass after the hold hides the posting."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    for pid in ("h1" * 10, "h2" * 10, "h3" * 10):
+        _screened_posting(con, pid)
+    con.execute("INSERT INTO decisions VALUES (?, 'hold', NULL, 'cli', NULL, ?)", ["h1" * 10, datetime(2026, 9, 22, 9)])
+    con.execute("INSERT INTO decisions VALUES (?, 'hold', NULL, 'cli', NULL, ?)", ["h2" * 10, datetime(2026, 9, 22, 9)])
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'level: too junior', 'cli', NULL, ?)",
+                ["h2" * 10, datetime(2026, 9, 22, 10)])
+    got = {r[0]: (r[1], r[2]) for r in con.execute("SELECT posting_id, decided, held FROM vw_lens_fit").fetchall()}
+    assert got["h1" * 10] == (False, True)     # held: still shown
+    assert got["h2" * 10] == (True, False)     # held, then passed: hidden
+    assert got["h3" * 10] == (False, False)    # untouched
+    con.close()

@@ -17,6 +17,8 @@ Usage:
     .venv/bin/python sweep_ats.py --employer "capital one"
     .venv/bin/python sweep_ats.py --platform workday --detail-budget 0
     .venv/bin/python sweep_ats.py --skip-sweep --detail-budget 1000   # JD backfill only
+    .venv/bin/python sweep_ats.py --skip-sweep --detail-pattern directional --detail-budget 1300 --no-screen
+                                                        # fetch the vw_jd_missing 'directional' tier's JDs
     .venv/bin/python sweep_ats.py --no-screen           # skip the finder stage (screen/report/snapshots)
 """
 import argparse
@@ -39,6 +41,9 @@ def main():
     ap.add_argument("--detail-budget", type=int, default=2000,
                     help="JD fetches for the older backlog, title-prefiltered (0 = none; default 2000)")
     ap.add_argument("--detail-all", action="store_true", help="ignore the title prefilter when choosing JDs to fetch")
+    ap.add_argument("--detail-pattern",
+                    help="backlog title pattern for this run: 'directional' (the vw_jd_missing directional tier, "
+                         "wider than the prefilter, minus sales/retail) or any regex; default = the prefilter")
     ap.add_argument("--skip-sweep", action="store_true", help="only run the detail stage")
     ap.add_argument("--db", help="override the DuckDB path")
     ap.add_argument("--no-screen", action="store_true", help="skip the finder stage entirely")
@@ -55,7 +60,7 @@ def main():
     run(db_path=a.db, platform=a.platform, limit=a.limit, employer=a.employer, workers=a.workers,
         max_pages=a.max_pages, detail_budget=a.detail_budget, detail_all=a.detail_all, skip_sweep=a.skip_sweep,
         new_detail_cap=a.new_detail_cap, screen=not a.no_screen, report=not a.no_report, llm_top=a.llm_top,
-        full_screen=a.full_screen, track=a.track, max_ring=a.max_ring)
+        full_screen=a.full_screen, track=a.track, max_ring=a.max_ring, detail_pattern=a.detail_pattern)
 
 
 if __name__ == "__main__":

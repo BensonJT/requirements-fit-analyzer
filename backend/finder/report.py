@@ -513,7 +513,7 @@ def _gate_counts(con, tier: str, levels=TOP_LEVELS) -> dict:
 # long commute: ..."; COMMUTE_FLAG_PLACES). The top list never printed screen flags, so the warning was
 # invisible exactly where the user decides. It goes at the FRONT of the Location cell so truncation never
 # eats it; the site named is the one that carried the match, which is not always the headline location.
-_LONG_COMMUTE_RE = re.compile(r"local/hybrid via (.+?) -- long commute")
+_LONG_COMMUTE_RE = re.compile(r"local/hybrid via (.+?) -- long commute(?: \(([^)]*)\))?")
 
 
 def _long_commute_sites(con, pids: list) -> dict:
@@ -525,13 +525,23 @@ def _long_commute_sites(con, pids: list) -> dict:
     for pid, reasons in rows:
         m = _LONG_COMMUTE_RE.search(reasons or "")
         if m:
-            out[pid] = m.group(1)
+            out[pid] = f"{m.group(1)} ({m.group(2)})" if m.group(2) else m.group(1)
     return out
+
+
+# 2026-09-22 (user): a `hold` is "not ready to build yet, may build later", so vw_lens_fit no longer counts it
+# as decided and it keeps surfacing -- marked, so it is never mistaken for a posting nobody has looked at.
+def _held_ids(con, pids: list) -> set:
+    if not pids:
+        return set()
+    return {pid for (pid,) in con.execute(
+        "SELECT posting_id FROM vw_decisions WHERE decision = 'hold' AND posting_id IN (SELECT unnest(?::VARCHAR[]))",
+        [list(pids)]).fetchall()}
 
 
 def _loc_cell(loc, far_site) -> str:
     if far_site:
-        return f"⚠ long commute: {_cell(far_site)}"[:48]
+        return f"⚠ {_cell(far_site)}"[:64]
     return _cell(loc)[:34]
 
 
@@ -566,6 +576,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
     apply_rows = top_rows(con, "apply", include_decided=include_decided, levels=levels)
     review_rows = top_rows(con, "review", include_decided=include_decided, levels=levels)
     far = _long_commute_sites(con, [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]])
+    held = _held_ids(con, [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]])
     apply_gates = _gate_counts(con, "apply", levels)
     review_gates = _gate_counts(con, "review", levels)
 
@@ -597,7 +608,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
              interval, score, first_seen, age, breadth, rank, why) = row
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
+            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
                      f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
                      f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")
@@ -612,7 +623,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
              interval, score, first_seen, age, breadth, rank, why) = row
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
+            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
                      f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
                      f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")

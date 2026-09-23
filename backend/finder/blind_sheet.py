@@ -31,7 +31,7 @@ SHEET_COLUMNS = ("posting_id", "employer", "title", "location", "url",
 # screens.reasons text -- see backend/screen.py's reasons.append() call sites for the exact phrases.
 REJECT_BUCKETS = ("location", "clearance", "title")
 _BUCKET_PATTERNS = {
-    "location": re.compile(r"remote and outside the commute area|remote restricted to:", re.I),
+    "location": re.compile(r"remote and outside the commute area|remote restricted to:|far commute:", re.I),
     "clearance": re.compile(r"clearance must already be held", re.I),
     "title": re.compile(r"off-function title|off-lane title", re.I),
 }

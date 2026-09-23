@@ -815,12 +815,23 @@ def _usajobs_clearance_line(value):
             f"a {v} security clearance is a condition of employment.")
 
 
+def _usajobs_flag(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return value
+
+
 def _usajobs_workplace(details, *locs):
-    remote = details.get("RemoteIndicator")
-    if isinstance(remote, str):
-        remote = remote.strip().lower() in ("true", "yes", "1")
-    if remote:
+    if _usajobs_flag(details.get("RemoteIndicator")):
         return "remote"
+    # 2026-09-22: USAJobs states telework eligibility on every posting. Not telework-eligible means full-time
+    # in person (and federal return-to-office is full-time on-site) -- read it as `onsite`, not "unknown",
+    # or a DC posting screens as "office days not stated". Telework-eligible means some days in office.
+    telework = _usajobs_flag(details.get("TeleworkEligible"))
+    if telework is False:
+        return "onsite"
+    if telework is True:
+        return "hybrid"
     return N.workplace_type(None, *locs)
 
 

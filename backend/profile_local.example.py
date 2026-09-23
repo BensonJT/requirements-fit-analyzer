@@ -8,8 +8,10 @@ COMMUTABLE_PLACES = ["springfield, il", "chatham, il?", "rochester, il"]   # "na
 # Of those, the ones you would live near or visit for a REMOTE role but not commute to several days a
 # week. Never carries an office role (one that does not read as remote); counted everywhere else.
 COMMUTE_REMOTE_ONLY_PLACES = []
-# Of those, the ones fine for an office role but a long drive depending on the site: kept, flagged "long commute".
-COMMUTE_FLAG_PLACES = []
+# Of those, the long drives: the JD's in-office days decide (reject at FAR_COMMUTE_REJECT_DAYS+, flag below).
+COMMUTE_FAR_PLACES = []
+FAR_COMMUTE_OK_DAYS = 1        # a day a week or less at a far place is fine
+FAR_COMMUTE_REJECT_DAYS = 3    # three or more days a week at a far place is a no-go
 # Places that are a plain commute for ONE employer only, e.g. {"acme payments": ["chatham, il?"]}.
 COMMUTE_EMPLOYER_PLACES = {}
 # Private, per-employer residence knowledge the JD text never states (§23 amendment). Uncomment and

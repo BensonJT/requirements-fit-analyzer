@@ -6,7 +6,7 @@ HOME = "Springfield, IL"   # used for the local search lanes
 LOCAL_RADIUS_KM = 80
 COMMUTABLE_PLACES = ["springfield, il", "chatham, il?", "rochester, il"]   # "name, st" pins the state; "st?" also accepts none
 # Of those, the ones you would live near or visit for a REMOTE role but not commute to several days a
-# week. Ignored by the commute gate on an explicit hybrid/onsite posting; counted everywhere else.
+# week. Never carries an office role (one that does not read as remote); counted everywhere else.
 COMMUTE_REMOTE_ONLY_PLACES = []
 # Of those, the ones fine for an office role but a long drive depending on the site: kept, flagged "long commute".
 COMMUTE_FLAG_PLACES = []

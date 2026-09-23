@@ -174,3 +174,12 @@ def test_write_lens_lists_level_column_and_applied_ai_bucket(tmp_path):
     process_header, *process_rows = _decode_rows(text, "## Strong on PROCESS", "## Strong on TECHNICAL")
     assert extra["AIBOTH"] in [r[0] for r in process_rows]
     assert "level" in [c.lower() for c in process_header]
+
+
+def test_top_location_cell_leads_with_the_long_commute_site():
+    """2026-09-22: the screen's long-commute flag was invisible in the top list; it now leads the Location cell."""
+    from backend.finder import report as R
+    m = R._LONG_COMMUTE_RE.search("x; local/hybrid via Peoria, IL -- long commute: check the exact site and in-office days")
+    assert m and m.group(1) == "Peoria, IL"
+    assert R._loc_cell("Springfield, IL", None) == "Springfield, IL"
+    assert R._loc_cell("Chicago, IL", "Peoria, IL").startswith("⚠ long commute: Peoria, IL")

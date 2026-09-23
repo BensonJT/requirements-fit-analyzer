@@ -1438,15 +1438,19 @@ def test_remote_only_place_does_not_satisfy_an_in_office_commute(monkeypatch):
     monkeypatch.setattr(P, "COMMUTE_REMOTE_ONLY_PLACES", ["chicago, il"])
     def row(wt):
         return _row(location_primary="Wilmington, DE", workplace_type=wt,
-                    locations='["Wilmington, DE", "Chicago, IL", "Buffalo, NY"]',
+                    locations='["Wilmington, DE", "Chicago, IL"]',   # 2 states: not the multi-city signature
                     description_text="A role.")
     # Hybrid / onsite: the remote-only place no longer carries the posting.
     for wt in ("hybrid", "onsite"):
         rec = rules.screen_row(row(wt))
         assert "not remote and outside the commute area (per listing)" in rec.reasons, wt
-    # Unknown workplace keeps it -- the rule never rejects on a guess.
-    unknown = rules.screen_row(row(None))
-    assert "not remote and outside the commute area" not in "; ".join(unknown.reasons)
+    # No stated workplace and no remote read is an office role too (2026-09-22 follow-up ruling) -- the same
+    # treatment a blank-workplace posting in any non-commutable city already gets.
+    assert "not remote and outside the commute area (per listing)" in rules.screen_row(row(None)).reasons
+    # ...but a posting that reads as remote is untouched: the place only matters to office roles.
+    remote = _row(location_primary="Wilmington, DE", workplace_type="remote",
+                  locations='["Wilmington, DE", "Chicago, IL"]', description_text="A role.")
+    assert "not remote and outside the commute area" not in "; ".join(rules.screen_row(remote).reasons)
     # A place that is not remote-only still carries a hybrid posting.
     ok = _row(location_primary="Wilmington, DE", workplace_type="hybrid",
               locations='["Wilmington, DE", "Springfield, IL"]', description_text="A role.")

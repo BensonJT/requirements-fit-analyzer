@@ -540,15 +540,17 @@ def clearance_call(blob: str) -> tuple:
 def commutable_locations(job: Listing) -> list:
     """The listing locations that name a commutable place, headline location first; [] when none do.
 
-    COMMUTE_REMOTE_ONLY_PLACES are dropped when the ATS says the role sits in an office: a place can be
-    close enough to satisfy a remote role's residence restriction and still be a punishing commute several
-    days a week (2026-09-22 user ruling, on M&T R88502). Only an explicit hybrid/onsite flag triggers the
-    narrowing -- an unknown workplace keeps every place, so this never rejects on a guess. §23's residence
-    check reads P.COMMUTABLE_PLACES directly and is deliberately unaffected.
+    COMMUTE_REMOTE_ONLY_PLACES never count here: a place can be close enough to satisfy a remote role's
+    residence restriction and still be a commute the user cannot sustain (2026-09-22 user ruling, on M&T
+    R88502). This function only decides the commute gate for a posting that did NOT read as remote, i.e. an
+    office role -- so the workplace field does not matter. A first version narrowed only on an explicit
+    hybrid/onsite flag; that let 41 McLean/Arlington/Bethesda/DC rows through, because Capital One,
+    Guidehouse, Booz Allen, BDO and Marriott leave the field blank -- while a blank-workplace posting in
+    Chicago already rejected. §23's residence check reads P.COMMUTABLE_PLACES directly and is unaffected.
     """
     places = P.COMMUTABLE_PLACES
     remote_only = set(getattr(P, "COMMUTE_REMOTE_ONLY_PLACES", None) or ()) - set(_employer_commute_places(job.company))
-    if remote_only and job.extra.get("workplace_type") in ("hybrid", "onsite"):
+    if remote_only:
         places = [p for p in places if p not in remote_only]
     return [loc for loc in [job.location, *job.locations] if loc and place_matches(loc, places)]
 

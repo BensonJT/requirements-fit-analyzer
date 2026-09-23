@@ -509,6 +509,32 @@ def _gate_counts(con, tier: str, levels=TOP_LEVELS) -> dict:
             "level_out_of_range": out_of_level, "decided_or_in_tracker": decided_tracker}
 
 
+# 2026-09-22: the screen flags a posting whose only in-area site is a long drive ("local/hybrid via <site> --
+# long commute: ..."; COMMUTE_FLAG_PLACES). The top list never printed screen flags, so the warning was
+# invisible exactly where the user decides. It goes at the FRONT of the Location cell so truncation never
+# eats it; the site named is the one that carried the match, which is not always the headline location.
+_LONG_COMMUTE_RE = re.compile(r"local/hybrid via (.+?) -- long commute")
+
+
+def _long_commute_sites(con, pids: list) -> dict:
+    if not pids:
+        return {}
+    rows = con.execute("SELECT posting_id, screen_reasons FROM postings WHERE posting_id IN (SELECT unnest(?::VARCHAR[]))",
+                       [list(pids)]).fetchall()
+    out = {}
+    for pid, reasons in rows:
+        m = _LONG_COMMUTE_RE.search(reasons or "")
+        if m:
+            out[pid] = m.group(1)
+    return out
+
+
+def _loc_cell(loc, far_site) -> str:
+    if far_site:
+        return f"⚠ long commute: {_cell(far_site)}"[:48]
+    return _cell(loc)[:34]
+
+
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
                    review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS) -> Path:
     """Writes Top_Jobs_YYYYMMDD.md: the END-of-pipeline list, run by hand after a judge import
@@ -539,6 +565,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
 
     apply_rows = top_rows(con, "apply", include_decided=include_decided, levels=levels)
     review_rows = top_rows(con, "review", include_decided=include_decided, levels=levels)
+    far = _long_commute_sites(con, [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]])
     apply_gates = _gate_counts(con, "apply", levels)
     review_gates = _gate_counts(con, "review", levels)
 
@@ -571,7 +598,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
             w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
-                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_cell(loc)[:34]} | "
+                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
                      f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")
     w.append("## Review (requirement arguable — read the unmet lines)\n")
@@ -586,7 +613,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
             star = "★ " if n_good == 3 else ""
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
             w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {_cell(why)} | {grades} | "
-                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_cell(loc)[:34]} | "
+                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
                      f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
     w.append("")
     w.append(f"**Gate detail — Apply:** {gate_line(apply_gates, 'apply')}.\n")

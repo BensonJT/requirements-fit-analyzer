@@ -72,29 +72,35 @@ fi
 #                      rows already judged under the current prompt_version are served from cache
 #   judge2eval         finder.py judge2 eval: catch / agree against the gold labels + the line report;
 #                      the numbers land in the launch log (bar: catch >= 70%, agree >= 85%)
+#   maint              scripts/db_maintenance.sh --auto: compact the DuckDB file (verified copy + swap,
+#                      only when >=10% of blocks are free), remove scratch DuckDB files, prune worktrees
+#                      and merged branches, drop in-repo db backups older than 7 days. Ends every
+#                      overnight preset so the file never carries a week of rescreen bloat.
 #   @dryrun            pre-flight + plan only
 # --llm-top N and the judge2* steps turn on the Gemma second judge with the user's approved fact sheet
 # (see judge_env below). The top-100 judge and the gold eval set barely overlap (3 of 100 on 9/23), so
 # scoring Gemma against gold needs its own step; that is what FULL + GOLD SCORE adds.
 LABELS=(
-  "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Top_Jobs"
+  "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Top_Jobs + maintenance"
   "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (start at 00:00 to finish by ~7:30)"
   "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
-  "Overnight LIGHT           sweep + screen + coverage + Top_Jobs; no Gemma judge"
+  "Overnight LIGHT           sweep + screen + coverage + Top_Jobs + maintenance; no Gemma judge"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
   "Report only               tracker sync + Top_Jobs (minutes)"
+  "Disk maintenance          compact the DuckDB file, scratch files, worktrees, old in-repo backups (what every overnight preset ends with)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~2 min" "seconds")
+ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
-  "sweep:--llm-top 100|top"
-  "sweep:--llm-top 100|judge2run|judge2eval|top"
-  "retrain|sweep:--llm-top 100|top"
-  "sweep:|top"
-  "judge2run|judge2eval"
+  "sweep:--llm-top 100|top|maint"
+  "sweep:--llm-top 100|judge2run|judge2eval|top|maint"
+  "retrain|sweep:--llm-top 100|top|maint"
+  "sweep:|top|maint"
+  "judge2run|judge2eval|maint"
   "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
   "sync|top"
+  "maint"
   "@dryrun"
 )
 
@@ -145,7 +151,7 @@ case "$CHOICE" in
 esac
 
 DRY_RUN=false
-[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|top"; }
+[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|top|maint"; }
 IFS='|' read -r -a STEPS <<<"$PRESET"
 USES_JUDGE=false
 case "$PRESET" in *--llm-top*|*judge2*) USES_JUDGE=true ;; esac
@@ -180,6 +186,7 @@ step_cmd() {  # the literal command line a step runs
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
     judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
     judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;
+    maint)      echo "bash scripts/db_maintenance.sh --auto" ;;
     *)       echo "" ;;
   esac
 }

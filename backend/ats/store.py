@@ -1334,7 +1334,49 @@ def connect(db_path=None):
         con.execute("UPDATE schema_info SET version = ? WHERE version < ?", [SCHEMA_VERSION, SCHEMA_VERSION])
     _add_missing_columns(con)
     con.execute(VIEWS)
+    con.execute(jd_missing_view_sql())
     return con
+
+
+def jd_missing_view_sql() -> str:
+    """`vw_jd_missing`: every open fit-track posting still without a JD, tagged by how close its
+    TITLE is to the search, so what the progressive detail backfill leaves behind can be counted
+    and read (2026-09-23: 16,665 such postings, 0 of them prefilter matches -- the backlog was
+    caught up -- but 3 were function matches the prefilter did not know about).
+
+    Built here rather than in VIEWS because the three patterns are Python constants
+    (backend/ats/prefilter.py, backend/profile.py) and must not be duplicated in SQL.
+
+    `title_match` (first hit wins):
+      function     the screen's own title function terms -- a posting the screen could PASS on
+                   its title; never expected here for long (the prefilter must cover these)
+      prefilter    DETAIL_TITLE_PATTERN -- the backlog pass will fetch it (`fetchable` says
+                   whether it still can: detail-capable platform, attempts left)
+      directional  DIRECTIONAL_TITLE_PATTERN only, minus DIRECTIONAL_EXCLUDE_PATTERN (retail sales
+                   "consultants", technicians) -- in the neighbourhood, fetched by nobody
+      none         everything else (branch managers, thermal engineers, sales)"""
+    from . import adapters
+    from .prefilter import (DETAIL_TITLE_PATTERN, DIRECTIONAL_EXCLUDE_PATTERN, DIRECTIONAL_TITLE_PATTERN,
+                            function_title_pattern)
+
+    def lit(rx):  # a SQL string literal; DuckDB standard strings keep backslashes as-is
+        return "'" + rx.replace("'", "''") + "'"
+
+    platforms = ", ".join(lit(p) for p in sorted(adapters.DETAIL_PLATFORMS))
+    return f"""
+CREATE OR REPLACE VIEW vw_jd_missing AS
+    SELECT posting_id, employer, platform, req_id, title, url, location_primary, workplace_type, posted_at,
+           first_seen_at::DATE AS first_seen, detail_attempts, screen_verdict, screen_reasons,
+           CASE WHEN regexp_matches(' ' || lower(coalesce(title, '')) || ' ', {lit(function_title_pattern())}) THEN 'function'
+                WHEN regexp_matches(coalesce(title, ''), {lit(DETAIL_TITLE_PATTERN)}, 'i') THEN 'prefilter'
+                WHEN regexp_matches(coalesce(title, ''), {lit(DIRECTIONAL_TITLE_PATTERN)}, 'i')
+                     AND NOT regexp_matches(coalesce(title, ''), {lit(DIRECTIONAL_EXCLUDE_PATTERN)}, 'i') THEN 'directional'
+                ELSE 'none' END AS title_match,
+           platform IN ({platforms}) AND detail_attempts < {DETAIL_MAX_ATTEMPTS} AS fetchable
+    FROM postings
+    WHERE status = 'active' AND coalesce(track, 'fit') = 'fit'
+      AND (description_text IS NULL OR length(description_text) <= 200)
+"""
 
 
 def _add_missing_columns(con):

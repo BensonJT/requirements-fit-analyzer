@@ -931,3 +931,41 @@ def test_usajobs_telework_flags_set_the_workplace():
     assert A._usajobs_workplace({"RemoteIndicator": True, "TeleworkEligible": False}) == "remote"
     assert A._usajobs_workplace({"RemoteIndicator": False, "TeleworkEligible": False}) == "onsite"
     assert A._usajobs_workplace({"RemoteIndicator": "false", "TeleworkEligible": "true"}) == "hybrid"
+
+
+def test_prefilter_covers_every_screen_function_term():
+    """A title the screen would pass on its function terms must also be one the detail prefilter
+    fetches a JD for; otherwise it can sit in `postings` forever with no JD (2026-09-23: five
+    terms were missing). DIRECTIONAL must stay a superset of the prefilter."""
+    import re
+    from backend import profile as P
+    from backend.ats import prefilter
+    pre = re.compile(prefilter.DETAIL_TITLE_PATTERN, re.I)
+    direc = re.compile(prefilter.DIRECTIONAL_TITLE_PATTERN, re.I)
+    missing = [t for t in set(P.TITLE_FUNCTION_TERMS) | set(P.PRECISE_TITLE_TERMS)
+               if not pre.search(f"x {t} x")]
+    assert missing == []
+    for probe in ["Enterprise Operating Model Manager", "Global GTM Business Architect", "Change Manager",
+                  "Director of Operational Excellence", "Program Manager"]:
+        assert pre.search(probe) and direc.search(probe)
+    assert direc.search("Technical Project Manager") and not pre.search("Technical Project Manager")
+
+
+def test_vw_jd_missing_tags_titles_and_fetchability(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime.now()
+    jobs = [N.base(req_id="F", title="Enterprise Operating Model Manager"),       # function term
+            N.base(req_id="P", title="Senior Manager, Fleet Reporting"),          # prefilter only
+            N.base(req_id="D", title="Technical Project Manager"),                # directional only
+            N.base(req_id="N", title="Mechanical Thermal Engineer I"),            # none
+            N.base(req_id="X", title="Retail Sales Consultant"),                  # directional term, excluded
+            N.base(req_id="J", title="Director of Process Excellence",
+                   description_text="Lean Six Sigma Black Belt required. " * 10)]  # has a JD: absent
+    store.record_board(con, "Acme", "workday", jobs, now)
+    store.record_board(con, "Beta", "greenhouse", [N.base(req_id="G", title="Process Owner")], now)
+    rows = dict(con.execute("SELECT req_id, title_match FROM vw_jd_missing").fetchall())
+    assert rows == {"F": "function", "P": "prefilter", "D": "directional", "N": "none", "X": "none", "G": "function"}
+    fetch = dict(con.execute("SELECT req_id, fetchable FROM vw_jd_missing").fetchall())
+    assert fetch["F"] is True and fetch["G"] is False  # greenhouse lists carry the JD; no detail adapter
+    con.execute("UPDATE postings SET detail_attempts = ? WHERE req_id = 'P'", [store.DETAIL_MAX_ATTEMPTS])
+    assert con.execute("SELECT fetchable FROM vw_jd_missing WHERE req_id = 'P'").fetchone()[0] is False

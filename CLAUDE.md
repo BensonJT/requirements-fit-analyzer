@@ -60,11 +60,13 @@ fast-forward-merge it instead). This is one-directional (Vostro → OptiPlex) be
 can reach Vostro's `optiplex` SSH host, but not the reverse — Vostro runs inside WSL2 behind
 NAT and isn't reachable from the LAN.
 
-- **Vostro** (primary): **`~/jobsearch` on the WSL ext4 disk, since 2026-09-16.** The E: copy
+- **Vostro** (primary; both machines' paths are also in keystone
+  `System/Context/Skills/Environment_Map.md`): **`~/jobsearch` on the WSL ext4 disk, since 2026-09-16.** The E: copy
   (`~/code/jobsearch` → `/mnt/e/code/jobsearch`) is RETIRED: `/mnt/e` is a 9p mount served from
   Windows, and torch/transformers imports over it failed under Windows memory pressure (bus
   error, ENOMEM on `open()`, one WSL crash). Local venv at `.venv/` (Python 3.14, CPU torch,
-  sentence-transformers; `pip freeze` pins in `~/jobsearch_native/freeze_clean.txt`). DuckDB job
+  sentence-transformers; packages in `requirements.txt`, no pinned freeze on disk — the old
+  `~/jobsearch_native/freeze_clean.txt` is gone; `.venv/bin/pip freeze` makes a new one). DuckDB job
   store lives in `db/jobsearch.duckdb` (gitignored; see `db/README.md`). Gitignored files that a
   clone does NOT bring: `.env` (incl. `RESUME_DB_URL`), `evidence.local.toml`,
   `.personal_patterns`, `backend/profile_local.py`, `backend/finder/rubric_local.py`, `db/`.

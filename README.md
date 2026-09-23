@@ -307,6 +307,15 @@ To run it daily, schedule the full run with cron, Task Scheduler, or systemd:
 0 6 * * * cd /path/to/jobsearch && .venv/bin/python sweep_ats.py >> output/daily.log 2>&1
 ```
 
+### Overnight runs: `launch.sh`
+
+```bash
+bash launch.sh           # menu, start now
+bash launch.sh 02:00     # menu, then start at the next 02:00
+```
+
+A menu of presets (full run with the second judge, full run after a retrain, light run without the judge, report only, dry run) prints the exact commands and runs a pre-flight check (setup, database lock, judge fact sheet, Gemini reachability, network) before you confirm, and again at the start time. It waits up to an hour if another process still holds the database. On WSL it registers a Windows scheduled task with WakeToRun five minutes before the start (`scripts/windows/wake_task.sh`), so the laptop can sleep until then; on exit it deletes its own wake tasks and restores sleep unless a keep-awake lease is present. Leave the terminal window open: the launcher is the process that waits. Each run is logged to `logs/launch_<stamp>.log`, and its duration is shown on the menu next time.
+
 ## Querying
 
 Open the database with the [DuckDB CLI](https://duckdb.org/docs/installation/) (`duckdb db/jobsearch.duckdb`) or from Python. Close any other connection first, because a running sweep holds the write lock.

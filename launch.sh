@@ -86,14 +86,14 @@ LABELS=(
   "Report only               tracker sync + Top_Jobs (minutes)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~5 min per 1,200 JDs" "~2 min" "seconds")
+ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~2 min" "seconds")
 PRESETS=(
   "sweep:--llm-top 100|top"
   "sweep:--llm-top 100|judge2run|judge2eval|top"
   "retrain|sweep:--llm-top 100|top"
   "sweep:|top"
   "judge2run|judge2eval"
-  "sweep:--skip-sweep --detail-pattern directional --detail-budget 1300 --no-screen"
+  "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
   "sync|top"
   "@dryrun"
 )

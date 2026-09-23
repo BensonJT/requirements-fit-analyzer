@@ -4,6 +4,7 @@
 #
 #   bash launch.sh              # menu, start now
 #   bash launch.sh 02:00        # menu, then wake + start at 02:00 (the NEXT 02:00)
+#   bash launch.sh 00:00        # midnight start: what FULL + GOLD SCORE (~7-7.5 h) needs to finish by ~7:30
 #   bash launch.sh "2026-09-24 02:00"
 #
 # Modelled on Meridian's scripts/launch.sh, which has run its nightly batch this
@@ -64,20 +65,31 @@ fi
 #                      required-embed, [Gemma judge if --llm-top N], Jobs_Found, snapshots
 #   sync               finder.py sync (mirror Application_Tracker.md)
 #   top                finder.py top (the END-of-pipeline Top_Jobs file)
+#   judge2run          finder.py judge2 run --eval-set: Gemma judges every blind human-graded gold row
+#                      (vw_report_feedback_blind, read at start time, so rows graded today count tonight);
+#                      rows already judged under the current prompt_version are served from cache
+#   judge2eval         finder.py judge2 eval: catch / agree against the gold labels + the line report;
+#                      the numbers land in the launch log (bar: catch >= 70%, agree >= 85%)
 #   @dryrun            pre-flight + plan only
-# --llm-top N turns on the Gemma second judge with the user's approved fact sheet (see judge_env below).
+# --llm-top N and the judge2* steps turn on the Gemma second judge with the user's approved fact sheet
+# (see judge_env below). The top-100 judge and the gold eval set barely overlap (3 of 100 on 9/23), so
+# scoring Gemma against gold needs its own step; that is what FULL + GOLD SCORE adds.
 LABELS=(
   "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Top_Jobs"
+  "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (start at 00:00 to finish by ~7:30)"
   "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
   "Overnight LIGHT           sweep + screen + coverage + Top_Jobs; no Gemma judge"
+  "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "Report only               tracker sync + Top_Jobs (minutes)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~4.5 h (9/21-22 measured)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~2 min" "seconds")
+ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~2 min" "seconds")
 PRESETS=(
   "sweep:--llm-top 100|top"
+  "sweep:--llm-top 100|judge2run|judge2eval|top"
   "retrain|sweep:--llm-top 100|top"
   "sweep:|top"
+  "judge2run|judge2eval"
   "sync|top"
   "@dryrun"
 )
@@ -132,7 +144,7 @@ DRY_RUN=false
 [ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|top"; }
 IFS='|' read -r -a STEPS <<<"$PRESET"
 USES_JUDGE=false
-case "$PRESET" in *--llm-top*) USES_JUDGE=true ;; esac
+case "$PRESET" in *--llm-top*|*judge2*) USES_JUDGE=true ;; esac
 
 # ── start time ─────────────────────────────────────────────────────────────
 START_SPEC="${1:-now}"
@@ -162,11 +174,15 @@ step_cmd() {  # the literal command line a step runs
     sync)    echo "$PY -u finder.py sync" ;;
     top)     echo "$PY -u finder.py top" ;;
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
+    judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
+    judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;
     *)       echo "" ;;
   esac
 }
 
 # The judge sends ONLY the user-approved fact sheet (judge2_background.local.md, gitignored); never the rubric.
+# Defined before step_cmd is first called (the plan printout below); the eval steps name it on the command line
+# because `finder.py judge2` defaults --background to public and does not read JUDGE2_BACKGROUND from the env.
 JUDGE_BG="$ROOT/judge2_background.local.md"
 judge_env() {
   export JUDGE2_LIVE_OK=1 JUDGE2_BACKGROUND=file JUDGE2_BACKGROUND_FILE="$JUDGE_BG"

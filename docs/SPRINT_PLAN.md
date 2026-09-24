@@ -1186,7 +1186,7 @@ prompt costs a run).
 
 **Next experiment: same rows, two prompt versions (eval-only, minutes).** The 9/21 verdicts are still cached in `judge2_reviews` under `7533bcce2a17`. Score both prompt versions on the intersection of gold rows judged under both, so the only variable is the background text.
 1. Row set: `SELECT posting_id FROM judge2_reviews WHERE prompt_version='7533bcce2a17'` INTERSECT the current `vw_report_feedback_blind` population. Expect ~90.
-2. `finder.py judge2 eval --prompt-version 7533bcce2a17` restricted to that set, then the same for `36ca03157cf2`. `judge2 eval` has `--prompt-version`; it does NOT yet have a row filter. Add `--posting-ids FILE` (one id per line) to `judge2.evaluate`, or compute the two evals in a notebook from `judge2_lines` + `vw_report_feedback_blind` directly. The second is faster and leaves the code untouched; the first is the durable version.
+2. `finder.py judge2 eval --compare 7533bcce2a17 36ca03157cf2` (with the background flags). The same-rows comparison ALREADY EXISTS as `--compare` (used 9/21 for `0d6b4871f44a` vs `7533bcce2a17`, see STATUS.md); it reports on the common postings and lists verdict changes. No new code needed for step 2.
 3. Read three numbers per version on the same rows: catch, agree, line-level unmet-rated-unmet. Then the delta is the fact-sheet effect alone.
 4. Separately, score `36ca03157cf2` on the 22 new rows only. If catch there is far below the 90-row figure, the new rows are the harder population and the sheet import (not the sheet edit) explains the drop.
 

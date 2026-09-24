@@ -1169,3 +1169,29 @@ prompt costs a run).
 **31.7 Adapters still needed.** Second probe: of thirteen further employers, two are on platforms with an adapter (one Workday, one Eightfold; both verified with per-place counts); the rest are on iCIMS (behind an interactive bot challenge), Phenom, ServiceNow, Paradox, Symphony Talent, or a custom authenticated API, and two block non-browser traffic outright. None of those has an adapter; each needs a browser probe before one is written, and a bot challenge is respected, never worked around. Until then those employers are a link list in the bridge output ("check by hand"), never a silent gap. The wider employer net (home improvement, grocery, convenience, parcel, coffee) is resolved one row at a time with the same probe-verify rule as every registry row.
 
 **31.8 Order.** User reviews this section -> branch `bridge-track` in a worktree (Sonnet build) -> orchestrator audit with the 31.4 tests first -> back up DB -> merge (v22) -> first scoped sweep of the three Workday boards -> user reads the list -> then adapters (31.7) and the wider net.
+
+## 32. Gold score 2026-09-24 and the next experiment (Fable, 2026-09-24; PROPOSED, nothing run)
+
+**What ran.** "Gold score only" preset, 08:26-12:07 (3h40m). The judge fact sheet had been edited that morning from resume bullets 321-367 (Smartsheet tracker, OCC Slack workflows, benefits-realization governance, FP&A close, 2020-2022 portfolio results), so `prompt_version` moved to `36ca03157cf2` and every gold row was re-judged rather than served from cache. 112 rows, 111 reviewed, 1 unparseable.
+
+**Result: NOT PASSED, and not clearly better than the 9/21 run.**
+
+| Metric | 9/21 `7533bcce2a17` (90 rows) | 9/24 `36ca03157cf2` (112 rows) | Bar |
+|---|---|---|---|
+| catch_rate (fails-or-partial) | 0.77 (n_catch 13) | 0.56 (n_catch 18) | 0.70 |
+| agree_rate (meets-only) | 0.77 (n_agree 22) | 0.77 (n_agree 31) | 0.85 |
+| gold unmet lines rated unmet | 31/67 (46%) | 43/86 (50%) | |
+
+**Why the comparison is impure.** Two things changed at once: the gold set grew by 22 blind rows (the 9/23 sheet import), and the background text grew. A richer background is expected to lower catch (more lines can be rated met) and raise agree; agree did not move. The 22 new rows may simply be harder. Neither effect can be read off this run.
+
+**Next experiment: same rows, two prompt versions (eval-only, minutes).** The 9/21 verdicts are still cached in `judge2_reviews` under `7533bcce2a17`. Score both prompt versions on the intersection of gold rows judged under both, so the only variable is the background text.
+1. Row set: `SELECT posting_id FROM judge2_reviews WHERE prompt_version='7533bcce2a17'` INTERSECT the current `vw_report_feedback_blind` population. Expect ~90.
+2. `finder.py judge2 eval --prompt-version 7533bcce2a17` restricted to that set, then the same for `36ca03157cf2`. `judge2 eval` has `--prompt-version`; it does NOT yet have a row filter. Add `--posting-ids FILE` (one id per line) to `judge2.evaluate`, or compute the two evals in a notebook from `judge2_lines` + `vw_report_feedback_blind` directly. The second is faster and leaves the code untouched; the first is the durable version.
+3. Read three numbers per version on the same rows: catch, agree, line-level unmet-rated-unmet. Then the delta is the fact-sheet effect alone.
+4. Separately, score `36ca03157cf2` on the 22 new rows only. If catch there is far below the 90-row figure, the new rows are the harder population and the sheet import (not the sheet edit) explains the drop.
+
+**Also worth looking at, from this run.** (a) The 1 unparseable row: which posting, which model, was it a JSON truncation (long JD) or a refusal. (b) `catch_rate_strict` is 0.28: the judge finds the failing posting but not by the human's line. The line-level report (43/86) says half the gold unmet lines are rated something other than unmet; a per-line dump of the misses grouped by requirement kind (years / cert / tool / domain / people-mgmt) would say whether the sheet is silent, or the judge is reading the line wrong. (c) The 9/21 line report was 31/67 and today 43/86: the sheet edit may have helped at the line level while the new rows hurt at the posting level. Same-rows check settles it.
+
+**Retrain is separate.** 67 new human labels since the last promoted retrain (RETRAIN REMINDER fired 9/24 00:57). `finder.py retrain` is the evening job; it trains the lens models on labels and does not touch the judge.
+
+**Recorded 9/24:** NFCU AI Business Transformation Analyst (`8de73fde12a47f4cbf06`) and Senior Program Manager, Learning & Talent Development (`272a8f13316dcb3f5e47`) marked `build --grade bullseye --basis seen`. The second title matched two postings (a sibling "Program Manager (Training and Talent Strategy)" req); `mark` by title needs exactly one match, so mark by id when NFCU posts siblings.

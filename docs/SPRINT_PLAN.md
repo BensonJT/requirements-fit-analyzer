@@ -1214,6 +1214,8 @@ prompt costs a run).
 
 **Guards.** The state that goes to Jev is JD text plus background facts: the same personal-data boundary as the judge (the background sheet is what leaves the machine; the user reads it before any run). Prompt-injection in JD text can steer a decision model (VentureBeat, 9/2026), so the JD goes in as data with the questions declared separately, never concatenated into one instruction. Live calls stay behind the `JUDGE2_LIVE_OK`-style gate. Nothing in this section touches `judge2.py`; a new module `backend/finder/jev.py` with the same injected transport and no-network test discipline.
 
+**Reference docs (Jeff, 2026-09-26).** https://docs.typesafe.ai/introduction/quickstart · https://docs.typesafe.ai/introduction/coding-agents (how Jev is meant to be wired by a coding agent; read this before any design) · https://docs.typesafe.ai/models · https://docs.typesafe.ai/api
+
 **Open questions for the research.** Does Jev accept free-text state of JD length, or does it want structured fields? Is there a batch endpoint? What is the actual per-call cost at ~4K input tokens? Does it return per-question probabilities in one call, or one question per call? Is early access obtainable on a personal account? Does it hold a fixed model version (needed for `jev_prompt_version` to mean anything)?
 
 **If it works here, Meridian next.** The news lane (`~/meridian`, `Deferred_Backlog.md`, 2026-09-26 entry) has the same shape: sentiment direction and materiality are typed decisions, the current free-tier LLM rotation is slow, and a 120-article reference set already exists to evaluate against.

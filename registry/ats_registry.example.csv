@@ -11,3 +11,4 @@ Microsoft,eightfold,https://apply.careers.microsoft.com,microsoft.com,,,example,
 Logos Bible Software,paylocity,cd6cba65-20a5-4466-b3ba-5debbe12930b,Logos,,,example,"Paylocity: company GUID from the jobs/All/<guid>/<slug> URL; apply links show only a numeric JobId",
 U.S. Government (USAJobs),usajobs,,,,,example,"USAJobs: keyword search, not one employer's board — one row enables it, identifier_* unused. Needs USAJOBS_API_KEY + USAJOBS_EMAIL in .env; missing either skips it.",
 Example Big Box Retailer,workday,examplebigbox,wd1,ExampleCareers,,example,"Bridge-track example (sprint plan §31): track=bridge, never a whole-board pull -- place-scoped only, from registry/bridge_places.example.csv (invented places). Same Workday shape as any other row.",bridge
+Example ADP Employer,adp,18bcd225-9065-4e78-8585-763a250b6ab5,19000101_000001,,,example,"ADP Workforce Now: cid (GUID) and ccId from the recruitment.html URL",

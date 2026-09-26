@@ -982,3 +982,139 @@ def test_detail_candidates_exclude_pattern(tmp_path):
     got = store.detail_candidates(con, ["workday"], prefilter.DIRECTIONAL_TITLE_PATTERN, 100,
                                   exclude_pattern=prefilter.DIRECTIONAL_EXCLUDE_PATTERN)
     assert [r[3] for r in got] == ["A"]
+
+
+# ---------------------------------------------------------------- ADP Workforce Now
+_ADP_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "adp")
+_ADP_ROW = {"employer": "Agile5 Technologies", "platform": "adp",
+            "identifier_1": "18bcd225-9065-4e78-8585-763a250b6ab5", "identifier_2": "19000101_000001"}
+
+
+def _adp_fixture(name):
+    with open(os.path.join(_ADP_FIXTURE_DIR, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_adp_registered():
+    assert "adp" in A.IMPLEMENTED_PLATFORMS and "adp" in A.DETAIL_PLATFORMS
+
+
+def test_adp_position_maps_external_job_id_title_url_location_workplace_employment_posted():
+    item = _adp_fixture("list.json")["jobRequisitions"][2]   # "Part Time Data Scientist" -- ExternalJobID 640823
+    p = A._adp_position(_ADP_ROW, item)
+    assert p["req_id"] == "640823"
+    assert p["title"] == "Part Time Data Scientist (1099 - Contractor)"
+    assert p["url"] == ("https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html"
+                         "?cid=18bcd225-9065-4e78-8585-763a250b6ab5&ccId=19000101_000001"
+                         "&type=JS&lang=en_US&jobId=640823")
+    assert p["location_primary"] == "Fairmont, WV, US"
+    assert p["workplace_type"] == "remote"        # one of its three locations is "Remote, US"
+    assert p["employment_type"] == "part_time"
+    assert p["posted_at"] == date(2026, 9, 4)
+    assert p["country"] == "US"
+    assert p["description_text"] is None          # list never carries the JD
+
+
+def test_adp_position_falls_back_to_item_id_without_external_job_id():
+    item = {"itemID": "999_1", "requisitionTitle": "No Custom Fields Role",
+            "postDate": "2026-09-01T00:00:00.000-04:00", "workLevelCode": {"shortName": "Full Time"},
+            "requisitionLocations": [{"nameCode": {"shortName": " Remote, US"}}]}
+    p = A._adp_position(_ADP_ROW, item)
+    assert p["req_id"] == "999_1"
+    assert p["url"].endswith("jobId=999_1")
+
+
+def test_adp_jobs_maps_every_posting_from_the_fixture(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    fixture = _adp_fixture("list.json")
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp(fixture)
+
+    monkeypatch.setattr(A, "client", lambda: _FakeClient())
+    out = A.adp_jobs(_ADP_ROW)
+    assert not getattr(out, "truncated", False)
+    assert len(out) == 6
+    ids = [p["req_id"] for p in out]
+    assert "640823" in ids and len(set(ids)) == 6
+    remote = next(p for p in out if p["req_id"] == "640823")
+    assert remote["workplace_type"] == "remote"
+
+
+def test_adp_jobs_paginates_and_stops_on_total_number(monkeypatch):
+    """A board bigger than one page (here forced by shrinking ADP_PAGE to 3, since the real
+    fixture board only has 6 postings) is walked with $top/$skip until $skip reaches
+    meta.totalNumber."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "ADP_PAGE", 3)
+    fixture = _adp_fixture("list.json")
+    all_items = fixture["jobRequisitions"]
+    page1 = {"jobRequisitions": all_items[:3], "meta": {"totalNumber": 6}}
+    page2 = {"jobRequisitions": all_items[3:], "meta": {"totalNumber": 6}}
+    calls = []
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            calls.append(url)
+            return _Resp(page1 if len(calls) == 1 else page2)
+
+    monkeypatch.setattr(A, "client", lambda: _FakeClient())
+    out = A.adp_jobs(_ADP_ROW, max_pages=5)
+    assert len(calls) == 2                        # stopped once $skip reached totalNumber
+    assert "$top=3" in calls[0] and "$skip=0" in calls[0] and "$skip=3" in calls[1]
+    assert len(out) == 6
+    assert not getattr(out, "truncated", False)
+
+
+def test_adp_jobs_truncated_when_max_pages_trips(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    page = {"jobRequisitions": [{"itemID": "1_1", "requisitionTitle": "X", "postDate": None,
+                                 "workLevelCode": {}, "requisitionLocations": []}],
+            "meta": {"totalNumber": 999}}
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp(page)
+
+    monkeypatch.setattr(A, "client", lambda: _FakeClient())
+    out = A.adp_jobs(_ADP_ROW, max_pages=1)
+    assert getattr(out, "truncated", False) is True
+
+
+def test_adp_detail_fills_description_from_requisition_description(monkeypatch):
+    detail = _adp_fixture("detail_640823.json")
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp(detail)
+
+    monkeypatch.setattr(A, "client", lambda: _FakeClient())
+    posting = A._adp_position(_ADP_ROW, _adp_fixture("list.json")["jobRequisitions"][2])
+    fields = A.adp_detail(_ADP_ROW, posting)
+    assert fields["description_text"].startswith("About Agile5:")
+    assert "Data Scientist" in fields["description_text"]
+    assert fields["location_primary"] == "Fairmont, WV, US"
+    assert fields["workplace_type"] == "remote"
+
+
+def test_adp_detail_404_raises_gone(monkeypatch):
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp({}, status=404)
+
+    monkeypatch.setattr(A, "client", lambda: _FakeClient())
+    posting = {"req_id": "640823", "location_primary": None, "locations": None,
+               "country": None, "workplace_type": None, "employment_type": None, "posted_at": None}
+    try:
+        A.adp_detail(_ADP_ROW, posting)
+        assert False, "expected Gone"
+    except A.Gone:
+        pass

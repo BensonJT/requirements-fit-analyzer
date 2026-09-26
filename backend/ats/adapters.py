@@ -929,6 +929,108 @@ def usajobs_jobs(row, max_pages=None):
     return Truncated(out)
 
 
+# ================================================================ ADP Workforce Now
+# Public, unauthenticated OData-style endpoint. Registry: identifier_1 = cid (a GUID),
+# identifier_2 = ccId (e.g. "19000101_000001"), identifier_3 unused. The list call is
+# thin -- no description -- so this platform gets a fetch_detail, like Workday. A job's
+# real id for both the detail call and the apply URL is its `ExternalJobID` custom field
+# (the careers-page id); the itemID also resolves but ExternalJobID is preferred, so
+# req_id carries whichever one is available and both the detail call and apply URL reuse it.
+ADP_HOST = "https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1"
+ADP_PAGE = 50
+
+
+def _adp_external_job_id(item):
+    fields = (item.get("customFieldGroup") or {}).get("stringFields") or []
+    for f in fields:
+        if (f.get("nameCode") or {}).get("codeValue") == "ExternalJobID":
+            v = f.get("stringValue")
+            if v:
+                return v
+    return None
+
+
+def _adp_location_texts(item):
+    out = []
+    for loc in item.get("requisitionLocations") or []:
+        name = ((loc.get("nameCode") or {}).get("shortName") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _adp_country(locs):
+    for name in locs:
+        if name.upper().endswith("US"):
+            return "US"
+    return None
+
+
+def _adp_apply_url(cid, ccid, job_id):
+    return (f"https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html"
+            f"?cid={cid}&ccId={ccid}&type=JS&lang=en_US&jobId={job_id}")
+
+
+def _adp_position(row, item):
+    cid, ccid = row["identifier_1"], row["identifier_2"]
+    job_id = _adp_external_job_id(item) or item.get("itemID")
+    locs = _adp_location_texts(item)
+    return N.base(
+        req_id=job_id,
+        title=item.get("requisitionTitle"),
+        url=_adp_apply_url(cid, ccid, job_id),
+        location_primary=locs[0] if locs else None,
+        locations=N.locations_json(locs),
+        country=_adp_country(locs),
+        workplace_type=N.workplace_type(None, *locs),
+        employment_type=N.employment_type((item.get("workLevelCode") or {}).get("shortName")),
+        posted_at=N.parse_date(item.get("postDate")),
+        raw_json=N.raw(item),
+    )
+
+
+def adp_jobs(row, max_pages=None):
+    cid, ccid = row["identifier_1"], row["identifier_2"]
+    base = f"{ADP_HOST}/job-requisitions?cid={cid}&ccId={ccid}&lang=en_US"
+    out, skip, pages, total = [], 0, 0, None
+    with client() as c:
+        while True:
+            data = _request(c, "GET", f"{base}&$top={ADP_PAGE}&$skip={skip}").json()
+            items = data.get("jobRequisitions") or []
+            if total is None:
+                total = (data.get("meta") or {}).get("totalNumber") or 0
+            out.extend(_adp_position(row, item) for item in items)
+            pages += 1
+            skip += ADP_PAGE
+            if not items or (total and skip >= total):
+                return out
+            if max_pages and pages >= max_pages:
+                return Truncated(out)
+            time.sleep(PAGE_DELAY)
+
+
+def adp_detail(row, posting):
+    cid, ccid = row["identifier_1"], row["identifier_2"]
+    job_id = posting["req_id"]
+    url = f"{ADP_HOST}/job-requisitions/{job_id}?cid={cid}&ccId={ccid}&lang=en_US"
+    with client() as c:
+        d = _request(c, "GET", url).json()
+    text = N.html_to_text(d.get("requisitionDescription"))
+    pay = N.pay_from_text(text)
+    locs = _adp_location_texts(d)
+    return dict(
+        description_text=text,
+        location_primary=locs[0] if locs else posting.get("location_primary"),
+        locations=N.locations_json(locs) or posting.get("locations"),
+        country=_adp_country(locs) or posting.get("country"),
+        workplace_type=N.workplace_type(None, *locs) or posting.get("workplace_type"),
+        employment_type=N.employment_type((d.get("workLevelCode") or {}).get("shortName")) or posting.get("employment_type"),
+        posted_at=N.parse_date(d.get("postDate")) or posting.get("posted_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
 # ================================================================ dispatch
 
 # ================================================================ Eightfold
@@ -1230,6 +1332,7 @@ _LIST = {
     "eightfold": eightfold_jobs,
     "paylocity": paylocity_jobs,
     "usajobs": usajobs_jobs,
+    "adp": adp_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -1239,6 +1342,7 @@ _DETAIL = {
     "smartrecruiters": smartrecruiters_detail,
     "eightfold": eightfold_detail,
     "paylocity": paylocity_detail,
+    "adp": adp_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

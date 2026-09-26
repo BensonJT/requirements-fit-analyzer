@@ -1216,6 +1216,8 @@ prompt costs a run).
 
 **Reference docs (Jeff, 2026-09-26).** https://docs.typesafe.ai/introduction/quickstart · https://docs.typesafe.ai/introduction/coding-agents (how Jev is meant to be wired by a coding agent; read this before any design) · https://docs.typesafe.ai/models · https://docs.typesafe.ai/api
 
+**Where the research lives.** The Perplexity prompt set for Jev (the model, the API, versions and pricing, reviews, prompt injection, calibration, alternatives, cost-tiered routing, drift control) is kept in the vault at `Professional/Areas/Articles/BACKLOG.md` item 7, by the user's rule that all research prompts live in the article backlog. Results will be saved in folders there and consumed by this section's design session.
+
 **Open questions for the research.** Does Jev accept free-text state of JD length, or does it want structured fields? Is there a batch endpoint? What is the actual per-call cost at ~4K input tokens? Does it return per-question probabilities in one call, or one question per call? Is early access obtainable on a personal account? Does it hold a fixed model version (needed for `jev_prompt_version` to mean anything)?
 
 **If it works here, Meridian next.** The news lane (`~/meridian`, `Deferred_Backlog.md`, 2026-09-26 entry) has the same shape: sentiment direction and materiality are typed decisions, the current free-tier LLM rotation is slow, and a 120-article reference set already exists to evaluate against.

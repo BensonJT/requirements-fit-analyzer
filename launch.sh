@@ -72,6 +72,12 @@ fi
 #                      rows already judged under the current prompt_version are served from cache
 #   judge2eval         finder.py judge2 eval: catch / agree against the gold labels + the line report;
 #                      the numbers land in the launch log (bar: catch >= 70%, agree >= 85%)
+#   jevrun             finder.py jev run --eval-set: Jev reviews every blind gold row (docs/JEV_PLAN.md §4);
+#                      cached rows under the current prompt_version are skipped
+#   jevrep             two repeatability reruns of the gold set, --run-tag r2 then --run-tag r3 (expanded
+#                      into the steps jevrep:r2 and jevrep:r3 below, so each has its own log line and exit code)
+#   jevinj             finder.py jev run --injection: the synthetic adversarial set (run tag inj)
+#   jeveval            finder.py jev eval: the MSA study; every number beside its bar lands in the launch log
 #   maint              scripts/db_maintenance.sh --auto: compact the DuckDB file (verified copy + swap,
 #                      only when >=10% of blocks are free), remove scratch DuckDB files, prune worktrees
 #                      and merged branches, drop in-repo db backups older than 7 days. Ends every
@@ -80,6 +86,11 @@ fi
 # --llm-top N and the judge2* steps turn on the Gemma second judge with the user's approved fact sheet
 # (see judge_env below). The top-100 judge and the gold eval set barely overlap (3 of 100 on 9/23), so
 # scoring Gemma against gold needs its own step; that is what FULL + GOLD SCORE adds.
+# The jev* steps export JEV_LIVE_OK=1 (jev_env below) and pre-flight checks the TypeSafe key and endpoint.
+# Jev is REPORTED only: nothing it writes moves the rank until the user rules on stage 2.
+# Volume: Jev gold score sends three gold passes plus the injection set, ~6.8M input tokens at the plan's
+# ~2.2M per pass -- more than the 5M default JEV_DAILY_TOKEN_CAP. Raise the cap in .env for that night, or
+# the later steps stop cleanly at the cap (logged in RunSummary.stopped_by_cap, never an error).
 LABELS=(
   "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Top_Jobs + maintenance"
   "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (start at 00:00 to finish by ~7:30)"
@@ -87,11 +98,12 @@ LABELS=(
   "Overnight LIGHT           sweep + screen + coverage + Top_Jobs + maintenance; no Gemma judge"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
+  "Jev gold score (MSA)      Jev reviews the gold set, two repeat runs, the injection set, then jev eval; no sweep"
   "Report only               tracker sync + Top_Jobs (minutes)"
   "Disk maintenance          compact the DuckDB file, scratch files, worktrees, old in-repo backups (what every overnight preset ends with)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~2 min" "~2-3 min" "seconds")
+ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
   "sweep:--llm-top 100|top|maint"
   "sweep:--llm-top 100|judge2run|judge2eval|top|maint"
@@ -99,6 +111,7 @@ PRESETS=(
   "sweep:|top|maint"
   "judge2run|judge2eval|maint"
   "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
+  "jevrun|jevrep|jevinj|jeveval|maint"
   "sync|top"
   "maint"
   "@dryrun"
@@ -153,8 +166,16 @@ esac
 DRY_RUN=false
 [ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|top|maint"; }
 IFS='|' read -r -a STEPS <<<"$PRESET"
+# jevrep is two runs; expand it so each rerun is its own step (own log line, own exit code).
+_steps=()
+for s in "${STEPS[@]}"; do
+  if [ "$s" = "jevrep" ]; then _steps+=("jevrep:r2" "jevrep:r3"); else _steps+=("$s"); fi
+done
+STEPS=("${_steps[@]}")
 USES_JUDGE=false
 case "$PRESET" in *--llm-top*|*judge2*) USES_JUDGE=true ;; esac
+USES_JEV=false
+case "$PRESET" in *jev*) USES_JEV=true ;; esac
 
 # ── start time ─────────────────────────────────────────────────────────────
 START_SPEC="${1:-now}"
@@ -186,6 +207,10 @@ step_cmd() {  # the literal command line a step runs
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
     judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
     judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;
+    jevrun)     echo "$PY -u finder.py jev run --eval-set --background-file $JUDGE_BG --i-have-approval" ;;
+    jevrep:*)   echo "$PY -u finder.py jev run --eval-set --run-tag ${1#jevrep:} --background-file $JUDGE_BG --i-have-approval" ;;
+    jevinj)     echo "$PY -u finder.py jev run --injection --background-file $JUDGE_BG --i-have-approval" ;;
+    jeveval)    echo "$PY -u finder.py jev eval --background-file $JUDGE_BG" ;;
     maint)      echo "bash scripts/db_maintenance.sh --auto" ;;
     *)       echo "" ;;
   esac
@@ -197,6 +222,31 @@ step_cmd() {  # the literal command line a step runs
 JUDGE_BG="$ROOT/judge2_background.local.md"
 judge_env() {
   export JUDGE2_LIVE_OK=1 JUDGE2_BACKGROUND=file JUDGE2_BACKGROUND_FILE="$JUDGE_BG"
+}
+# The Jev tier's live gate, the same way judge_env opens judge2's. Only a preset with a jev* step calls it.
+jev_env() {
+  export JEV_LIVE_OK=1 JUDGE2_BACKGROUND_FILE="$JUDGE_BG"
+}
+
+# Jev pre-flight: the key must be set and GET /v1/models must answer 200. The key goes to curl on stdin as a
+# header (-H @-), so it is never echoed, logged, or visible in the process list.
+jev_preflight() {
+  local ok=0 code endpoint="${JEV_ENDPOINT:-typesafe}"
+  if [ -r "$JUDGE_BG" ]; then echo "  ok    Jev fact sheet ($(basename "$JUDGE_BG"))"; else echo "  FAIL  Jev fact sheet missing: $JUDGE_BG"; ok=1; fi
+  if [ "$endpoint" = "vercel" ]; then
+    if [ -n "${AI_GATEWAY_API_KEY:-}" ]; then echo "  ok    AI_GATEWAY_API_KEY set (JEV_ENDPOINT=vercel; no endpoint probe)"
+    else echo "  FAIL  AI_GATEWAY_API_KEY is not set in .env (JEV_ENDPOINT=vercel)"; ok=1; fi
+    return $ok
+  fi
+  if [ -z "${TYPESAFE_API_KEY:-}" ]; then
+    echo "  FAIL  TYPESAFE_API_KEY is not set in .env -- the Jev steps cannot run (see .env.template)"
+    return 1
+  fi
+  code="$(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY" | curl -s -o /dev/null -w '%{http_code}' \
+    --max-time 20 -H @- https://api.typesafe.ai/v1/models 2>/dev/null)"
+  if [ "$code" = "200" ]; then echo "  ok    TypeSafe API reachable (GET /v1/models 200)"
+  else echo "  FAIL  TypeSafe API returned HTTP ${code:-none} for GET /v1/models (key revoked? VPN on?)"; ok=1; fi
+  return $ok
 }
 
 # ── pre-flight ─────────────────────────────────────────────────────────────
@@ -218,6 +268,7 @@ preflight() {
     if [ "$code" = "200" ]; then echo "  ok    Gemini API reachable"
     else echo "  WARN  Gemini API returned HTTP ${code:-none} (VPN on? key?) -- the judge stage would be skipped, the rest still runs"; fi
   fi
+  if [ "$USES_JEV" = true ]; then jev_preflight || ok=1; fi
   if curl -s -o /dev/null --max-time 20 https://boards-api.greenhouse.io/v1/boards/stripe/jobs 2>/dev/null; then echo "  ok    network"; else echo "  FAIL  no network"; ok=1; fi
   return $ok
 }
@@ -226,6 +277,7 @@ echo
 echo "───────────────────────────────────────────────────────────────────────"
 for s in "${STEPS[@]}"; do echo "  step    : $(step_cmd "$s")"; done
 [ "$USES_JUDGE" = true ] && echo "  judge   : Gemma second judge ON, fact sheet $(basename "$JUDGE_BG")"
+[ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); reported only"
 if [ "$WAIT_SECS" -gt 0 ]; then
   printf "  starts  : %s  (in %dh %dm)\n" "$(date -d "@$START_EPOCH" '+%a %Y-%m-%d %H:%M')" \
     "$((WAIT_SECS / 3600))" "$(((WAIT_SECS % 3600) / 60))"
@@ -303,6 +355,7 @@ if [ "$PF" = 1 ]; then
 fi
 export PYTHONUNBUFFERED=1
 [ "$USES_JUDGE" = true ] && judge_env
+[ "$USES_JEV" = true ] && jev_env
 
 RUN_STARTED=$(date +%s)
 STATUS=0

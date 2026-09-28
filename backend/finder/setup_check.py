@@ -12,7 +12,8 @@ from backend.ats import store
 REPO = Path(__file__).resolve().parents[2]
 ENV_KEYS = {"JOBSEARCH_VAULT_DIR": "vault reports, tracker sync and labels",
             "JOBSEARCH_REGISTRY_DIR": "your ATS registry (else the example registry)",
-            "GEMINI_API_KEY": "Phase 4 LLM review (optional)"}
+            "GEMINI_API_KEY": "Phase 4 LLM review (optional)",
+            "TYPESAFE_API_KEY": "Jev typed-decision tier, docs/JEV_PLAN.md (optional)"}
 PRIVATE_PATHS = (".env", "backend/profile_local.py", "backend/finder/rubric_local.py", "evidence.local.toml",
                  "db/batches/", "db/models/", "db/snapshots/", "db/jobsearch.duckdb")
 OPTIONAL = (("sklearn", "fit model", ".venv/bin/pip install scikit-learn numpy scipy joblib"),

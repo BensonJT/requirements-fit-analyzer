@@ -436,6 +436,33 @@ def required_embed_stage(con, *, log=print) -> Optional[dict]:
         return None
 
 
+def jev_stage(con, *, transport=None, sleep_fn=None, log=print):
+    """The Jev typed-decision tier (backend/finder/jev.py, docs/JEV_PLAN.md §3), run just before judge2_stage
+    on `jev.gated_postings` (any lens model fit >= 0.70). OFF by default: it runs only when BOTH
+    `JEV_STAGE_ENABLED=1` and `JEV_LIVE_OK=1` are set, so no schedule can make the first live call on its
+    own. Logged, never fatal: any failure is one log line and the report still runs. Its output is reported
+    only (vw_lens_fit j3_*); the rank never reads it. Returns the RunSummary, or None when skipped/failed."""
+    from . import jev_questions as Q
+    if os.environ.get(Q.STAGE_ENABLED_ENV) != "1":
+        return None
+    if os.environ.get(Q.LIVE_OK_ENV) != "1":
+        log(f"Jev: skipped ({Q.STAGE_ENABLED_ENV}=1 but {Q.LIVE_OK_ENV} is not 1 -- the Jev stage never "
+            "makes a live call unapproved).")
+        return None
+    t = time.monotonic()
+    try:
+        from . import jev, jev_cli
+        facts = jev.load_facts(jev_cli.background_path())
+        summary = jev.run(con, jev.gated_postings(con), transport=transport, sleep_fn=sleep_fn, live_ok=True,
+                          facts=facts, log=log)
+        log(f"Jev stage: {summary.reviewed} reviewed, {summary.skipped_cached} cached, {summary.errors} "
+            f"error(s), {summary.input_tokens} tokens ({time.monotonic() - t:.1f}s)")
+        return summary
+    except Exception as exc:  # logged, never fatal to the sweep
+        log(f"Jev: failed ({type(exc).__name__}: {exc}); continuing without it")
+        return None
+
+
 def judge2_stage(con, *, top_n: int = 0, log=print) -> Optional[dict]:
     """The LLM second judge (backend/finder/judge2.py, sprint plan §25), wired into the dead `llm_top` hook.
     Same "logged, never fatal to the sweep" pattern as coverage_stage / required_embed_stage above, PLUS an
@@ -492,6 +519,7 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
     if use_coverage:
         out["coverage"] = coverage_stage(con, since=None if full else since, log=log)
         out["required_embed"] = required_embed_stage(con, log=log)
+    out["jev"] = jev_stage(con, log=log)   # off unless JEV_STAGE_ENABLED=1 and JEV_LIVE_OK=1
     if llm_top:
         out["judge2"] = judge2_stage(con, top_n=llm_top, log=log)
     if report and vault_dir:

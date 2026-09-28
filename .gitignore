@@ -181,5 +181,8 @@ db/embed_lab/
 # ships with placeholder content; the real one never does.
 judge2_background.local.md
 
+# The Jev tier's pinned sentinel posting ids (`finder.py jev sentinel --init`), local to its database.
+db/jev_sentinel_ids.txt
+
 # launch.sh per-preset timings (local machine history)
 logs/launch_timings.jsonl

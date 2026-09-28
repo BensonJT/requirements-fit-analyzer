@@ -268,12 +268,20 @@ TFIDF_BETTER = [0.9, 0.8, 0.1, 0.1, 0.9, 0.1, 0.8, 0.1]     # AUC 1.0
 
 
 def _lens_fixture(con, tfidf, *, prefix="L", pv=PV):
+    """Eight BLIND process grades (the hand numbers above), plus two SEEN rows where Jev says `wrong`, the
+    human `bullseye` and TF-IDF 0.95: were they counted, exact, within-one and both AUCs would all move."""
     for i, (h, j, t) in enumerate(zip(HUMAN, JEV, tfidf)):
         pid = f"{prefix}{i:02d}"
         dh = _posting(con, pid)
         _screen(con, pid, fit_process=t)
-        _human_lens(con, pid, dh, "process", h, basis="blind" if i < 6 else "seen")
+        _human_lens(con, pid, dh, "process", h, basis="blind")
         _store(con, _review(pid, dh, pv=pv, grades={"process": j}))
+    for i in range(2):
+        pid = f"{prefix}S{i}"
+        dh = _posting(con, pid)
+        _screen(con, pid, fit_process=0.95)
+        _human_lens(con, pid, dh, "process", "bullseye", basis="seen")
+        _store(con, _review(pid, dh, pv=pv, grades={"process": "wrong"}))
 
 
 def test_lens_agreement_confusion_and_auc_fairness(con):
@@ -284,14 +292,17 @@ def test_lens_agreement_confusion_and_auc_fairness(con):
     assert o["n"] == 8 and o["exact"] == pytest.approx(6 / 8) and o["within_one"] == pytest.approx(7 / 8)
     assert o["confusion"]["bullseye"] == {"wrong": 0, "stretch": 0, "adjacent": 1, "bullseye": 1}
     assert o["confusion"]["stretch"]["bullseye"] == 1
-    assert o["blind"] == {"n": 6, "exact": pytest.approx(5 / 6)}
+    # all bases (reported only): the two seen rows are both misses -> 6 of 10
+    assert o["all_bases"] == {"n": 10, "exact": pytest.approx(6 / 10)}
+    assert p["all_bases"] == {"n": 10, "exact": pytest.approx(6 / 10)}
+    assert r["basis"] == "blind" and r["tfidf_note"] == E.TFIDF_NOTE
     assert p["auc_jev"] == pytest.approx(0.875) and p["auc_tfidf"] == pytest.approx(0.75)
     assert p["n_auc"] == 8 and p["n_auc_pos"] == 4
     assert r["lenses"]["technical"]["n"] == 0 and r["lenses"]["technical"]["auc_jev"] is None
     # secondary: first-judge process bullseye == Jev bullseye; technical wrong != Jev's default adjacent
     assert r["secondary_llm_judge"]["process"] == {"n": 1, "exact": 1.0}
     assert r["secondary_llm_judge"]["overall"] == {"n": 2, "exact": 0.5}
-    assert r["passed"] is True
+    assert r["passed"] is True and r["reason"].startswith("blind exact=0.75")
 
 
 def test_lens_fails_when_tfidf_beats_jev(con):
@@ -313,8 +324,15 @@ def test_lens_insufficient_below_min_n_and_ignores_drift(con):
         dh = _posting(con, pid)
         _human_lens(con, pid, dh, "process", "wrong")
         _store(con, _review(pid, dh, drift=True))
+    for i in range(8, 14):                                  # seen: reported under all_bases, never the bar
+        pid = f"L{i}"
+        dh = _posting(con, pid)
+        _screen(con, pid, fit_process=0.1)
+        _human_lens(con, pid, dh, "process", "wrong", basis="seen")
+        _store(con, _review(pid, dh, grades={"process": "wrong"}))
     r = E.evaluate_lens(con, PV, run_id="run1")
-    assert r["overall"]["n"] == 3 and r["passed"] is False and r["reason"].startswith("insufficient data")
+    assert r["overall"]["n"] == 3 and r["overall"]["all_bases"]["n"] == 9
+    assert r["passed"] is False and r["reason"].startswith("insufficient data")
     assert _eval_rows(con)[0][:2] == ("lens", False)
 
 
@@ -543,6 +561,7 @@ def test_evaluate_all_runs_families_with_data_and_formats_every_bar(con):
     for needle in (f"bar >= {E.CATCH_BAR}", f"bar >= {E.AGREE_BAR}", f"bar >= {E.LENS_EXACT_BAR}",
                    f"bar <= {E.REPEAT_FLIP_BAR}", f"bar <= {E.REPEAT_MEDIAN_DELTA_BAR}",
                    f"lens ECE <= {E.CALIBRATION_ECE_BAR}", "[compare] reported",
+                   "all bases, reported only", E.TFIDF_NOTE,
                    "Bar (required + lens + repeatability): PASSED"):
         assert needle in text, needle
     assert "Acme" not in text and "Analyst" not in text      # posting ids only

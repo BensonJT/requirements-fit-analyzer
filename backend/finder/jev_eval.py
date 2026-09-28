@@ -53,6 +53,8 @@ INJECTION_TAG = "inj"
 SENTINEL_N = 10
 SENTINEL_MAX_DELTA = 0.05
 WORST_K = 10
+TFIDF_NOTE = ("TF-IDF fits may be in-sample on these human grades; its AUC is likely inflated, which makes this "
+              "comparison conservative against Jev")
 
 # Short, public-safe adversarial texts appended to a gold posting (docs/JEV_PLAN.md §3, injection guard).
 INJECTION_TEMPLATES = (
@@ -355,14 +357,18 @@ def _human_lens_rows(con, revs: dict) -> list:
 
 
 def evaluate_lens(con, pv: str, *, run_id: str, write: bool = True) -> dict:
-    """Jev lens grades against vw_human_lens_grades_current (all bases; the blind subset is reported too).
-    Per lens and overall: exact, within-one, confusion. Fairness per lens on the SAME rows (both Jev
-    probabilities and a TF-IDF fit present): AUC of Jev P(bullseye)+P(adjacent) vs AUC of the TF-IDF fit at
-    predicting human grade in {bullseye, adjacent}. Secondary (not in the bar): exact agreement with the
-    first judge's grade_* on every canonically reviewed posting. Bar: overall exact >= LENS_EXACT_BAR with
-    n >= MIN_N, and Jev AUC >= TF-IDF AUC for every lens where both exist (at least one must)."""
+    """Jev lens grades against vw_human_lens_grades_current, BLIND rows only (SPRINT_PLAN §22.4: evaluation
+    of the judge, the models and any second judge uses blind rows only). On blind rows, per lens and overall:
+    exact, within-one, confusion; and fairness per lens on the SAME blind rows (both Jev probabilities and a
+    TF-IDF fit present): AUC of Jev P(bullseye)+P(adjacent) vs AUC of the TF-IDF fit at predicting human grade
+    in {bullseye, adjacent}. Reported only, never in the bar: `all_bases` ({n, exact} over blind + seen rows,
+    per lens and overall), `tfidf_note` (the TF-IDF AUC may be in-sample), and exact agreement with the first
+    judge's grade_* on every canonically reviewed posting. Bar (blind numbers only): overall exact >=
+    LENS_EXACT_BAR with n >= MIN_N, and Jev AUC >= TF-IDF AUC for every lens where both exist (at least one
+    must)."""
     revs = reviews(con, pv)
-    rows = _human_lens_rows(con, revs)
+    every = _human_lens_rows(con, revs)
+    rows = [r for r in every if r["basis"] == "blind"]
     per_lens = {}
     for lens in LENSES:
         lrows = [r for r in rows if r["lens"] == lens]
@@ -374,12 +380,12 @@ def evaluate_lens(con, pv: str, *, run_id: str, write: bool = True) -> dict:
             "auc_jev": auc([r["forecast"] for r in same], labels),
             "auc_tfidf": auc([r["tfidf"] for r in same], labels),
         })
-        blind = _grade_stats([(r["human"], r["jev"]) for r in lrows if r["basis"] == "blind"])
-        stats["blind"] = {"n": blind["n"], "exact": blind["exact"]}
+        both = _grade_stats([(r["human"], r["jev"]) for r in every if r["lens"] == lens])
+        stats["all_bases"] = {"n": both["n"], "exact": both["exact"]}
         per_lens[lens] = stats
     overall = _grade_stats([(r["human"], r["jev"]) for r in rows])
-    overall_blind = _grade_stats([(r["human"], r["jev"]) for r in rows if r["basis"] == "blind"])
-    overall["blind"] = {"n": overall_blind["n"], "exact": overall_blind["exact"]}
+    both = _grade_stats([(r["human"], r["jev"]) for r in every])
+    overall["all_bases"] = {"n": both["n"], "exact": both["exact"]}
 
     secondary = {}
     judge_rows = con.execute(
@@ -400,15 +406,16 @@ def evaluate_lens(con, pv: str, *, run_id: str, write: bool = True) -> dict:
     behind = [lens for lens, s in comparable.items() if s["auc_jev"] < s["auc_tfidf"]]
     if overall["n"] < MIN_N or not comparable:
         passed = False
-        reason = (f"insufficient data: {overall['n']} human lens grade(s) with a Jev review (min {MIN_N}), "
+        reason = (f"insufficient data: {overall['n']} blind human lens grade(s) with a Jev review (min {MIN_N}), "
                   f"{len(comparable)} lens(es) with both classes for an AUC comparison (min 1)")
     else:
         passed = overall["exact"] >= LENS_EXACT_BAR and not behind
         aucs = ", ".join(f"{lens} Jev {s['auc_jev']:.3f} vs TF-IDF {s['auc_tfidf']:.3f}"
                          for lens, s in comparable.items())
-        reason = (f"exact={overall['exact']:.2f} (bar {LENS_EXACT_BAR}); AUC {aucs}"
+        reason = (f"blind exact={overall['exact']:.2f} (bar {LENS_EXACT_BAR}); blind AUC {aucs}"
                   + (f"; Jev behind TF-IDF on {', '.join(behind)}" if behind else ""))
-    metrics = {"overall": overall, "lenses": per_lens, "secondary_llm_judge": secondary}
+    metrics = {"basis": "blind", "overall": overall, "lenses": per_lens, "secondary_llm_judge": secondary,
+               "tfidf_note": TFIDF_NOTE}
     return _result("lens", pv, overall["n"], metrics, passed, reason, con=con, run_id=run_id, write=write)
 
 
@@ -718,13 +725,16 @@ def _report_compare(r: dict) -> list:
 
 def _report_lens(r: dict) -> list:
     o = r["overall"]
-    out = [f"  overall exact: {_f(o['exact'])} (n={o['n']})  bar >= {LENS_EXACT_BAR}, min n {MIN_N}; "
-           f"within-one {_f(o['within_one'])}; blind-only exact {_f(o['blind']['exact'])} (n={o['blind']['n']})"]
+    out = [f"  blind overall exact: {_f(o['exact'])} (n={o['n']})  bar >= {LENS_EXACT_BAR}, min n {MIN_N}; "
+           f"within-one {_f(o['within_one'])}",
+           f"  all bases, reported only: exact {_f(o['all_bases']['exact'])} (n={o['all_bases']['n']})"]
     for lens in LENSES:
         s = r["lenses"][lens]
-        out.append(f"  {lens}: exact {_f(s['exact'])}, within-one {_f(s['within_one'])} (n={s['n']}); "
+        out.append(f"  {lens} (blind): exact {_f(s['exact'])}, within-one {_f(s['within_one'])} (n={s['n']}); "
                    f"AUC Jev {_f(s['auc_jev'])} vs TF-IDF {_f(s['auc_tfidf'])} (n={s['n_auc']}, "
-                   f"pos={s['n_auc_pos']})  bar Jev >= TF-IDF")
+                   f"pos={s['n_auc_pos']})  bar Jev >= TF-IDF; all bases, reported only: exact "
+                   f"{_f(s['all_bases']['exact'])} (n={s['all_bases']['n']})")
+    out.append(f"  note: {r['tfidf_note']}")
     sec = r["secondary_llm_judge"]
     out.append("  secondary (first-judge grades, not in the bar): "
                + ", ".join(f"{k} {_f(v['exact'])} (n={v['n']})" for k, v in sec.items()))

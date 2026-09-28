@@ -19,6 +19,11 @@ from .tracker_sync import job_search_dir
 
 SUMMARY_HEADING = "## Summary — decide here"
 DECISIONS = ("build", "pass", "hold")
+# Kept for the header's "surfaced in the last N days" count only. 2026-09-28 (user): being SHOWN is not the
+# same as being ACTED ON -- a posting surfaced on a day he never opened the report, or on a day he built only
+# ten packages, must keep coming back. So neither report hides a posting for having been shown; a posting
+# leaves the lists only when it is decided (build / pass; a hold keeps surfacing, marked), matched to a tracker
+# row, or no longer active.
 SURFACED_DAYS = 14
 SNAPSHOT_DIR = os.path.join(os.path.dirname(store.DEFAULT_DB_PATH), "snapshots")
 
@@ -158,8 +163,6 @@ def write_jobs_found(con, vault_dir: Optional[str], run_meta: dict, *, max_block
         FROM vw_shortlist v JOIN postings p USING (posting_id) LEFT JOIN vw_coverage_latest c USING (posting_id)
         WHERE v.band IN (SELECT unnest(?::VARCHAR[]))
           AND (v.level_fit IS NULL OR v.level_fit NOT IN ('out_of_reach', 'too_low'))
-          AND v.posting_id NOT IN (SELECT posting_id FROM surfaced
-                                   WHERE surfaced_at >= now() - INTERVAL {SURFACED_DAYS} DAY)
         ORDER BY {_level_order_sql('v.level_fit')}, v.final_score DESC, v.first_seen_at DESC
         LIMIT ?""", [bands, max_blocks]).fetchall()
     block_ids = [b[0] for b in blocks]
@@ -482,6 +485,34 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
         """, [tier, list(levels)]).fetchall()
 
 
+TOP_AWAITING_CAP = 60
+TOP_AWAITING_BANDS = ("very_strong", "strong")
+
+
+def awaiting_judge_rows(con, *, include_decided: bool = False, levels=TOP_LEVELS,
+                        bands=TOP_AWAITING_BANDS) -> list:
+    """High-scoring postings the lens judge has never graded, so `vw_selection` (and every tier above)
+    cannot see them. 2026-09-28 (user): "high scoring top jobs need to remain in the top jobs report
+    until they are in the tracker or they become closed" -- the lens judge runs in batches, and on
+    2026-09-28 140 of 404 actionable strong / very_strong postings had never been graded, so they were
+    invisible here no matter how well they scored. Same gates as `top_rows` (active via vw_lens_fit,
+    screen verdict not reject, level in range, undecided, not in tracker, fit track), ranked by the
+    screen's final_score because there is no judge rank yet. Being SHOWN never removes a row."""
+    where = ["f.band IN (SELECT unnest(?::VARCHAR[]))", "f.verdict != 'reject'",
+             "f.level_fit IN (SELECT unnest(?::VARCHAR[]))", "p.track = 'fit'",
+             "f.posting_id NOT IN (SELECT posting_id FROM vw_selection)"]
+    if not include_decided:
+        where += ["NOT coalesce(f.decided, FALSE)", "NOT coalesce(f.in_tracker, FALSE)"]
+    return con.execute(f"""
+        SELECT f.posting_id, f.employer, f.title, f.url, f.final_score, f.band, f.level_fit,
+               f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.days_since_first_seen,
+               (SELECT max(surfaced_at) FROM surfaced s WHERE s.posting_id = f.posting_id) AS shown
+        FROM vw_lens_fit f JOIN postings p USING (posting_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY f.final_score DESC, f.first_seen_at DESC
+        """, [list(bands), list(levels)]).fetchall()
+
+
 def _gate_counts(con, tier: str, levels=TOP_LEVELS) -> dict:
     """How many of this tier's rows each individual gate would exclude, independently of the
     others -- not a sequential funnel -- so a row lost to more than one gate is never hidden
@@ -546,7 +577,8 @@ def _loc_cell(loc, far_site) -> str:
 
 
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
-                   review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS) -> Path:
+                   review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS,
+                   awaiting_cap: int = TOP_AWAITING_CAP) -> Path:
     """Writes Top_Jobs_YYYYMMDD.md: the END-of-pipeline list, run by hand after a judge import
     (`finder.py judge import`) -- never from the automated sweep, which always runs `--no-report`.
 
@@ -626,6 +658,26 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
             w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
                      f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
                      f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
+    w.append("")
+    awaiting = awaiting_judge_rows(con, include_decided=include_decided, levels=levels)
+    held_aw = _held_ids(con, [r[0] for r in awaiting[:awaiting_cap]])
+    far_aw = _long_commute_sites(con, [r[0] for r in awaiting[:awaiting_cap]])
+    w.append(f"## Awaiting judge (strong screen score, not yet lens-graded) — {len(awaiting)}\n")
+    w.append("_Ranked by screen score. These stay here until you build, pass or track them, or the posting "
+             "closes; a lens-judge batch moves them up into Apply / Review._\n")
+    if not awaiting:
+        w.append("_Every strong posting has been graded._\n")
+    else:
+        w.append("| Score | Band | Company | Title | Level | Location | Pay | Age | Shown |\n"
+                 "|---|---|---|---|---|---|---|---|---|")
+        for (pid, employer, title, url, score, band, level_fit, loc, lo, hi, interval, age,
+             shown) in awaiting[:awaiting_cap]:
+            shown_cell = f"{shown:%Y-%m-%d}" if shown else "never"
+            w.append(f"| {score} | {band} | {_cell(employer)} | {'⏸ ' if pid in held_aw else ''}{_link(title, url)} | "
+                     f"{level_fit or '—'} | {_loc_cell(loc, far_aw.get(pid))} | {_pay(lo, hi, interval)} | "
+                     f"{age if age is not None else '—'}d | {shown_cell} |")
+        if len(awaiting) > awaiting_cap:
+            w.append(f"\n_{len(awaiting) - awaiting_cap} more below the cap of {awaiting_cap}._")
     w.append("")
     w.append(f"**Gate detail — Apply:** {gate_line(apply_gates, 'apply')}.\n")
     w.append(f"**Gate detail — Review:** {gate_line(review_gates, 'review')}.\n")

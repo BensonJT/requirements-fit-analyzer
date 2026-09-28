@@ -505,9 +505,18 @@ def test_report_writer_output_reparses(tmp_path):
     assert "About the role" in text and "Improve workflows" in text
     assert "| Acme | [Operational Excellence Engineer](https://x/R1) | different discipline" in text
     assert con.execute("SELECT count(*) FROM surfaced").fetchone()[0] == 2
+    # 2026-09-28 (user): being SHOWN is not being ACTED ON. An undecided, untracked posting comes back as a
+    # block on the next report (marked shown in the summary table) instead of vanishing for 14 days.
     second = report.write_jobs_found(con, str(vault), meta, block_min_band="partial")
-    assert second.name.endswith("_2.md") and second.read_text().count("\n# Company:") == 0
+    assert second.name.endswith("_2.md") and second.read_text().count("\n# Company:") == 2
     assert "(shown " in second.read_text()
+    # A build or pass decision is what removes it; a hold does not.
+    pids = [r[0] for r in con.execute("SELECT posting_id FROM vw_shortlist ORDER BY posting_id").fetchall()]
+    now = pipeline._now()
+    con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'cli', NULL, ?)", [pids[0], now])
+    con.execute("INSERT INTO decisions VALUES (?, 'hold', NULL, 'cli', NULL, ?)", [pids[1], now])
+    third = report.write_jobs_found(con, str(vault), meta, block_min_band="partial")
+    assert third.read_text().count("\n# Company:") == 1
 
 
 def test_parse_decisions_round_trip_and_read_back_idempotent(tmp_path):
@@ -3657,6 +3666,50 @@ def test_write_top_jobs_no_hard_wrap_and_unique_path(tmp_path):
 
     path2 = report.write_top_jobs(con, None, out_path=str(tmp_path))
     assert path1 != path2 and path2.exists()
+    con.close()
+
+
+def _unjudged_posting(con, pid, *, band="very_strong", score=95, verdict="review", level_fit="in_range",
+                      status="active"):
+    """A screened posting the lens judge never graded (no llm_labels row), so vw_selection cannot see it."""
+    seen = datetime(2026, 9, 26)
+    con.execute(
+        "INSERT OR REPLACE INTO postings (posting_id, employer, platform, req_id, title, url, location_primary, "
+        "status, description_hash, first_seen_at, last_seen_at) "
+        "VALUES (?, 'Acme', 'greenhouse', ?, 'Process Lead', ?, 'Remote - USA', ?, 'h', ?, ?)",
+        [pid, pid, f"https://x/{pid}", status, seen, seen])
+    con.execute(
+        "INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, rule_score, "
+        "final_score, band, level_fit) VALUES (?, 'rv', 'mv', ?, ?, 70, ?, ?, ?)",
+        [pid, seen, verdict, score, band, level_fit])
+
+
+def test_awaiting_judge_keeps_strong_unjudged_rows_until_decided_tracked_or_closed(tmp_path):
+    """2026-09-28 (user): a high-scoring posting stays on Top Jobs until it is built / passed, in the tracker,
+    or closed -- even when the lens judge has not graded it yet, and however often it has been shown."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _unjudged_posting(con, "a" * 20, score=97)                    # stays, top
+    _unjudged_posting(con, "b" * 20, score=90, band="strong")     # stays, second
+    _unjudged_posting(con, "c" * 20, band="partial")              # below the band bar
+    _unjudged_posting(con, "d" * 20, verdict="reject")            # screen rejected
+    _unjudged_posting(con, "e" * 20, status="closed")             # closed
+    _unjudged_posting(con, "f" * 20)                              # passed
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'comp: low', 'cli', NULL, ?)", ["f" * 20, datetime(2026, 9, 27)])
+    _unjudged_posting(con, "g" * 20)                              # in tracker
+    con.execute("INSERT INTO tracker VALUES ('search', NULL, 'Acme', 'Process Lead', NULL, NULL, ?, 'exact', ?)",
+               ["g" * 20, datetime(2026, 9, 27)])
+    _unjudged_posting(con, "h" * 20, score=85)                    # held: stays, marked
+    con.execute("INSERT INTO decisions VALUES (?, 'hold', NULL, 'cli', NULL, ?)", ["h" * 20, datetime(2026, 9, 27)])
+    con.execute("INSERT INTO surfaced VALUES (?, 'Jobs_Found_x.md', ?)", ["a" * 20, datetime(2026, 9, 26)])
+    _top_posting(con, "j" * 20)                                   # judged: belongs to Apply, not here
+
+    rows = report.awaiting_judge_rows(con)
+    assert [r[0] for r in rows] == ["a" * 20, "b" * 20, "h" * 20]
+
+    text = report.write_top_jobs(con, None, out_path=str(tmp_path)).read_text(encoding="utf-8")
+    assert "## Awaiting judge" in text and "— 3" in text
+    assert "| 2026-09-26 |" in text and "| never |" in text      # shown date is informational only
+    assert "⏸ [Process Lead]" in text                            # the hold is marked
     con.close()
 
 

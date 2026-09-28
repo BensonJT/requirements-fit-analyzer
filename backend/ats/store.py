@@ -1097,7 +1097,8 @@ CREATE OR REPLACE VIEW vw_hard_negatives AS
     SELECT h.posting_id, h.source, h.note
     FROM hard_negatives h LEFT JOIN postings p USING (posting_id) WHERE coalesce(p.track, 'fit') = 'fit';
 
--- Active, not rejected, not decided, not already in the tracker; best first.
+-- Active, not rejected, not decided, not already in the tracker; best first. A `hold` is NOT decided
+-- (user ruling 2026-09-22, extended to this view 2026-09-28): it keeps surfacing until a build or pass.
 CREATE OR REPLACE VIEW vw_shortlist AS
     SELECT p.posting_id, p.employer, p.title, p.location_primary, p.workplace_type, p.employment_type,
            p.pay_min, p.pay_max, p.pay_interval, p.url, p.posted_at, p.first_seen_at,
@@ -1112,7 +1113,8 @@ CREATE OR REPLACE VIEW vw_shortlist AS
     LEFT JOIN vw_decisions d USING (posting_id)
     LEFT JOIN (SELECT DISTINCT matched_posting_id FROM tracker) t ON t.matched_posting_id = p.posting_id
     WHERE p.status = 'active' AND p.track = 'fit'
-      AND s.verdict != 'reject' AND d.posting_id IS NULL AND t.matched_posting_id IS NULL
+      AND s.verdict != 'reject' AND (d.posting_id IS NULL OR d.decision = 'hold')
+      AND t.matched_posting_id IS NULL
     ORDER BY s.final_score DESC, p.first_seen_at DESC;
 
 CREATE OR REPLACE MACRO vw_scored_new(days) AS TABLE

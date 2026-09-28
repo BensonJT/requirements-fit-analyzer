@@ -524,6 +524,20 @@ def test_sentinel_alerts_on_a_big_probability_move_and_on_a_grade_flip(con):
     assert {a["field"] for a in r["alerts"]} == {"gates.gate_people_manager", "required_fit"}
 
 
+def test_sentinel_uses_the_pinned_set_when_given(con):
+    """A pinned set that is NOT the first-n gold postings is what gets compared (gold can grow after pinning)."""
+    gold = _gold(con, 12)
+    pinned = [p for p in E.sentinel_postings(con, 12) if p.posting_id in ("G10", "G11")]
+    for pid, dh in gold:
+        _store(con, _review(pid, dh))
+    for p in pinned:
+        _store(con, _review(p.posting_id, p.description_hash, tag="s1"))
+    r = E.evaluate_sentinel(con, PV, "s1", run_id="run1", write=False, postings=pinned)
+    assert r["n_postings"] == 2 and r["n_pairs"] == 2 and r["passed"] is True
+    # without the pinned set it falls back to the first 10, none of which were rerun
+    assert E.evaluate_sentinel(con, PV, "s1", run_id="run2", write=False)["passed"] is False
+
+
 def test_sentinel_missing_rerun_is_insufficient(con):
     gold = _gold(con, 3)
     for pid, dh in gold:

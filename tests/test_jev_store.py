@@ -197,6 +197,24 @@ def test_run_tag_rows_are_separate_and_round_trip(tmp_path):
     con.close()
 
 
+def test_update_jev_derivation_touches_only_the_derived_columns_of_one_key(tmp_path):
+    con = _connect(tmp_path)
+    store.insert_jev_review(con, _review("p1", lines=[_line(0)]))
+    store.insert_jev_review(con, _review("p1", run_tag="r2", lines=[_line(0)]))
+    n = store.update_jev_derivation(con, "p1", "h", "pv1", None, required_fit="fails", derive_why="new why",
+                                    lines_fit="fails", shape_fit=None, shape_score=None)
+    assert n == 1
+    loaded = store.load_jev_review(con, "p1", "h", "pv1")
+    expected = _review("p1", lines=[_line(0)])
+    expected.required_fit, expected.derive_why, expected.lines_fit = "fails", "new why", "fails"
+    expected.shape_fit, expected.shape_score = None, None
+    assert loaded == expected                                       # every Jev answer unchanged
+    assert store.load_jev_review(con, "p1", "h", "pv1", "r2").required_fit == "meets"   # the rerun untouched
+    assert store.update_jev_derivation(con, "nope", "h", "pv1", None, required_fit=None, derive_why=None,
+                                       lines_fit=None, shape_fit=None, shape_score=None) == 0
+    con.close()
+
+
 def test_reinsert_replaces_review_and_lines_rather_than_appending(tmp_path):
     con = _connect(tmp_path)
     store.insert_jev_review(con, _review("p1", lines=[_line(0), _line(1), _line(2)]))

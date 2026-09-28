@@ -165,7 +165,7 @@ Sources: docs.typesafe.ai `/api`, `/models`, `/primitives/*`, `/confidence`, `/m
   - the interface contract below;
   - the repo rules: PEP 8, type hints, commit locally, never push, no network in tests, never open the live DB, run the `.personal_patterns` scan;
   - §1 of this file;
-  - the TypeSafe agent skill, if the user approves it (§7 item 5).
+  - the docs index https://docs.typesafe.ai/llms.txt (the agent skill was skipped, §7 item 5).
 
 **Interface contract.** It is frozen before fan-out so the work packages can run in parallel:
 - `jev.build_role_request(posting) -> dict`
@@ -219,7 +219,7 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
 2. **The two-request split** (Change 1): **accepted.**
 3. **Gate:** **any lens ≥ 0.70**, plus the gold rows, capped at 5M tokens a day.
 4. **Evaluation bars (§4) and the later authority order:** **accepted.**
-5. **The TypeSafe agent skill.** The orchestrator recommended a vendored, pinned, project-local copy instead of the marketplace plugin. **Waiting for the user's word.** The reasoning:
+5. **The TypeSafe agent skill:** **SKIP (ruled 2026-09-28).** The plan's §1 and §3 carry the skill's guidance, and builders are given the llms.txt docs index. The orchestrator writes `jev_questions.py` and the user reviews it. The smoke fixture guards against invented request or response fields. Original reasoning, kept for history: The reasoning:
    - The skill is a single MIT-licensed `SKILL.md` (about 10 KB) with no scripts, hooks or MCP server. Its content is design guidance plus links to the live docs, and this plan already applies it.
    - Installing the plugin puts it in every session, and its trigger description is broad ("brainstorming what AI could make possible in an app"). It could load in unrelated projects, and marketplace auto-update could change its content without review.
    - A pinned copy at `.claude/skills/typesafe-ai/SKILL.md`, with its LICENSE, loads only in this repo. Committing it also means builders' worktrees get it, since worktrees contain tracked files only. It can be refreshed on purpose with a diff review.
@@ -227,7 +227,7 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
 ## 8. Progress checklist
 
 - [x] Docs read; plan written; decisions 1-4 ruled (2026-09-28)
-- [ ] Decision 5 (skill) ruled
+- [x] Decision 5 (skill) ruled: skip (2026-09-28)
 - [x] User: TypeSafe account and key in `.env` (§2), 2026-09-28 (Path A)
 - [x] User: go given for the smoke probe (the fact-sheet re-read is still due before the first gold run)
 - [x] Smoke probe run and fixture saved (2026-09-28); the pin works; probabilities vary about ±0.03 between identical calls

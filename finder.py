@@ -42,6 +42,16 @@ Usage:
     .venv/bin/python finder.py judge2 rederive                  # §29.2/§29.3: re-derive required_fit from
                                                                    # stored judge2_lines, no API call
     .venv/bin/python finder.py judge2 status                    # counts, discard/downgrade rates, last eval
+    .venv/bin/python finder.py jev run --eval-set --dry-run --show 1   # Jev tier: print what leaves the machine
+    .venv/bin/python finder.py jev run --eval-set --i-have-approval    # Jev reviews the blind gold rows
+    .venv/bin/python finder.py jev run --eval-set --run-tag r2 --i-have-approval   # a repeatability rerun
+    .venv/bin/python finder.py jev run --gated --limit 50 --i-have-approval   # any lens model fit >= 0.70
+    .venv/bin/python finder.py jev run --injection --i-have-approval   # the synthetic adversarial set (tag inj)
+    .venv/bin/python finder.py jev sentinel --init                     # pin the sentinel set once
+    .venv/bin/python finder.py jev run --sentinel --run-tag wk40 --i-have-approval   # rerun the pinned set
+    .venv/bin/python finder.py jev eval [--sentinel-tag wk40]          # the MSA study (docs/JEV_PLAN.md §4)
+    .venv/bin/python finder.py jev status                              # counts, drift, canary, tokens, bar
+    .venv/bin/python finder.py jev rederive                            # re-derive required_fit, no API call
     .venv/bin/python finder.py bridge [--max-ring N] [--new-only]  # bridge (place-scoped retail) track's open list (§31.6)
 
 Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
@@ -676,6 +686,30 @@ def cmd_judge2(con, a):
     print(result)
 
 
+def cmd_jev(con, a):
+    """The Jev typed-decision tier (docs/JEV_PLAN.md, backend/finder/jev.py). `run` refuses to make a live call
+    without JEV_LIVE_OK=1 or --i-have-approval; `--dry-run` never needs either, nor a key. Reported only: no
+    Jev output moves the rank until the user rules on stage 2."""
+    from backend.finder import jev_cli
+    db_path = a.db or os.environ.get("JOBSEARCH_DB") or None
+    try:
+        if a.action == "run":
+            jev_cli.run_cmd(con, a, db_path)
+        elif a.action == "eval":
+            jev_cli.eval_cmd(con, a, db_path)
+        elif a.action == "status":
+            jev_cli.status(con, a)
+        elif a.action == "rederive":
+            jev_cli.rederive(con)
+        elif a.action == "sentinel":
+            if not a.init:
+                raise jev_cli.JevCliError("jev sentinel: pass --init to pin the set (runs use `jev run --sentinel`)")
+            jev_cli.sentinel_init(con, db_path, n=a.n, force=a.force)
+    except jev_cli.JevCliError as exc:
+        print(exc)
+        sys.exit(1)
+
+
 def cmd_setup_check(con, a):
     from backend.finder import setup_check
     sys.exit(0 if setup_check.run(con, manifest=a.manifest) else 1)
@@ -915,6 +949,36 @@ def main():
                    help="eval: print postings whose required_fit differs between two stored prompt_versions "
                         "(sprint plan §29.4), instead of running the posting-level bar")
     s.set_defaults(func=cmd_judge2)
+
+    s = sub.add_parser("jev", parents=[common],
+                       help="Jev typed-decision tier (docs/JEV_PLAN.md); reported only, never live without a go")
+    s.add_argument("action", choices=["run", "eval", "status", "rederive", "sentinel"])
+    pop = s.add_mutually_exclusive_group()
+    pop.add_argument("--eval-set", action="store_true",
+                     help="run: every blind human-graded gold row (judge2.EVAL_SET_SQL)")
+    pop.add_argument("--gated", action="store_true",
+                     help="run: active undecided postings with any lens model fit >= 0.70, in rank order")
+    pop.add_argument("--injection", action="store_true",
+                     help="run: the synthetic adversarial set (jev_eval.injection_postings), run tag 'inj'")
+    pop.add_argument("--sentinel", action="store_true",
+                     help="run: the pinned sentinel set (see `jev sentinel --init`); needs --run-tag")
+    s.add_argument("--limit", type=int, help="run --gated: at most N postings")
+    s.add_argument("--dry-run", action="store_true", help="run: print request bodies and an estimate, call nothing")
+    s.add_argument("--show", type=int, default=1, help="run --dry-run: how many postings' requests to print")
+    s.add_argument("--force", action="store_true",
+                   help="run: re-review even when cached; sentinel --init: replace the pinned set")
+    s.add_argument("--run-tag", help="run: store a repeat run beside the canonical one (<pv>:TAG), e.g. r2")
+    s.add_argument("--i-have-approval", action="store_true",
+                   help="run: the live-call approval (or JEV_LIVE_OK=1, which the launch.sh Jev preset sets)")
+    s.add_argument("--background-file",
+                   help="the fact sheet (default $JUDGE2_BACKGROUND_FILE, else judge2_background.local.md)")
+    s.add_argument("--judge2-pv", help="eval: the judge2 prompt_version to compare with (default: the best)")
+    s.add_argument("--tags", default="r2,r3", help="eval: comma-separated repeat run tags (default r2,r3)")
+    s.add_argument("--sentinel-tag", help="eval: also compare this sentinel rerun tag with the canonical run")
+    s.add_argument("--no-write", action="store_true", help="eval: print the report, store no jev_evals rows")
+    s.add_argument("--init", action="store_true", help="sentinel: pin the sentinel posting ids beside the DB")
+    s.add_argument("--n", type=int, default=10, help="sentinel --init: how many gold postings to pin (default 10)")
+    s.set_defaults(func=cmd_jev)
 
     s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
     s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")

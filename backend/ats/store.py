@@ -2169,6 +2169,20 @@ def load_jev_review(con, posting_id: str, description_hash: str, prompt_version:
     return ReviewRecord(**fields, lines=lines)
 
 
+def update_jev_derivation(con, posting_id: str, description_hash: str, prompt_version: str,
+                          run_tag: Optional[str], *, required_fit: Optional[str], derive_why: Optional[str],
+                          lines_fit: Optional[str], shape_fit: Optional[str], shape_score: Optional[float]) -> int:
+    """Overwrites the five code-derived columns of one stored review (`finder.py jev rederive`); every Jev
+    answer stays as stored. Returns the number of rows updated (0 when no such review is stored)."""
+    key = [posting_id, description_hash, prompt_version, _run_tag_key(run_tag)]
+    before = con.execute("SELECT count(*) FROM jev_reviews WHERE posting_id = ? AND description_hash = ? "
+                         "AND prompt_version = ? AND run_tag = ?", key).fetchone()[0]
+    con.execute("UPDATE jev_reviews SET required_fit = ?, derive_why = ?, lines_fit = ?, shape_fit = ?, "
+                "shape_score = ? WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? "
+                "AND run_tag = ?", [required_fit, derive_why, lines_fit, shape_fit, shape_score] + key)
+    return int(before)
+
+
 def insert_jev_eval(con, *, run_id: str, prompt_version: str, family: str, n: Optional[int], metrics: dict,
                     passed: bool, reason: Optional[str]) -> None:
     """Stores one metric family's result of a `jev eval` run, stamped now (UTC). `family` must be one of

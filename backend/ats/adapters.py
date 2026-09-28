@@ -990,20 +990,37 @@ def _adp_position(row, item):
 
 
 def adp_jobs(row, max_pages=None):
+    """Whole-board pull. ADP's `$skip` is 1-BASED (verified live 2026-09-28 on a 6-posting board:
+    $top=2&$skip=0 returns ONE posting, $skip=1 returns postings 1-2, $skip=3 returns 3-4, and a
+    $skip past the end returns a body with no `meta`). The first version started at 0, so its first
+    page held $top-1 postings and a board of exactly 50, 100, ... postings stopped one short -- and
+    the close-pass would then have closed the missed posting as taken down. So: start at 1, step by
+    $top, and decide completeness by counting UNIQUE itemIDs against meta.totalNumber rather than by
+    $skip arithmetic. Stop on an empty page or a page that adds nothing new; if the unique count is
+    still below the reported total, return Truncated so the caller never close-passes a short read."""
     cid, ccid = row["identifier_1"], row["identifier_2"]
     base = f"{ADP_HOST}/job-requisitions?cid={cid}&ccId={ccid}&lang=en_US"
-    out, skip, pages, total = [], 0, 0, None
+    out, seen, skip, pages, total = [], set(), 1, 0, None
     with client() as c:
         while True:
             data = _request(c, "GET", f"{base}&$top={ADP_PAGE}&$skip={skip}").json()
             items = data.get("jobRequisitions") or []
             if total is None:
                 total = (data.get("meta") or {}).get("totalNumber") or 0
-            out.extend(_adp_position(row, item) for item in items)
+            added = 0
+            for item in items:
+                key = item.get("itemID") or _adp_external_job_id(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(_adp_position(row, item))
+                added += 1
             pages += 1
             skip += ADP_PAGE
-            if not items or (total and skip >= total):
+            if total and len(seen) >= total:
                 return out
+            if not items or not added:
+                return Truncated(out) if total and len(seen) < total else out
             if max_pages and pages >= max_pages:
                 return Truncated(out)
             time.sleep(PAGE_DELAY)

@@ -1043,32 +1043,71 @@ def test_adp_jobs_maps_every_posting_from_the_fixture(monkeypatch):
     assert remote["workplace_type"] == "remote"
 
 
-def test_adp_jobs_paginates_and_stops_on_total_number(monkeypatch):
-    """A board bigger than one page (here forced by shrinking ADP_PAGE to 3, since the real
-    fixture board only has 6 postings) is walked with $top/$skip until $skip reaches
-    meta.totalNumber."""
-    monkeypatch.setattr(A, "PAGE_DELAY", 0)
-    monkeypatch.setattr(A, "ADP_PAGE", 3)
-    fixture = _adp_fixture("list.json")
-    all_items = fixture["jobRequisitions"]
-    page1 = {"jobRequisitions": all_items[:3], "meta": {"totalNumber": 6}}
-    page2 = {"jobRequisitions": all_items[3:], "meta": {"totalNumber": 6}}
-    calls = []
+def _adp_one_based_server(items, total=None, calls=None):
+    """A fake ADP list endpoint with the REAL paging semantics, verified live 2026-09-28: `$skip`
+    is 1-based, so $skip=s&$top=t returns postings s..s+t-1 (1-indexed); $skip=0 behaves like
+    $skip=1 but one short ($top-1 postings); a $skip past the end returns a body with no `meta`."""
+    import re as _re
+    total = len(items) if total is None else total
 
     class _FakeClient:
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
         def request(self, method, url, **kw):
-            calls.append(url)
-            return _Resp(page1 if len(calls) == 1 else page2)
+            if calls is not None:
+                calls.append(url)
+            top = int(_re.search(r"\$top=(\d+)", url).group(1))
+            skip = int(_re.search(r"\$skip=(\d+)", url).group(1))
+            start, stop = (0, top - 1) if skip == 0 else (skip - 1, skip - 1 + top)
+            page = items[start:stop]
+            if not page:
+                return _Resp({"jobRequisitions": []})
+            return _Resp({"jobRequisitions": page, "meta": {"totalNumber": total}})
+    return _FakeClient
+
+
+def test_adp_jobs_paginates_one_based_and_stops_on_total_number(monkeypatch):
+    """A board bigger than one page (forced by shrinking ADP_PAGE to 3; the fixture board has 6) is
+    walked from $skip=1 in steps of $top and stops once the unique count reaches meta.totalNumber."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "ADP_PAGE", 3)
+    calls = []
+    monkeypatch.setattr(A, "client", _adp_one_based_server(_adp_fixture("list.json")["jobRequisitions"], calls=calls))
+    out = A.adp_jobs(_ADP_ROW, max_pages=5)
+    assert len(calls) == 2
+    assert "$top=3" in calls[0] and "$skip=1" in calls[0] and "$skip=4" in calls[1]
+    assert len(out) == 6 and len({p["req_id"] for p in out}) == 6
+    assert not getattr(out, "truncated", False)
+
+
+def test_adp_jobs_board_that_is_an_exact_multiple_of_the_page_is_read_in_full(monkeypatch):
+    """The regression the 1-based fix exists for: with $skip starting at 0 the first page held
+    $top-1 postings, so a board of exactly 2 x $top stopped one short. It must now read all 6."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "ADP_PAGE", 3)
+    monkeypatch.setattr(A, "client", _adp_one_based_server(_adp_fixture("list.json")["jobRequisitions"]))
+    out = A.adp_jobs(_ADP_ROW)
+    assert len(out) == 6 and not getattr(out, "truncated", False)
+
+
+def test_adp_jobs_repeated_items_are_deduplicated_and_a_short_read_is_truncated(monkeypatch):
+    """If ADP ever repeats a page (or reports more postings than it serves), the pull keeps one copy
+    of each itemID, stops when a page adds nothing new, and comes back Truncated -- never a
+    complete-looking list the close-pass would act on."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    items = _adp_fixture("list.json")["jobRequisitions"]
+    page = {"jobRequisitions": items[:3], "meta": {"totalNumber": 6}}
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp(page)
 
     monkeypatch.setattr(A, "client", lambda: _FakeClient())
-    out = A.adp_jobs(_ADP_ROW, max_pages=5)
-    assert len(calls) == 2                        # stopped once $skip reached totalNumber
-    assert "$top=3" in calls[0] and "$skip=0" in calls[0] and "$skip=3" in calls[1]
-    assert len(out) == 6
-    assert not getattr(out, "truncated", False)
+    out = A.adp_jobs(_ADP_ROW)
+    assert len(out) == 3 and len({p["req_id"] for p in out}) == 3
+    assert getattr(out, "truncated", False) is True
 
 
 def test_adp_jobs_truncated_when_max_pages_trips(monkeypatch):

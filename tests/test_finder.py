@@ -3670,46 +3670,62 @@ def test_write_top_jobs_no_hard_wrap_and_unique_path(tmp_path):
 
 
 def _unjudged_posting(con, pid, *, band="very_strong", score=95, verdict="review", level_fit="in_range",
-                      status="active"):
-    """A screened posting the lens judge never graded (no llm_labels row), so vw_selection cannot see it."""
+                      status="active", fp=None, ft=None, fa=None, fr=None, title="Process Lead",
+                      location="Remote - USA"):
+    """A screened posting the lens judge never graded (no llm_labels row), so vw_selection cannot see it.
+    fp / ft / fa / fr are the lens and required-fit MODEL probabilities the screen stored."""
     seen = datetime(2026, 9, 26)
     con.execute(
         "INSERT OR REPLACE INTO postings (posting_id, employer, platform, req_id, title, url, location_primary, "
         "status, description_hash, first_seen_at, last_seen_at) "
-        "VALUES (?, 'Acme', 'greenhouse', ?, 'Process Lead', ?, 'Remote - USA', ?, 'h', ?, ?)",
-        [pid, pid, f"https://x/{pid}", status, seen, seen])
+        "VALUES (?, 'Acme', 'greenhouse', ?, ?, ?, ?, ?, 'h', ?, ?)",
+        [pid, pid, title, f"https://x/{pid}", location, status, seen, seen])
     con.execute(
         "INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict, rule_score, "
-        "final_score, band, level_fit) VALUES (?, 'rv', 'mv', ?, ?, 70, ?, ?, ?)",
-        [pid, seen, verdict, score, band, level_fit])
+        "final_score, band, level_fit, fit_process, fit_technical, fit_ai, fit_required) "
+        "VALUES (?, 'rv', 'mv', ?, ?, 70, ?, ?, ?, ?, ?, ?, ?)",
+        [pid, seen, verdict, score, band, level_fit, fp, ft, fa, fr])
 
 
-def test_awaiting_judge_keeps_strong_unjudged_rows_until_decided_tracked_or_closed(tmp_path):
-    """2026-09-28 (user): a high-scoring posting stays on Top Jobs until it is built / passed, in the tracker,
-    or closed -- even when the lens judge has not graded it yet, and however often it has been shown."""
+def test_model_tiers_put_unjudged_postings_in_apply_review_or_unclear_never_hidden(tmp_path):
+    """2026-09-28 (user): the hand-run judge trains the lens models; it is not a gate on the report. An
+    unjudged posting gets a tier from the models (lens bar AND required-fit model), and every other unjudged
+    strong posting stays visible under "requirement unclear" until it is built / passed, tracked or closed."""
     con = store.connect(str(tmp_path / "t.duckdb"))
-    _unjudged_posting(con, "a" * 20, score=97)                    # stays, top
-    _unjudged_posting(con, "b" * 20, score=90, band="strong")     # stays, second
-    _unjudged_posting(con, "c" * 20, band="partial")              # below the band bar
-    _unjudged_posting(con, "d" * 20, verdict="reject")            # screen rejected
-    _unjudged_posting(con, "e" * 20, status="closed")             # closed
-    _unjudged_posting(con, "f" * 20)                              # passed
+    _unjudged_posting(con, "a" * 20, fp=0.90, fr=0.80, title="Model Apply")           # model apply
+    _unjudged_posting(con, "b" * 20, fp=0.90, fr=0.50, title="Model Review")          # model review
+    _unjudged_posting(con, "c" * 20, fp=0.90, fr=0.20, title="Unclear Req")           # unclear: required low
+    _unjudged_posting(con, "d" * 20, ft=0.75, fr=0.80, band="strong", title="Weak Lens")  # unclear: technical < 0.80
+    _unjudged_posting(con, "p" * 20, fp=0.20, fr=0.20, band="partial")                # below the band bar: hidden
+    _unjudged_posting(con, "r" * 20, fp=0.90, fr=0.90, verdict="reject")              # screen rejected
+    _unjudged_posting(con, "x" * 20, fp=0.90, fr=0.90, status="closed")               # closed
+    _unjudged_posting(con, "f" * 20, fp=0.90, fr=0.90)                                # passed
     con.execute("INSERT INTO decisions VALUES (?, 'pass', 'comp: low', 'cli', NULL, ?)", ["f" * 20, datetime(2026, 9, 27)])
-    _unjudged_posting(con, "g" * 20)                              # in tracker
+    _unjudged_posting(con, "g" * 20, fp=0.90, fr=0.90)                                # in tracker
     con.execute("INSERT INTO tracker VALUES ('search', NULL, 'Acme', 'Process Lead', NULL, NULL, ?, 'exact', ?)",
                ["g" * 20, datetime(2026, 9, 27)])
-    _unjudged_posting(con, "h" * 20, score=85)                    # held: stays, marked
+    _unjudged_posting(con, "h" * 20, fp=0.20, fr=0.10, title="Held One")             # held: unclear, marked
     con.execute("INSERT INTO decisions VALUES (?, 'hold', NULL, 'cli', NULL, ?)", ["h" * 20, datetime(2026, 9, 27)])
-    con.execute("INSERT INTO surfaced VALUES (?, 'Jobs_Found_x.md', ?)", ["a" * 20, datetime(2026, 9, 26)])
-    _top_posting(con, "j" * 20)                                   # judged: belongs to Apply, not here
+    con.execute("INSERT INTO surfaced VALUES (?, 'Jobs_Found_x.md', ?)", ["c" * 20, datetime(2026, 9, 26)])
+    _top_posting(con, "j" * 20)                                                       # judged: judge's own Apply
+    _unjudged_posting(con, "k" * 20, fp=0.95, fr=0.95, title="Canada Role", location="Remote in Canada")
 
-    rows = report.awaiting_judge_rows(con)
-    assert [r[0] for r in rows] == ["a" * 20, "b" * 20, "h" * 20]
+    assert {r[0] for r in report.model_rows(con, "apply")} == {"a" * 20, "k" * 20}   # raw query; the writer drops "k" (non-US)
+    assert [r[0] for r in report.model_rows(con, "review")] == ["b" * 20]
+    assert {r[0] for r in report.unclear_rows(con)} == {"c" * 20, "d" * 20, "h" * 20}
+    assert "j" * 20 not in {r[0] for r in report.unclear_rows(con)}
 
     text = report.write_top_jobs(con, None, out_path=str(tmp_path)).read_text(encoding="utf-8")
-    assert "## Awaiting judge" in text and "— 3" in text
-    assert "| 2026-09-26 |" in text and "| never |" in text      # shown date is informational only
-    assert "⏸ [Process Lead]" in text                            # the hold is marked
+    apply_part = text.split("## Apply")[1].split("## Review")[0]
+    review_part = text.split("## Review")[1].split("## Requirement unclear")[0]
+    unclear_part = text.split("## Requirement unclear")[1]
+    assert "[Model Apply]" in apply_part and "model 0.80" in apply_part and "[Director, Ops]" in apply_part
+    assert "[Model Review]" in review_part and "model 0.50" in review_part
+    assert "[Unclear Req]" in unclear_part and "[Weak Lens]" in unclear_part
+    assert "| 2026-09-26 |" in unclear_part and "| never |" in unclear_part   # shown date is information only
+    assert "⏸ [Held One]" in unclear_part                                     # the hold is marked
+    assert "**Model-graded (no judge grade yet):** 1 apply, 1 review, 3 requirement unclear" in text
+    assert "(1 with a non-US primary location left out)" in text and "Canada Role" not in text
     con.close()
 
 

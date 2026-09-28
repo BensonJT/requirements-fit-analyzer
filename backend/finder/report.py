@@ -499,6 +499,12 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
 #   weakest lens, hence the higher bar), ai >= 0.70 (0.95);
 #   model Apply  = good lens AND required >= 0.60: 183 rows, judge said apply 157 / review 21 / hidden 5;
 #   model Review = good lens AND 0.40 <= required < 0.60: 43 rows, judge review 33 / hidden 8 / apply 2.
+# OUT OF SAMPLE 2026-09-28 (scripts/measure_model_tiers.py; wave 1's 132 measurable rows scored by the 9/21
+# models, which never saw them): model Apply 12 rows, judge apply 9 / review 1 / hidden 2; model Review 7 rows,
+# apply 4 / review 1 / hidden 2. Lens recall is far below the in-sample figures (process @0.70 P 0.65 R 0.42,
+# technical @0.80 R 0.13, ai @0.70 R 0.04 -- the 9/21 ai model found 1 of 24 AI-lens roles), so a posting the
+# models miss is common, which is why nothing strong is hidden. Constants unchanged (n too small); re-measure
+# out of sample on the next judged wave before tuning.
 # Below 0.40 the required model is unreliable (of 402 such judged rows the judge put 224 in review), so those
 # postings are NEVER hidden: they stay in a third section, "requirement unclear", with every other
 # unjudged strong / very_strong posting.

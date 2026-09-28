@@ -485,32 +485,78 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
         """, [tier, list(levels)]).fetchall()
 
 
-TOP_AWAITING_CAP = 60
-TOP_AWAITING_BANDS = ("very_strong", "strong")
+# ---- Model-graded tiers (2026-09-28, user decision) ----
+# The hand-run lens judge exists to TRAIN the TF-IDF lens models, which then score every posting at no cost;
+# it was never meant to be a gate on the report. But `vw_selection` builds Apply / Review from judge grades
+# only, so any posting the judge had not reached was invisible here however well the models scored it (140
+# of 404 actionable strong / very_strong postings on 2026-09-28). Unjudged postings now get a tier from the
+# models, marked "model" on the page; a judge grade, when one exists, always wins.
+#
+# Thresholds measured 2026-09-28 against the 2,590 judged postings that also carry model scores (in-sample:
+# the models were trained on these labels, so real-world agreement will be somewhat lower -- re-measure after
+# every retrain):
+#   a lens counts as good at process >= 0.70 (precision 0.86 vs the judge), technical >= 0.80 (0.69; the
+#   weakest lens, hence the higher bar), ai >= 0.70 (0.95);
+#   model Apply  = good lens AND required >= 0.60: 183 rows, judge said apply 157 / review 21 / hidden 5;
+#   model Review = good lens AND 0.40 <= required < 0.60: 43 rows, judge review 33 / hidden 8 / apply 2.
+# Below 0.40 the required model is unreliable (of 402 such judged rows the judge put 224 in review), so those
+# postings are NEVER hidden: they stay in a third section, "requirement unclear", with every other
+# unjudged strong / very_strong posting.
+MODEL_LENS_MIN = {"fit_process": 0.70, "fit_technical": 0.80, "fit_ai": 0.70}
+MODEL_REQ_APPLY = 0.60
+MODEL_REQ_REVIEW = 0.40
+TOP_UNCLEAR_CAP = 60
+TOP_UNCLEAR_BANDS = ("very_strong", "strong")
+
+_MODEL_LENS_SQL = " OR ".join(f"coalesce(f.{col}, 0) >= {t}" for col, t in MODEL_LENS_MIN.items())
 
 
-def awaiting_judge_rows(con, *, include_decided: bool = False, levels=TOP_LEVELS,
-                        bands=TOP_AWAITING_BANDS) -> list:
-    """High-scoring postings the lens judge has never graded, so `vw_selection` (and every tier above)
-    cannot see them. 2026-09-28 (user): "high scoring top jobs need to remain in the top jobs report
-    until they are in the tracker or they become closed" -- the lens judge runs in batches, and on
-    2026-09-28 140 of 404 actionable strong / very_strong postings had never been graded, so they were
-    invisible here no matter how well they scored. Same gates as `top_rows` (active via vw_lens_fit,
-    screen verdict not reject, level in range, undecided, not in tracker, fit track), ranked by the
-    screen's final_score because there is no judge rank yet. Being SHOWN never removes a row."""
-    where = ["f.band IN (SELECT unnest(?::VARCHAR[]))", "f.verdict != 'reject'",
-             "f.level_fit IN (SELECT unnest(?::VARCHAR[]))", "p.track = 'fit'",
+def _model_base_where(include_decided: bool) -> list:
+    where = ["f.verdict != 'reject'", "f.level_fit IN (SELECT unnest(?::VARCHAR[]))", "p.track = 'fit'",
              "f.posting_id NOT IN (SELECT posting_id FROM vw_selection)"]
     if not include_decided:
         where += ["NOT coalesce(f.decided, FALSE)", "NOT coalesce(f.in_tracker, FALSE)"]
+    return where
+
+
+def model_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS) -> list:
+    """Unjudged postings the models place in `tier` ('apply' or 'review'). Same 22-column shape as
+    `top_rows`, with the three lens MODEL PROBABILITIES in the grade slots and 'model <p>' as required_fit,
+    so the writer can merge the two lists on the one rank."""
+    req = (f"coalesce(f.fit_required, 0) >= {MODEL_REQ_APPLY}" if tier == "apply" else
+           f"coalesce(f.fit_required, 0) >= {MODEL_REQ_REVIEW} AND coalesce(f.fit_required, 0) < {MODEL_REQ_APPLY}")
+    where = _model_base_where(include_decided) + [f"({_MODEL_LENS_SQL})", req]
+    return con.execute(f"""
+        SELECT f.posting_id, f.employer, f.title, f.url, f.fit_process, f.fit_technical, f.fit_ai,
+               (CAST(coalesce(f.fit_process, 0) >= {MODEL_LENS_MIN['fit_process']} AS INTEGER)
+                + CAST(coalesce(f.fit_technical, 0) >= {MODEL_LENS_MIN['fit_technical']} AS INTEGER)
+                + CAST(coalesce(f.fit_ai, 0) >= {MODEL_LENS_MIN['fit_ai']} AS INTEGER)) AS n_good,
+               FALSE AS any_bullseye, 'model ' || printf('%.2f', coalesce(f.fit_required, 0)) AS required_fit,
+               NULL AS required_unmet, f.level_fit,
+               f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
+               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why
+        FROM vw_lens_fit f JOIN postings p USING (posting_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC
+        """, [list(levels)]).fetchall()
+
+
+def unclear_rows(con, *, include_decided: bool = False, levels=TOP_LEVELS, bands=TOP_UNCLEAR_BANDS) -> list:
+    """Every other unjudged strong / very_strong posting: the models do not clear it for Apply or Review
+    (usually because the required-fit model is below 0.40, where it is unreliable), but it is never hidden.
+    2026-09-28 (user): a high-scoring posting stays on the list until it is built, passed, tracked or closed."""
+    where = _model_base_where(include_decided) + [
+        "f.band IN (SELECT unnest(?::VARCHAR[]))",
+        f"NOT (({_MODEL_LENS_SQL}) AND coalesce(f.fit_required, 0) >= {MODEL_REQ_REVIEW})"]
     return con.execute(f"""
         SELECT f.posting_id, f.employer, f.title, f.url, f.final_score, f.band, f.level_fit,
                f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.days_since_first_seen,
-               (SELECT max(surfaced_at) FROM surfaced s WHERE s.posting_id = f.posting_id) AS shown
+               (SELECT max(surfaced_at) FROM surfaced s WHERE s.posting_id = f.posting_id) AS shown,
+               f.fit_process, f.fit_technical, f.fit_ai, f.fit_required
         FROM vw_lens_fit f JOIN postings p USING (posting_id)
         WHERE {' AND '.join(where)}
-        ORDER BY f.final_score DESC, f.first_seen_at DESC
-        """, [list(bands), list(levels)]).fetchall()
+        ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC
+        """, [list(levels), list(bands)]).fetchall()
 
 
 def _gate_counts(con, tier: str, levels=TOP_LEVELS) -> dict:
@@ -576,17 +622,27 @@ def _loc_cell(loc, far_site) -> str:
     return _cell(loc)[:34]
 
 
+def _merge_by_rank(judged: list, model: list) -> list:
+    """Judge rows and model rows on the ONE rank (`rank_score`, then final_score, then first seen)."""
+    return sorted(judged + model, key=lambda r: (-(r[20] or 0), -(r[16] or 0), -(r[17].timestamp() if r[17] else 0)))
+
+
+def _prob(p) -> str:
+    return "—" if p is None else f"{p:.2f}"
+
+
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
                    review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS,
-                   awaiting_cap: int = TOP_AWAITING_CAP) -> Path:
-    """Writes Top_Jobs_YYYYMMDD.md: the END-of-pipeline list, run by hand after a judge import
-    (`finder.py judge import`) -- never from the automated sweep, which always runs `--no-report`.
+                   unclear_cap: int = TOP_UNCLEAR_CAP) -> Path:
+    """Writes Top_Jobs_YYYYMMDD.md: the end-of-pipeline list.
 
-    Ranked apply / review lists off `vw_selection`, gated on posting status, the screen's own
-    verdict (where location and pay rejections live), level fit, and -- unless `include_decided`
-    -- whether the posting is already decided or already in the tracker. Every gate's exclusion
-    count is reported in the footer, including postings judged before they were ever screened,
-    so a row can never simply disappear from the list without a paper trail.
+    Apply / Review come from the judge's grades where a posting has one (`vw_selection`) and from the lens
+    models where it does not (`model_rows`, marked "model" in the Required column with the probability shown
+    in the grade column); the two are merged on the one rank. A third section lists every other unjudged
+    strong / very_strong posting ("requirement unclear") so nothing high-scoring is ever hidden. Every tier is
+    gated on posting status, the screen's own verdict (where location and pay rejections live), level fit,
+    and -- unless `include_decided` -- whether the posting is already decided or already in the tracker.
+    Being SHOWN in an earlier report never removes a row.
     """
     now_local = datetime.now()
     stamp = now_local.strftime("%Y%m%d")
@@ -605,79 +661,101 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         SELECT DISTINCT l.rubric_version FROM vw_llm_labels_latest l JOIN vw_selection v USING (posting_id)
         WHERE v.tier IN ('apply', 'review') ORDER BY 1""").fetchall()]
 
-    apply_rows = top_rows(con, "apply", include_decided=include_decided, levels=levels)
-    review_rows = top_rows(con, "review", include_decided=include_decided, levels=levels)
-    far = _long_commute_sites(con, [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]])
-    held = _held_ids(con, [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]])
+    judge_apply = top_rows(con, "apply", include_decided=include_decided, levels=levels)
+    judge_review = top_rows(con, "review", include_decided=include_decided, levels=levels)
+    # A non-US primary location never reaches the judge (judge.non_us_primary skips it at export), so it
+    # must not reach Apply / Review through the models either -- "Remote in Canada" passed the screen on
+    # 2026-09-28. Filtered here, counted in the header, never silently dropped.
+    from .judge import non_us_primary
+    model_apply = model_rows(con, "apply", include_decided=include_decided, levels=levels)
+    model_review = model_rows(con, "review", include_decided=include_decided, levels=levels)
+    n_non_us = sum(1 for r in model_apply + model_review if non_us_primary(r[12]))
+    model_apply = [r for r in model_apply if not non_us_primary(r[12])]
+    model_review = [r for r in model_review if not non_us_primary(r[12])]
+    model_ids = {r[0] for r in model_apply + model_review}
+    apply_rows = _merge_by_rank(judge_apply, model_apply)
+    review_rows = _merge_by_rank(judge_review, model_review)
+    unclear = unclear_rows(con, include_decided=include_decided, levels=levels)
+    n_non_us += sum(1 for r in unclear if non_us_primary(r[7]))
+    unclear = [r for r in unclear if not non_us_primary(r[7])]
+    shown_ids = [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]] + \
+                [r[0] for r in unclear[:unclear_cap]]
+    far = _long_commute_sites(con, shown_ids)
+    held = _held_ids(con, shown_ids)
     apply_gates = _gate_counts(con, "apply", levels)
     review_gates = _gate_counts(con, "review", levels)
 
     w = [f"---\nnode_id: JOBS:top-{stamp}\nnode_type: search_results\ntags: [#job-search #pipeline #top]\n---\n",
-         f"# Top Jobs — end of pipeline, after judge import, {now_local:%Y-%m-%d %H:%M}\n",
+         f"# Top Jobs — end of pipeline, {now_local:%Y-%m-%d %H:%M}\n",
          f"**Rubric version(s):** {', '.join(rubric_versions) or 'none'}. "
          f"**Funnel:** {judged} judged → {tiers.get('apply', 0)} apply / {tiers.get('review', 0)} review / "
          f"{tiers.get('hidden', 0)} hidden → after active + verdict + level" +
          (" + undecided" if not include_decided else "") +
-         f" gates: {len(apply_rows)} apply, {len(review_rows)} review. "
+         f" gates: {len(judge_apply)} apply, {len(judge_review)} review. **Model-graded (no judge grade yet):** "
+         f"{len(model_apply)} apply, {len(model_review)} review, {len(unclear)} requirement unclear "
+         f"({n_non_us} with a non-US primary location left out). "
          f"**Levels shown:** {', '.join(levels)}. **Decided/in-tracker rows:** "
-         f"{'included' if include_decided else 'hidden'}.\n"]
+         f"{'included' if include_decided else 'hidden'}.\n",
+         "_Rows marked `model` in the Required column were graded by the lens models, not the judge: the grade "
+         "column shows each lens model's probability, and the Required cell shows the required-fit model's "
+         "probability (Apply at 0.60 or above, Review from 0.40)._\n"]
 
     def gate_line(gates: dict, label: str) -> str:
-        return (f"of {gates['total']} {label}-tier rows: "
+        return (f"of {gates['total']} judged {label}-tier rows: "
                 f"{gates['inactive']} inactive, {gates['verdict_reject']} verdict reject, "
                 f"{gates['level_out_of_range']} level out of range, "
                 f"{gates['decided_or_in_tracker']} already decided/in tracker, "
                 f"{gates['no_screen_row']} judged with no screen row")
 
+    header = ("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
+              "|---|---|---|---|---|---|---|---|---|---|---|")
+
+    def row_line(row) -> str:
+        (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
+         interval, score, first_seen, age, breadth, rank, why) = row
+        star = "★ " if n_good == 3 else ""
+        if pid in model_ids:
+            grades = f"{_prob(gp)} / {_prob(gt)} / {_prob(ga)}"
+        else:
+            grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
+        return (f"| {(rank or 0):.0f} | {star}{_cell(employer)} | {_link(title, url)} | "
+                f"{'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
+                f"{(breadth or 0):.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
+                f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
+
     w.append("## Apply\n")
     if not apply_rows:
         w.append("_Nothing clears the apply gates this run._\n")
     else:
-        w.append("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
-                 "|---|---|---|---|---|---|---|---|---|---|---|")
-        for row in apply_rows[:apply_cap]:
-            (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
-             interval, score, first_seen, age, breadth, rank, why) = row
-            star = "★ " if n_good == 3 else ""
-            grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
-                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
-                     f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
+        w.append(header)
+        w.extend(row_line(r) for r in apply_rows[:apply_cap])
     w.append("")
     w.append("## Review (requirement arguable — read the unmet lines)\n")
     if not review_rows:
         w.append("_Nothing clears the review gates this run._\n")
     else:
-        w.append("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
-                 "|---|---|---|---|---|---|---|---|---|---|---|")
-        for row in review_rows[:review_cap]:
-            (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
-             interval, score, first_seen, age, breadth, rank, why) = row
-            star = "★ " if n_good == 3 else ""
-            grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
-            w.append(f"| {rank:.0f} | {star}{_cell(employer)} | {_link(title, url)} | {'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
-                     f"{breadth:.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
-                     f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
+        w.append(header)
+        w.extend(row_line(r) for r in review_rows[:review_cap])
     w.append("")
-    awaiting = awaiting_judge_rows(con, include_decided=include_decided, levels=levels)
-    held_aw = _held_ids(con, [r[0] for r in awaiting[:awaiting_cap]])
-    far_aw = _long_commute_sites(con, [r[0] for r in awaiting[:awaiting_cap]])
-    w.append(f"## Awaiting judge (strong screen score, not yet lens-graded) — {len(awaiting)}\n")
-    w.append("_Ranked by screen score. These stay here until you build, pass or track them, or the posting "
-             "closes; a lens-judge batch moves them up into Apply / Review._\n")
-    if not awaiting:
-        w.append("_Every strong posting has been graded._\n")
+    w.append(f"## Requirement unclear (strong score, no judge grade, required-fit model below "
+             f"{MODEL_REQ_REVIEW:.2f} or no lens above its bar) — {len(unclear)}\n")
+    w.append("_The required-fit model is unreliable in this range, so these are never hidden: read the "
+             "Required block yourself. They stay until you build, pass or track them, or the posting closes; "
+             "a judge batch grades them properly._\n")
+    if not unclear:
+        w.append("_Nothing in this range._\n")
     else:
-        w.append("| Score | Band | Company | Title | Level | Location | Pay | Age | Shown |\n"
-                 "|---|---|---|---|---|---|---|---|---|")
-        for (pid, employer, title, url, score, band, level_fit, loc, lo, hi, interval, age,
-             shown) in awaiting[:awaiting_cap]:
+        w.append("| Score | Band | Company | Title | Models P / T / AI | Required model | Level | Location | Pay | Age | Shown |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|")
+        for (pid, employer, title, url, score, band, level_fit, loc, lo, hi, interval, age, shown,
+             fp, ft, fa, fr) in unclear[:unclear_cap]:
             shown_cell = f"{shown:%Y-%m-%d}" if shown else "never"
-            w.append(f"| {score} | {band} | {_cell(employer)} | {'⏸ ' if pid in held_aw else ''}{_link(title, url)} | "
-                     f"{level_fit or '—'} | {_loc_cell(loc, far_aw.get(pid))} | {_pay(lo, hi, interval)} | "
+            w.append(f"| {score} | {band} | {_cell(employer)} | {'⏸ ' if pid in held else ''}{_link(title, url)} | "
+                     f"{_prob(fp)} / {_prob(ft)} / {_prob(fa)} | {_prob(fr)} | {level_fit or '—'} | "
+                     f"{_loc_cell(loc, far.get(pid))} | {_pay(lo, hi, interval)} | "
                      f"{age if age is not None else '—'}d | {shown_cell} |")
-        if len(awaiting) > awaiting_cap:
-            w.append(f"\n_{len(awaiting) - awaiting_cap} more below the cap of {awaiting_cap}._")
+        if len(unclear) > unclear_cap:
+            w.append(f"\n_{len(unclear) - unclear_cap} more below the cap of {unclear_cap}._")
     w.append("")
     w.append(f"**Gate detail — Apply:** {gate_line(apply_gates, 'apply')}.\n")
     w.append(f"**Gate detail — Review:** {gate_line(review_gates, 'review')}.\n")

@@ -1,0 +1,92 @@
+{
+  "_note": "Live jev-1.13.0 smoke probe 2026-09-28 on TypeSafe's own quickstart sample text (no personal data). Sanitized: no key, no request id. Use as the response-shape fixture for tests.",
+  "request": {
+    "state": "Hi, I've been trying to connect my Stripe account for 3 days and the integration keeps failing. I'm losing sales. Please help ASAP.",
+    "model": "jev-1.13.0",
+    "questions": {
+      "department": {
+        "type": "choice",
+        "instructions": "Which team should handle this",
+        "criteria": {
+          "billing": "Payment or subscription issues",
+          "technical": "Bugs or integration problems",
+          "sales": "Pricing or account questions"
+        }
+      },
+      "frustration": {
+        "type": "score",
+        "instructions": "How frustrated the customer appears",
+        "criteria": [
+          "Calm, just stating facts",
+          "Frustrated but civil",
+          "Very angry, strong language"
+        ]
+      },
+      "is_urgent": {
+        "type": "noul",
+        "instructions": "The message conveys urgency or time-sensitivity"
+      }
+    }
+  },
+  "status": 200,
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "choice": "technical",
+        "confidence": 0.72,
+        "probabilities": {
+          "billing": 0.19,
+          "sales": 0.0,
+          "technical": 0.81
+        }
+      },
+      "frustration": {
+        "type": "score",
+        "score": 1.0,
+        "confidence": 1.0,
+        "legend": {
+          "0": "Calm, just stating facts",
+          "1": "Frustrated but civil",
+          "2": "Very angry, strong language"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 1.0,
+          "2": 0.0
+        }
+      },
+      "is_urgent": {
+        "type": "noul",
+        "noul": 0.99
+      }
+    },
+    "usage": {
+      "input_tokens": 425,
+      "output_tokens": 73
+    }
+  },
+  "repeats": [
+    {
+      "department_probabilities": {
+        "technical": 0.83,
+        "billing": 0.17,
+        "sales": 0.0
+      },
+      "department_confidence": 0.74,
+      "frustration_score": 1.0,
+      "is_urgent_noul": 1.0
+    },
+    {
+      "department_probabilities": {
+        "technical": 0.84,
+        "billing": 0.16,
+        "sales": 0.0
+      },
+      "department_confidence": 0.76,
+      "frustration_score": 1.0,
+      "is_urgent_noul": 1.0
+    }
+  ]
+}

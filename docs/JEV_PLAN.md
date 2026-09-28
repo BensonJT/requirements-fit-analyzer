@@ -31,6 +31,19 @@ Sources: docs.typesafe.ai `/api`, `/models`, `/primitives/*`, `/confidence`, `/m
 | Data handling | TypeSafe does not train on customer requests. Zero data retention is offered to enterprise customers only, so data is retained as the DPA describes. |
 | Prompt injection | The vendor confirms it: state is treated as data, and adversarial text can move the answer. VentureBeat reported a block probability falling from 0.76 to 0.48 under an injected pre-approval. |
 
+**Measured in the live smoke probe (2026-09-28, TypeSafe's own sample ticket, fixture `tests/fixtures/jev/smoke_response.json`):**
+- `GET /v1/models` returns 200 and lists only the aliases `jev-latest` and `jev-preview`. A request sent with `model: "jev-1.13.0"` is accepted, and every response reports `model: jev-1.13.0`. The pin works.
+- The request used 425 input tokens and took 367 ms.
+- The request id arrives in the `x-typesafe-request-id` header. No rate-limit headers were sent.
+- **The answers are not deterministic.** Across three identical calls, every picked answer was stable, but the probabilities moved:
+  - `department` P(technical): 0.81, 0.83, 0.84;
+  - its confidence: 0.72, 0.74, 0.76;
+  - the Noul: 0.99, 1.0, 1.0.
+  So the noise floor is about ±0.03, right at the §4 repeatability bar. By contrast, judge2 at temperature 0 showed a zero noise floor.
+  - Consequence 1: the repeatability study in §4 is essential, not optional.
+  - Consequence 2: any probability used as a rank input should be the mean of repeated calls, not a single sample. Two or three calls cost almost nothing.
+  - Consequence 3: thresholds need a margin wider than the noise floor.
+
 **Vendor-listed weak spots for jev-1.13. Each one drives a design choice in §3.**
 1. It reads questions literally. State the exact condition and put the boundary cases in the criteria.
 2. It cannot count or do arithmetic reliably. Keep that in code.
@@ -215,9 +228,9 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
 
 - [x] Docs read; plan written; decisions 1-4 ruled (2026-09-28)
 - [ ] Decision 5 (skill) ruled
-- [ ] User: TypeSafe account and key in `.env` (§2)
-- [ ] User: fact sheet re-read; go for the smoke probe
-- [ ] Smoke probe run; fixture saved
+- [x] User: TypeSafe account and key in `.env` (§2), 2026-09-28 (Path A)
+- [x] User: go given for the smoke probe (the fact-sheet re-read is still due before the first gold run)
+- [x] Smoke probe run and fixture saved (2026-09-28); the pin works; probabilities vary about ±0.03 between identical calls
 - [ ] Setup: branch `jev-tier`, builder definitions, contract frozen
 - [ ] WP1 `jev.py` merged
 - [ ] WP2 schema v23 merged

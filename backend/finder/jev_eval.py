@@ -546,12 +546,13 @@ _LINES_GOLD_SQL = """
 def evaluate_calibration(con, pv: str, *, run_id: str, write: bool = True, n_boot: int = 1000,
                          seed: int = 0) -> dict:
     """(a) lens: event = human grade in {bullseye, adjacent}, forecast = Jev P(bullseye)+P(adjacent), pooled
-    over lenses. (b) lines: for blind gold postings with a human required_fit, each Jev `required` line;
-    event = it matches a gold required_unmet entry, forecast = verdict_probs["unmet"]. A `fails` posting
+    over lenses, BLIND human lens grades only (§22.4). (b) lines: for blind gold postings with a human
+    required_fit, each Jev `required` line; event = it matches a gold required_unmet entry, forecast = verdict_probs["unmet"]. A `fails` posting
     with no unmet lines named is skipped (its events are unknown). Bar on the lens part only: ECE <=
     CALIBRATION_ECE_BAR with n >= CALIBRATION_MIN_N (reported now; gates stage 2 later)."""
     revs = reviews(con, pv)
-    lens_rows = [r for r in _human_lens_rows(con, revs) if r["forecast"] is not None]
+    # §22.4: evaluation reads blind rows only (the same rule evaluate_lens applies).
+    lens_rows = [r for r in _human_lens_rows(con, revs) if r["forecast"] is not None and r["basis"] == "blind"]
     lens = calibration_metrics([r["forecast"] for r in lens_rows],
                                [r["human"] in POSITIVE_GRADES for r in lens_rows], n_boot=n_boot, seed=seed)
 

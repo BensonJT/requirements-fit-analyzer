@@ -642,11 +642,13 @@ def sentinel_postings(con, n: int = SENTINEL_N) -> list:
     return _gold_postings(con, n)
 
 
-def evaluate_sentinel(con, pv: str, tag: str, *, run_id: str, write: bool = True, n: int = SENTINEL_N) -> dict:
+def evaluate_sentinel(con, pv: str, tag: str, *, run_id: str, write: bool = True, n: int = SENTINEL_N,
+                      postings: Optional[list] = None) -> dict:
     """The tagged sentinel rerun against canonical, posting by posting. An alert is any lens-grade flip, any
     required_fit flip, or any probability delta > SENTINEL_MAX_DELTA. Passed = every sentinel posting has
-    both reviews and there is no alert."""
-    postings = sentinel_postings(con, n)
+    both reviews and there is no alert. `postings` is the PINNED sentinel set when the caller has one (the CLI
+    reads db/jev_sentinel_ids.txt); without it, the first `n` blind gold postings are used."""
+    postings = postings if postings is not None else sentinel_postings(con, n)
     pairs = []
     for p in postings:
         base = _load_exact(con, p.posting_id, p.description_hash, pv, None)
@@ -677,7 +679,8 @@ def _has_rows(con, pv: str, tag: Optional[str]) -> bool:
 
 
 def evaluate_all(con, pv: str, *, run_id: str, judge2_pv: Optional[str] = None, tags: tuple = ("r2", "r3"),
-                 sentinel_tag: Optional[str] = None, write: bool = True) -> dict:
+                 sentinel_tag: Optional[str] = None, sentinel_set: Optional[list] = None,
+                 write: bool = True) -> dict:
     """Runs every family that has data under `pv` and returns {family: result}. The canonical families
     (required, lens, calibration, compare) need canonical rows; compare also needs a judge2 prompt_version
     (`judge2_pv`, else best_judge2_pv); repeatability needs a tagged rerun; injection needs the "<pv>:inj"
@@ -696,7 +699,8 @@ def evaluate_all(con, pv: str, *, run_id: str, judge2_pv: Optional[str] = None, 
     if _has_rows(con, pv, INJECTION_TAG):
         results["injection"] = evaluate_injection(con, pv, run_id=run_id, write=write)
     if sentinel_tag:
-        results["sentinel"] = evaluate_sentinel(con, pv, sentinel_tag, run_id=run_id, write=write)
+        results["sentinel"] = evaluate_sentinel(con, pv, sentinel_tag, run_id=run_id, write=write,
+                                                postings=sentinel_set)
     return results
 
 

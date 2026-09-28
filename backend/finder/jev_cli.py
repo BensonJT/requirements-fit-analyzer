@@ -129,16 +129,11 @@ def eval_cmd(con, a, db_path: Optional[str], *, log=print) -> dict:
     facts = load_facts(a.background_file)
     pv = jev.prompt_version(facts, jev.endpoint_from_env())
     tags = tuple(t.strip() for t in (a.tags or "").split(",") if t.strip())
-    if a.sentinel_tag:
-        path = sentinel_path(db_path)
-        if path.exists():
-            pinned = read_sentinel_ids(path)
-            current = [p.posting_id for p in jev_eval.sentinel_postings(con, len(pinned))]
-            if pinned != current:
-                log(f"jev eval: WARNING the pinned sentinel set ({path.name}) differs from the first "
-                    f"{len(pinned)} gold postings that evaluate_sentinel compares; its result may be partial")
+    # The sentinel is always evaluated on the PINNED set (the same postings `jev run --sentinel` sent).
+    sentinel_set = sentinel_postings(con, sentinel_path(db_path), log=log) if a.sentinel_tag else None
     results = jev_eval.evaluate_all(con, pv, run_id=new_run_id(), judge2_pv=a.judge2_pv, tags=tags,
-                                    sentinel_tag=a.sentinel_tag, write=not a.no_write)
+                                    sentinel_tag=a.sentinel_tag, sentinel_set=sentinel_set,
+                                    write=not a.no_write)
     log(f"jev eval: base prompt_version {pv}" + (" (not written)" if a.no_write else ""))
     log(jev_eval.format_report(results))
     return results

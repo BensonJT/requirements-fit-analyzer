@@ -15,6 +15,7 @@ from typing import Optional
 from backend import profile as P
 from backend.ats import store
 
+from .jev_questions import CANARY_FLAG_AT
 from .tracker_sync import job_search_dir
 
 SUMMARY_HEADING = "## Summary — decide here"
@@ -317,6 +318,31 @@ def _j2_cell(required: Optional[str], moves_rank: Optional[bool]) -> str:
     return f"{required}*" if moves_rank else required
 
 
+_J3_REQUIRED = {"meets": "m", "partial": "p", "fails": "f"}
+_J3_GRADE = {"bullseye": "B", "adjacent": "A", "stretch": "S", "wrong": "W"}
+# vw_lens_fit's REPORTED-only Jev columns (schema v23), in the order _j3_cell takes them.
+J3_COLUMNS = ("j3_required_fit", "j3_lens_process_grade", "j3_lens_technical_grade", "j3_lens_ai_grade",
+              "j3_injection_p", "jev_bar_passed")
+
+
+def _j3_cell(required: Optional[str], process: Optional[str], technical: Optional[str], ai: Optional[str],
+             injection_p: Optional[float], bar_passed: Optional[bool]) -> str:
+    """Jev's call, REPORTED only (docs/JEV_PLAN.md §3): the required-fit initial (m/p/f, blank for no call) and
+    the three lens grades as initials in process/technical/ai order (B/A/S/W), e.g. "m B·A·W". " inj!" when
+    the injection canary fired; "*" when Jev's bar has passed. Never read by the rank."""
+    grades = (process, technical, ai)
+    if not required and not any(grades):
+        return "—"
+    lenses = "·".join(_J3_GRADE.get(g, "-") for g in grades)
+    req = _J3_REQUIRED.get(required or "", "")
+    cell = f"{req} {lenses}" if req else lenses
+    if injection_p is not None and injection_p >= CANARY_FLAG_AT:
+        cell += " inj!"
+    if bar_passed is True:
+        cell += "*"
+    return cell
+
+
 def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bool = False) -> list:
     """Actionable rows in one lens bucket, best first.
 
@@ -332,7 +358,7 @@ def lens_rows(con, bucket: str, *, cap: int = LENS_LIST_CAP, include_decided: bo
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_process, fit_process, grade_technical, fit_technical, lens_source,
                days_since_first_seen, blocker, level_fit, required_fit, fit_required, embed_required,
-               fit_bullseye, rank_score, rank_why, judge2_required, judge2_moves_rank
+               fit_bullseye, rank_score, rank_why, judge2_required, judge2_moves_rank, {', '.join(J3_COLUMNS)}
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
         ORDER BY rank_score DESC, final_score DESC,
@@ -351,7 +377,7 @@ def ai_lens_rows(con, *, cap: int = LENS_LIST_CAP, include_decided: bool = False
         SELECT posting_id, employer, title, url, location_primary, pay_min, pay_max, pay_interval,
                final_score, band, grade_ai, fit_ai, lens_source, days_since_first_seen, blocker, level_fit,
                required_fit, fit_required, embed_required, fit_bullseye, rank_score, rank_why,
-               judge2_required, judge2_moves_rank
+               judge2_required, judge2_moves_rank, {', '.join(J3_COLUMNS)}
         FROM vw_lens_fit
         WHERE {' AND '.join(where)}
         ORDER BY rank_score DESC, final_score DESC,
@@ -404,7 +430,9 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
          "> `lens_source` is the weight of the evidence: **user** is the candidate's "
          "own adjudication, **judge** is the LLM rubric on both lenses, **judge+model** is a row graded "
          "before the second lens existed, and **model** is a TF-IDF prediction on a JD nobody has read. "
-         "Only the first two are grades; a model row is a candidate for grading, not a verdict.\n"]
+         "Only the first two are grades; a model row is a candidate for grading, not a verdict. "
+         "**J2** is the second judge's required call (`*` = it cleared its bar and sets the rank); **J3** is "
+         "Jev's, reported only: required m/p/f, then process·technical·AI grade initials (B/A/S/W).\n"]
 
     for bucket, heading, subtitle in LENS_LISTS:
         rows = lens_rows(con, bucket, cap=cap)
@@ -414,15 +442,15 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
             w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
             continue
         w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | Process | Technical | Required | "
-                 "Embed | Bull | J2 | Placed by | Pay | Location | Age |\n"
-                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                 "Embed | Bull | J2 | J3 | Placed by | Pay | Location | Age |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, gp, fp, gt, ft, src, age,
-             blocker, level_fit, rf, freq, embed_req, fit_bull, rank, why, j2_required, j2_moves) in rows:
+             blocker, level_fit, rf, freq, embed_req, fit_bull, rank, why, j2_required, j2_moves, *j3) in rows:
             w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
                      f"{level_fit or '—'} | {_lens_cell(gp, fp)} | {_lens_cell(gt, ft)} | {_lens_cell(rf, freq)} | "
                      f"{'~' + format(embed_req, '.2f') if embed_req is not None else '—'} | "
                      f"{'~' + format(fit_bull, '.2f') if fit_bull is not None else '—'} | "
-                     f"{_j2_cell(j2_required, j2_moves)} | "
+                     f"{_j2_cell(j2_required, j2_moves)} | {_j3_cell(*j3)} | "
                      f"{src} | {_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
 
@@ -434,14 +462,15 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
         w.append("_Nothing in this bucket is still actionable (undecided and not already applied to)._\n")
     else:
         w.append("| Posting ID | Rank | Company | Title | Why | Score | Band | Level | AI | Required | Embed | Bull | J2 | "
-                 "Placed by | Pay | Location | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                 "J3 | Placed by | Pay | Location | Age |\n"
+                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (pid, employer, title, url, loc, lo, hi, interval, score, band, ga, fa, src, age, blocker,
-             level_fit, rf, freq, embed_req, fit_bull, rank, why, j2_required, j2_moves) in ai_rows:
+             level_fit, rf, freq, embed_req, fit_bull, rank, why, j2_required, j2_moves, *j3) in ai_rows:
             w.append(f"| {pid} | {rank:.0f} | {_cell(employer)} | {_link(title, url)} | {_cell(why)} | {score} | {band} | "
                      f"{level_fit or '—'} | {_lens_cell(ga, fa)} | {_lens_cell(rf, freq)} | "
                      f"{'~' + format(embed_req, '.2f') if embed_req is not None else '—'} | "
                      f"{'~' + format(fit_bull, '.2f') if fit_bull is not None else '—'} | {_j2_cell(j2_required, j2_moves)} | "
-                     f"{src} | {_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
+                     f"{_j3_cell(*j3)} | {src} | {_pay(lo, hi, interval)} | {_cell(loc)[:34]} | {age}d |")
         w.append("")
     path.write_text("\n".join(w) + "\n", encoding="utf-8")
     return path
@@ -477,7 +506,8 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
         SELECT v.posting_id, v.employer, v.title, v.url, v.grade_process, v.grade_technical, v.grade_ai,
                v.n_lenses_good, v.any_bullseye, v.required_fit, v.required_unmet, v.level_fit,
                f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
-               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why
+               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why,
+               {', '.join('f.' + c for c in J3_COLUMNS)}
         FROM vw_selection v
         LEFT JOIN vw_lens_fit f USING (posting_id)
         WHERE {' AND '.join(where)}
@@ -526,9 +556,9 @@ def _model_base_where(include_decided: bool) -> list:
 
 
 def model_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS) -> list:
-    """Unjudged postings the models place in `tier` ('apply' or 'review'). Same 22-column shape as
-    `top_rows`, with the three lens MODEL PROBABILITIES in the grade slots and 'model <p>' as required_fit,
-    so the writer can merge the two lists on the one rank."""
+    """Unjudged postings the models place in `tier` ('apply' or 'review'). Same 28-column shape as
+    `top_rows` (22 columns, then J3_COLUMNS), with the three lens MODEL PROBABILITIES in the grade slots and
+    'model <p>' as required_fit, so the writer can merge the two lists on the one rank."""
     req = (f"coalesce(f.fit_required, 0) >= {MODEL_REQ_APPLY}" if tier == "apply" else
            f"coalesce(f.fit_required, 0) >= {MODEL_REQ_REVIEW} AND coalesce(f.fit_required, 0) < {MODEL_REQ_APPLY}")
     where = _model_base_where(include_decided) + [f"({_MODEL_LENS_SQL})", req]
@@ -540,7 +570,8 @@ def model_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVE
                FALSE AS any_bullseye, 'model ' || printf('%.2f', coalesce(f.fit_required, 0)) AS required_fit,
                NULL AS required_unmet, f.level_fit,
                f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
-               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why
+               f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why,
+               {', '.join('f.' + c for c in J3_COLUMNS)}
         FROM vw_lens_fit f JOIN postings p USING (posting_id)
         WHERE {' AND '.join(where)}
         ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC
@@ -704,7 +735,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
          f"{'included' if include_decided else 'hidden'}.\n",
          "_Rows marked `model` in the Required column were graded by the lens models, not the judge: the grade "
          "column shows each lens model's probability, and the Required cell shows the required-fit model's "
-         "probability (Apply at 0.60 or above, Review from 0.40)._\n"]
+         "probability (Apply at 0.60 or above, Review from 0.40). **J3** is Jev's call, reported only and "
+         "never ranked: required m/p/f, then process·technical·AI grade initials (B/A/S/W)._\n"]
 
     def gate_line(gates: dict, label: str) -> str:
         return (f"of {gates['total']} judged {label}-tier rows: "
@@ -713,12 +745,13 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
                 f"{gates['decided_or_in_tracker']} already decided/in tracker, "
                 f"{gates['no_screen_row']} judged with no screen row")
 
-    header = ("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | Level | Location | Pay | Age |\n"
-              "|---|---|---|---|---|---|---|---|---|---|---|")
+    header = ("| Rank | Company | Title | Why | Process / Technical / AI | Breadth | Required | J3 | Level | Location | "
+              "Pay | Age |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
 
     def row_line(row) -> str:
         (pid, employer, title, url, gp, gt, ga, n_good, bullseye, req_fit, req_unmet, level_fit, loc, lo, hi,
-         interval, score, first_seen, age, breadth, rank, why) = row
+         interval, score, first_seen, age, breadth, rank, why) = row[:22]
+        j3 = row[22:22 + len(J3_COLUMNS)]
         star = "★ " if n_good == 3 else ""
         if pid in model_ids:
             grades = f"{_prob(gp)} / {_prob(gt)} / {_prob(ga)}"
@@ -726,7 +759,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
         return (f"| {(rank or 0):.0f} | {star}{_cell(employer)} | {_link(title, url)} | "
                 f"{'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
-                f"{(breadth or 0):.2f} | {req_fit or '—'} | {level_fit or '—'} | {_loc_cell(loc, far.get(pid))} | "
+                f"{(breadth or 0):.2f} | {req_fit or '—'} | {_j3_cell(*j3) if j3 else '—'} | {level_fit or '—'} | "
+                f"{_loc_cell(loc, far.get(pid))} | "
                 f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
 
     w.append("## Apply\n")

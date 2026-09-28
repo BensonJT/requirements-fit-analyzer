@@ -1196,7 +1196,19 @@ prompt costs a run).
 
 **Recorded 9/24:** NFCU AI Business Transformation Analyst (`8de73fde12a47f4cbf06`) and Senior Program Manager, Learning & Talent Development (`272a8f13316dcb3f5e47`) marked `build --grade bullseye --basis seen`. The second title matched two postings (a sibling "Program Manager (Training and Talent Strategy)" req); `mark` by title needs exactly one match, so mark by id when NFCU posts siblings.
 
-## 33. Amendment — a typed-decision tier (Jev) between the free screen and the LLM judge (2026-09-26, user idea; PROPOSED, research first, nothing built)
+## 33. Amendment — a typed-decision tier (Jev) between the free screen and the LLM judge (2026-09-26, user idea; ACCEPTED 2026-09-28, nothing built yet)
+
+**ACCEPTED 2026-09-28. The implementation plan is `docs/JEV_PLAN.md`, and it supersedes the design details below wherever they differ.** User rulings:
+- Access is TypeSafe direct (Vercel AI Gateway as fallback).
+- Two requests per posting: a role request with JD only and no personal data, and a lines request with JD lines plus a fact sheet carrying ids.
+- The gate is any lens ≥ 0.70, plus the gold rows, with a 5M-token daily cap.
+- The evaluation bars in JEV_PLAN §4 are accepted.
+- The later authority order is human > Jev (bar passed) > judge2 (bar passed) > judge1 > models.
+- Level fit stays deterministic.
+- Evidence is a Choice over fact ids.
+- Required fit is derived by `judge2.derive_required_fit`, unchanged.
+
+The text below is the original proposal, kept for history. Progress lives in JEV_PLAN §8.
 
 **Status.** Idea only. Step 1 is the user's Perplexity research on Jev (TypeSafe AI, early access since 2026-09-15): what it is, how it is called, what it costs, what a "declared question" looks like, what it returns, and what the reviewers on YouTube found. Step 2 is a design session against this section. Nothing here is binding until the user rules on it after the research.
 
@@ -1214,7 +1226,7 @@ prompt costs a run).
 
 **Guards.** The state that goes to Jev is JD text plus background facts: the same personal-data boundary as the judge (the background sheet is what leaves the machine; the user reads it before any run). Prompt-injection in JD text can steer a decision model (VentureBeat, 9/2026), so the JD goes in as data with the questions declared separately, never concatenated into one instruction. Live calls stay behind the `JUDGE2_LIVE_OK`-style gate. Nothing in this section touches `judge2.py`; a new module `backend/finder/jev.py` with the same injected transport and no-network test discipline.
 
-**Reference docs (Jeff, 2026-09-26).** https://docs.typesafe.ai/introduction/quickstart · https://docs.typesafe.ai/introduction/coding-agents (how Jev is meant to be wired by a coding agent; read this before any design) · https://docs.typesafe.ai/models · https://docs.typesafe.ai/api
+**Reference docs (user, 2026-09-26).** https://docs.typesafe.ai/introduction/quickstart · https://docs.typesafe.ai/introduction/coding-agents (how Jev is meant to be wired by a coding agent; read this before any design) · https://docs.typesafe.ai/models · https://docs.typesafe.ai/api
 
 **Where the research lives.** The Perplexity prompt set for Jev (the model, the API, versions and pricing, reviews, prompt injection, calibration, alternatives, cost-tiered routing, drift control) is kept in the vault at `Professional/Areas/Articles/BACKLOG.md` item 7, by the user's rule that all research prompts live in the article backlog. Results will be saved in folders there and consumed by this section's design session.
 

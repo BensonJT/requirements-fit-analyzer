@@ -231,9 +231,12 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
 - [x] User: TypeSafe account and key in `.env` (§2), 2026-09-28 (Path A)
 - [x] User: go given for the smoke probe (the fact-sheet re-read is still due before the first gold run)
 - [x] Smoke probe run and fixture saved (2026-09-28); the pin works; probabilities vary about ±0.03 between identical calls
-- [ ] Setup: branch `jev-tier`, builder definitions, contract frozen
-- [ ] WP1 `jev.py` merged
-- [ ] WP2 schema v23 merged
+- [x] Setup (2026-09-28):
+  - integration branch `jev-tier` at `~/jobsearch_wt_jev`;
+  - frozen contract `backend/finder/jev_types.py` and `backend/finder/jev_questions.py`, commit `ca7c94a` on `jev-tier` (the question set is waiting for the user's review before the gold run);
+  - builder definitions `jev-builder` (medium) and `jev-builder-low` (low), using model `claude-opus-5-5`, in both `~/.claude/agents/` and `~/.claude-max/agents/`. A session loads agent definitions only at startup, so the 9/28 builders ran as general-purpose Opus agents at the session's effort level.
+- [ ] WP1 `jev.py`: IN FLIGHT on branch `jev-wp1` at `~/jobsearch_wt_jev_wp1`; merges into `jev-tier` after audit
+- [ ] WP2 schema v23: IN FLIGHT on branch `jev-wp2` at `~/jobsearch_wt_jev_wp2`; merges into `jev-tier` after audit
 - [ ] WP3 `jev_eval.py` merged
 - [ ] WP4 CLI / launch / pipeline / report merged
 - [ ] WP5 audit, suite, scan, DB backup, merge to main

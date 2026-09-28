@@ -237,8 +237,11 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
   - builder definitions `jev-builder` (medium) and `jev-builder-low` (low), using model `claude-opus-5-5`, in `~/.claude/agents/`. `~/.claude-max/agents` is a symlink to that directory, so both accounts (`cc-pro`, `cc-max`) see one copy. A session loads agent definitions only at startup, so the 9/28 builders ran as general-purpose Opus agents at the session's effort level.
 - [x] WP1 `jev.py`: merged into `jev-tier` 2026-09-28 (`c7f1290`); 51 tests; full suite 678 pass + 1 known; orchestrator audit clean. Tagged repeat runs store `prompt_version = <pv>:<tag>` plus `run_tag`, as judge2 does
 - [x] WP2 schema v23: merged into `jev-tier` 2026-09-28 (`7705bfe`). 17 tests, including the rank-unchanged test, which a mutation check proved works. Adds a `vw_jev_bar` view. An orchestrator end-to-end check passed (`jev.run` wrote through the real store, the review loaded back, a second run was fully cache-skipped).
-- [ ] WP3 `jev_eval.py`: IN FLIGHT on branch `jev-wp3` at `~/jobsearch_wt_jev_wp3`. It also adds `tests/test_jev_integration.py`.
-- [ ] WP4 CLI / launch / pipeline / report merged
+- [x] WP3 `jev_eval.py`: merged into `jev-tier` 2026-09-28 (`3177d71`). 28 tests, including an end-to-end integration test; the four Jev test files total 96 passing.
+  - Audit fixes: the lens and calibration bars read BLIND human grades only (§22.4 is binding), and all-basis numbers are reported only.
+  - A note records that the TF-IDF comparison is probably in-sample, which makes it conservative against Jev.
+  - For the user: the sentinel set gets pinned by `jev sentinel --init` in WP4.
+- [ ] WP4 CLI / launch / pipeline / report: IN FLIGHT on branch `jev-wp4` at `~/jobsearch_wt_jev_wp4`
 - [ ] WP5 audit, suite, scan, DB backup, merge to main
 - [ ] Live: dry run reviewed → gold run → eval → repeatability → injection set
 - [ ] Results in STATUS.md; user rules on stage 2

@@ -235,7 +235,7 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
   - integration branch `jev-tier` at `~/jobsearch_wt_jev`;
   - frozen contract `backend/finder/jev_types.py` and `backend/finder/jev_questions.py`, commit `ca7c94a` on `jev-tier` (the question set is waiting for the user's review before the gold run);
   - builder definitions `jev-builder` (medium) and `jev-builder-low` (low), using model `claude-opus-5-5`, in `~/.claude/agents/`. `~/.claude-max/agents` is a symlink to that directory, so both accounts (`cc-pro`, `cc-max`) see one copy. A session loads agent definitions only at startup, so the 9/28 builders ran as general-purpose Opus agents at the session's effort level.
-- [ ] WP1 `jev.py`: IN FLIGHT on branch `jev-wp1` at `~/jobsearch_wt_jev_wp1`; merges into `jev-tier` after audit
+- [x] WP1 `jev.py`: merged into `jev-tier` 2026-09-28 (`c7f1290`); 51 tests; full suite 678 pass + 1 known; orchestrator audit clean. Tagged repeat runs store `prompt_version = <pv>:<tag>` plus `run_tag`, as judge2 does
 - [ ] WP2 schema v23: IN FLIGHT on branch `jev-wp2` at `~/jobsearch_wt_jev_wp2`; merges into `jev-tier` after audit
 - [ ] WP3 `jev_eval.py` merged
 - [ ] WP4 CLI / launch / pipeline / report merged

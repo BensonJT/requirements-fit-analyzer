@@ -285,8 +285,15 @@ def test_lines_request_shape():
     assert state["lines"][3]["section"] == "responsibility"
     assert len(body["questions"]) == 3 * 5
     kid, vid, eid = Q.line_question_ids(3)
-    assert body["questions"][kid] == Q.kind_question(3)
-    assert body["questions"][vid] == Q.verdict_question(3, "responsibility")
+    text3 = state["lines"][3]["text"]
+    assert body["questions"][kid] == Q.kind_question(3, text3)
+    assert body["questions"][vid] == Q.verdict_question(3, "responsibility", text3)
+    # 2026-09-29: every line question quotes its own line (no array-index counting)
+    for i, line in enumerate(state["lines"]):
+        for qid in Q.line_question_ids(i):
+            assert f'L{i:02d}' in body["questions"][qid]["instructions"]
+            assert " ".join(line["text"].split()).replace('"', "'") in body["questions"][qid]["instructions"]
+        assert "lines[" not in body["questions"][Q.line_question_ids(i)[0]]["instructions"]
     assert list(body["questions"][eid]["criteria"]) == [f.id for f in facts] + ["none"]
 
 

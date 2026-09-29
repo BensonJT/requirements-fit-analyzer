@@ -160,3 +160,28 @@ def test_years_line_in_a_never_worked_domain_is_unmet_whatever_the_model_said(mo
     assert fit == "fails" and why.startswith("hard gate unmet")
     monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", [], raising=False)
     assert judge2.derive_required_fit([line])[0] == "meets"
+
+
+def test_or_list_with_a_worked_alternative_is_not_a_never_worked_domain_line(monkeypatch):
+    from backend import profile as P
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", ["data science", "compensation", "people project"], raising=False)
+    monkeypatch.setattr(P, "WORKED_ALTERNATIVE_TERMS", ["process improvement", "business analytics"], raising=False)
+    amgen = "In data science, business analytics, process improvement, engineering, or related fields"
+    grafana = ("Professional Experience: 5+ years of experience in incentive compensation, sales operations, "
+               "revenue operations, or a related systems/process improvement role.")
+    stripe = "7+ years of People project, program, or operations management experience"
+    assert not judge2.names_never_worked_domain(amgen)
+    assert not judge2.names_never_worked_domain(grafana)
+    assert judge2.names_never_worked_domain(stripe)            # no worked alternative offered
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", ["healthcare", "data science"], raising=False)
+    monkeypatch.setattr(P, "WORKED_ALTERNATIVE_TERMS", ["business transformation", "process improvement"], raising=False)
+    health = ("7+ years of experience in healthcare strategy, operations strategy, business transformation, "
+              "innovation, analytics, technology, or a related field.")
+    assert judge2.names_never_worked_domain(health)            # a modifier scopes the whole or-list (rule 1)
+    assert not judge2.names_never_worked_domain(amgen)
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", ["data science", "compensation", "people project"], raising=False)
+    monkeypatch.setattr(P, "WORKED_ALTERNATIVE_TERMS", ["process improvement", "business analytics"], raising=False)
+    line = {"section": "required", "kind": "years_function", "verdict": "met", "evidence": "x", "line": amgen}
+    assert judge2.derive_required_fit([line])[0] == "meets"
+    monkeypatch.setattr(P, "WORKED_ALTERNATIVE_TERMS", [], raising=False)
+    assert judge2.names_never_worked_domain(amgen)             # empty list = the old behaviour

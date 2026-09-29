@@ -390,6 +390,8 @@ CANDIDATE_TENURE_FIELDS = [
 DOMAIN_TENURE_TERMS = []   # industries where "N+ years in <industry>" is a gate worth flagging
 NEVER_BRIDGE_DOMAIN_TERMS = []   # domains/functions never worked in: a years line naming one is never bridged
                                  # to `meets` by transferable skills (judge2.derive_required_fit, 2026-09-29.2)
+WORKED_ALTERNATIVE_TERMS = []    # domains/functions you HAVE worked in: a years line offering one as an or-list
+                                 # alternative is not a never-worked-domain line (judge2.names_never_worked_domain)
 CORRIDOR_PLACES = []       # places where a Required-block plant term means a manufacturing role; "name, st" pins the state
 FAITH_COMP_FLOOR = None    # comp floor when FAITH_SIGNALS fire
 

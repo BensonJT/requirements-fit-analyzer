@@ -875,9 +875,24 @@ def names_never_worked_domain(line: str) -> bool:
     terms = [t for t in (getattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", None) or []) if t.strip()]
     if not terms or not line:
         return False
-    firm = " ".join(c for c in re.split(r"[,;—–(]|\bwith\b", line) if not _SOFT_CLAUSE.search(c))
-    alt = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
-    return bool(re.search(rf"(?<![A-Za-z])(?:{alt})(?![A-Za-z])", firm, re.I))
+    firm = ", ".join(c for c in re.split(r"[,;—–(]|\bwith\b", line) if not _SOFT_CLAUSE.search(c))
+
+    def _matches(term_list) -> list:
+        alt = "|".join(re.escape(t) for t in sorted(term_list, key=len, reverse=True))
+        return list(re.finditer(rf"(?<![A-Za-z])(?:{alt})(?![A-Za-z])", firm, re.I))
+
+    hits = _matches(terms)
+    if not hits:
+        return False
+    # 2026-09-29: a never-worked term used as a MODIFIER ("healthcare strategy, operations strategy, ...",
+    # "HR operations") scopes the whole or-list (user reading rule 1), so the line counts. A term that is a
+    # complete list item on its own ("in data science, business analytics, process improvement, ...",
+    # "incentive compensation, sales operations, ... or a related process improvement role") is one alternative:
+    # when the line also offers a domain the candidate HAS worked in, it is met through that alternative.
+    if any(re.match(r"\s+(?!(?:or|and)\b)[A-Za-z]", firm[m.end():]) for m in hits):
+        return True
+    worked = [t for t in (getattr(P, "WORKED_ALTERNATIVE_TERMS", None) or []) if t.strip()]
+    return not (worked and _matches(worked))
 
 
 def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:

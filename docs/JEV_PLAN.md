@@ -251,6 +251,7 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
   - `jev-tier` merged into main (`6670b28`), and the live DB migrated to v23 (`vw_lens_fit` still 87,543 rows);
   - not pushed: the user pushes.
 - [x] Splitter Layer 1 merged 2026-09-28 (`27f1d98`). The user asked for it after the dry run showed 5 gold postings with no lines. The gold no-Required rate went from 12.6% to 0.9%. See STATUS for the runbook, and Layer 2 (Jev classifying headings) waits until these results are in.
+- [x] 2026-09-28 night: the user launched `scripts/gold_redo.sh --detach`, which covers the Jev gold pass, repeats, injection, sentinel, the Gemma re-ask `:gold0928`, and every eval. **MORNING:** read the newest `logs/gold_redo_*/SUMMARY.log` (STATUS "MORNING PICKUP").
 - [ ] Live, NEXT (each step needs the user's go). The new Jev prompt_version is `307747dd4292` (about 2.56M tokens per gold pass). Re-run the Gemma gold set under the tag `split0928` first (STATUS runbook), so `jev eval --judge2-pv` compares like with like:
   1. The user reviews `backend/finder/jev_questions.py` and re-reads `judge2_background.local.md`.
   2. The user reads the payload: `.venv/bin/python finder.py jev run --eval-set --dry-run --show 1 | less`. Summary already measured: 111 gold postings, about 2.38M tokens (about $0.10), prompt_version `5d412c2c3445`.

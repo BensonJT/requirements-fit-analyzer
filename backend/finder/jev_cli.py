@@ -149,9 +149,10 @@ def new_run_id() -> str:
 
 
 def eval_cmd(con, a, db_path: Optional[str], *, log=print) -> dict:
-    """`jev eval`: every family with data under the CURRENT base prompt_version, then the text report."""
+    """`jev eval`: every family with data under the CURRENT base prompt_version (or `--prompt-version`, e.g. a
+    stored version whose reviews `jev rederive` re-scored with new derivation code), then the text report."""
     facts = load_facts(a.background_file)
-    pv = jev.prompt_version(facts, jev.endpoint_from_env())
+    pv = getattr(a, "prompt_version", None) or jev.prompt_version(facts, jev.endpoint_from_env())
     tags = tuple(t.strip() for t in (a.tags or "").split(",") if t.strip())
     # The sentinel is always evaluated on the PINNED set (the same postings `jev run --sentinel` sent).
     sentinel_set = sentinel_postings(con, sentinel_path(db_path), log=log) if a.sentinel_tag else None

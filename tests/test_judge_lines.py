@@ -101,3 +101,36 @@ def test_jev_cap_keeps_qualification_lines_first(monkeypatch):
     posting = SimpleNamespace(posting_id="p1", description_text=jd)
     required = [t for s, t in jev.select_lines(posting, log=lambda *a: None) if s == "required"]
     assert len(required) == 3 and required[-1] == "5+ years leading communities of practice at scale"
+
+
+# ---------------------------------------------------------------- 2026-09-29.2
+def test_bare_clearance_label_joins_the_requirement_after_it():
+    jd = ("Requirements:\n- 5+ years of experience in organizational design\nClearance Required\n\n:\n"
+          "Must be able to OBTAIN and MAINTAIN a Federal or DoD PUBLIC TRUST\n")
+    assert _required(jd) == ["5+ years of experience in organizational design",
+                             "Clearance Required: Must be able to OBTAIN and MAINTAIN a Federal or DoD PUBLIC TRUST"]
+
+
+def test_clearance_word_continuing_a_level_is_not_a_label():
+    jd = "Required:\n- Active Top-Secret/SCI\nSecurity Clearance required\n- 5+ years of program management experience\n"
+    assert _required(jd)[0] == "Active Top-Secret/SCI Security Clearance required"
+
+
+def test_logistics_lines_never_reach_a_judge_but_eligibility_does():
+    jd = ("Requirements:\n- Ability to work at client site in Washington, DC at least 3 days/week\n"
+          "- Must be based in the United States.\n- Ability to travel up to 20%.\n"
+          "- Must be a US Citizen with the ability to obtain a Secret clearance\n"
+          "- Experience leading globally distributed remote teams on process improvement\n")
+    assert _required(jd) == ["Must be a US Citizen with the ability to obtain a Secret clearance",
+                             "Experience leading globally distributed remote teams on process improvement"]
+
+
+def test_never_bridge_domain_blocks_the_bridge(monkeypatch):
+    from backend import profile as P
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", ["human resources", "HR"], raising=False)
+    line = {"section": "required", "kind": "years_function", "verdict": "adjacent",
+            "line": "10+ years of experience in HR operations or HR technology", "evidence": "x"}
+    fit, why = judge2.derive_required_fit([line])
+    assert fit == "partial" and why.startswith("years line names a domain not worked in")
+    ok = dict(line, line="10+ years of experience in business transformation, with HR experience preferred")
+    assert judge2.derive_required_fit([ok])[0] == "meets"

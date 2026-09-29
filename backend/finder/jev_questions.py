@@ -217,6 +217,16 @@ READING_RULES = [
     ("Finance: budget, forecast or cost-model work is met by budget-management work done outside a finance "
      "department. A line asking for time in a finance organization, FP&A, accounting, named finance systems, "
      "or a seat inside the CFO's organization is not met by that same work."),
+    ("Domain as function versus domain as setting ('Domains never worked in' in the facts): a line asking for years "
+     "or expertise INSIDE a never-worked domain (the domain is the job: '7+ years of People [= HR] program "
+     "management', 'strong understanding of HR processes and where they break down') is unmet, not adjacent, "
+     "however strong the skills. A line where the domain is only the SETTING for the candidate's own kind of work "
+     "(process redesign, data, transformation or program management applied to that domain) is rated on that "
+     "work: entering unfamiliar domains is the candidate's pattern (the Enterprise Access Management entry). An "
+     "environment qualifier ('at high-growth tech companies', 'in consulting') is not a domain: comparable "
+     "transformation work inside a large enterprise is adjacent."),
+    ("A degree line that allows 'or equivalent experience' or 'equivalent years may substitute' is met when the "
+     "facts show those years, whatever the degree subject."),
 ]
 
 KIND_CRITERIA = {

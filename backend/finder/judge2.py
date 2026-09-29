@@ -46,6 +46,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from backend import profile as P
+
 from . import requirements
 from . import rules
 
@@ -178,6 +180,18 @@ Reading rules, for how to rate ONE line:
 8. A posting with no qualifications section at all: its responsibilities ARE the requirements. Still mark
    them "responsibility" (not "required") -- the overall call is derived from the responsibility ratings
    alone, outside this prompt.
+9. Domain as FUNCTION versus domain as SETTING (see the background's "Domains never worked in"). Ask what the
+   line asks for. If it asks for years or expertise INSIDE a domain the candidate never worked in -- the
+   domain is the job ("7+ years of People [= HR] project, program, or operations management"; "strong
+   understanding of HR processes and where they break down") -- rate it "unmet", not "adjacent", however
+   strong the surrounding skills. If the domain is only the SETTING where the candidate's own kind of work is
+   done (process redesign, data and analytics, transformation, program management applied to that domain's
+   processes), rate the line on that work: entering an unfamiliar domain and fixing its process and data is
+   the candidate's pattern (see the Enterprise Access Management entry). An ENVIRONMENT qualifier ("at
+   high-growth tech companies", "in consulting", "at a scaling company") is not a domain: comparable
+   transformation work inside a large enterprise is "adjacent".
+10. A degree line that allows "or equivalent experience" or "equivalent years ... may substitute" is "met"
+   when the background shows those years, whatever the degree subject.
 
 Other rules for rating a single line:
 - TOOLS. A line naming tools or platforms with "such as", "e.g.", "or similar", "or equivalent", or a list
@@ -277,7 +291,8 @@ def section_lines(jd_text: str, section: str) -> list:
     'required' GROUP is Required + Preferred together (the person-facing group), and labelling a Preferred line
     as Required here is exactly the false `fails` this judge exists to avoid."""
     return [u.source or u.text for u in requirements.split_requirements(jd_text)
-            if u.section == section and not judge_noise(u.source or u.text)]
+            if u.section == section and not judge_noise(u.source or u.text)
+            and not judge_logistics(u.source or u.text)]
 
 
 # 2026-09-29: lines a judge must never rate -- pay, benefits, EEO / accommodation text, recruiting-scam notices,
@@ -294,7 +309,31 @@ JUDGE_NOISE = re.compile(
     r"|protected (?:class|characteristic|veteran)\w*|talent advisors|scams?|money or credit card|job postings are posted"
     r"|virtual assistant|click here|apply now|careers?\.[a-z]+\.com|work personas?|registered entity|excluded states"
     r"|remote eligible|good faith estimate|pay philosoph\w*|join us|great minds|world.s largest|we are proud"
-    r"|age-identifying|redact)\b", re.I)
+    r"|age-identifying|redact"
+    # 2026-09-29.2: benefit, eligibility-notice and marketing lines still reaching the judges on the gold re-run
+    r"|stock-based|long-term incentives?|incentive compensation|sponsorship for this role|application (?:window|deadline)"
+    r"|tuition reimbursement|wellness|savings accounts?|vehicle (?:purchase|lease)|what you can expect of us"
+    r"|highlights include|embrace all perspectives|respect for all|business partnering groups|considers several factors"
+    r"|position is classified as|role type defined below|market leading businesses|push the boundaries"
+    r"|flexible work models?|vehicle program|team member (?:vehicle|lease|discount)|community outreach"
+    r"|corporate sponsored)\b", re.I)
+
+
+# 2026-09-29.2: a line whose subject is WHERE or WHEN the work happens (on-site days, travel, residence, schedule)
+# is screened elsewhere in the pipeline, never by a judge rating qualifications. A clearance, citizenship or work-
+# authorization line is a qualification and is kept; so is a work line that merely mentions remote teams.
+JUDGE_LOGISTICS = re.compile(
+    r"\b(?:based in|reside\w*|residen\w*|live within|located in|on-?site|in[- ]office|in person|hybrid|remote"
+    r"|days? (?:a|per|/) ?week|\d+\s*days/week|travel\w*|relocat\w*|commut\w*|work schedule|return to office"
+    r"|work location)\b", re.I)
+_KEEP_ELIGIBILITY = re.compile(r"clearance|public trust|secret|polygraph|suitability|citizen|authori[sz]\w* to work"
+                               r"|work authori[sz]ation|visa", re.I)
+
+
+def judge_logistics(line: str) -> bool:
+    line = line or ""
+    return bool(JUDGE_LOGISTICS.search(line) and not requirements.WORK_RESCUE.search(line)
+                and not _KEEP_ELIGIBILITY.search(line))
 
 
 def judge_noise(line: str) -> bool:
@@ -714,6 +753,10 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
             # §30.3: only a years_function hard gate bridges -- a title tool (or a clearance/licence gate fed
             # in as adjacent uncoerced) never does, regardless of every other hard gate's verdict.
             return "partial", f"hard gate adjacent, not bridgeable: {_get(candidate, 'line')}"
+        if names_never_worked_domain(_get(candidate, "line")):
+            # 2026-09-29.2 (user ruling): a years line in a domain the candidate never worked in is not bridged by
+            # transferable skills -- the domain is the gap, whatever the skills.
+            return "partial", f"years line names a domain not worked in: {_get(candidate, 'line')}"
         bridge_line = candidate
         others_met = all(_effective_verdict(l) == "met" for l in hard if l is not bridge_line)
         if not others_met:
@@ -778,6 +821,21 @@ def shape_fit(lines) -> tuple:
     if score >= SHAPE_FITS_FROM:
         return "fits", score, counts
     return "split", score, counts
+
+
+_SOFT_CLAUSE = re.compile(r"\b(?:preferred|preferably|ideally|a plus|nice to have|bonus)\b", re.I)
+
+
+def names_never_worked_domain(line: str) -> bool:
+    """True when `line` names a domain in `profile.NEVER_BRIDGE_DOMAIN_TERMS` (set in the gitignored
+    profile_local.py; empty = never). Clauses marked preferred / ideally / a plus are ignored: a domain named
+    only as a nice-to-have is not the line's qualifier."""
+    terms = [t for t in (getattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", None) or []) if t.strip()]
+    if not terms or not line:
+        return False
+    firm = " ".join(c for c in re.split(r"[,;—–(]|\bwith\b", line) if not _SOFT_CLAUSE.search(c))
+    alt = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+    return bool(re.search(rf"(?<![A-Za-z])(?:{alt})(?![A-Za-z])", firm, re.I))
 
 
 def derive_required_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:

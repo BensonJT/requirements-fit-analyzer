@@ -18,7 +18,10 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-09-29.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-09-29.2"   # bump when splitting or classing changes (part of the requirement cache key)
+                                    # 2026-09-29.2: a bare clearance label ("Clearance Required", "Security
+                                    # Clearance:") is joined to the requirement that follows it; benefit sections
+                                    # ("What you can expect of us", "A few highlights include") drop
                                     # 2026-09-29.1: units carry their source text (judges read it, years intact);
                                     # YEARS_PHRASE adjectives end on a word boundary ("direct" no longer eats
                                     # "directly"); short qualification lines are content, not subheadings; a line
@@ -55,7 +58,9 @@ DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits
                  r"|we offer|what you.ll get|what you get|in it for you|why you.ll love|why work (?:here|with|for)"
                  # 2026-09-29.1: applicant notices that followed the last qualification heading
                  r"|fair chance|usage policy|third.party applications|candidate privacy|e-verify|know your rights"
-                 r"|recruitment fraud|notice to (?:applicants|candidates|recruiters|agencies)")
+                 r"|recruitment fraud|notice to (?:applicants|candidates|recruiters|agencies)"
+                 # 2026-09-29.2: benefit sections seen in gold postings (Amgen, Toyota)
+                 r"|what you can expect|highlights include|a few highlights")
 # A degree or education-level line: with a years line, the shape of a qualification wherever it sits (the
 # no-Required rescue in split_requirements).
 DEGREE_LINE = re.compile(r"\b(?:bachelor|master|associate|doctorate|ph\.?\s?d|mba)[’']?s?\b[^.]{0,40}\bdegree\b"
@@ -111,12 +116,41 @@ class Requirement:
         return hashlib.sha1(self.text.lower().encode("utf-8")).hexdigest()[:16]
 
 
+# 2026-09-29.2: a bare clearance label on its own line. In 4,408 stored postings it is almost always followed by the
+# requirement itself ("Clearance:" / "Active TS/SCI ..."), so it is joined to that line rather than kept alone (a
+# lone label read as a requirement) or skipped (the requirement read without its label).
+CLEARANCE_LABEL = re.compile(r"(?:[-*•·]\s*)?(?:security\s+)?clearances?\s*(?:level\s*)?"
+                             r"(?:required|requirements?|needed)?\s*:?", re.I)
+_LEVEL_END = re.compile(r"\b(?:secret|sci|ts|top[- ]secret|public trust|suitability)\W*$", re.I)
+
+
 def rejoin_lines(text: str) -> list:
     """Lines with sentence fragments glued back: a line starting lowercase / with punctuation, or following a
     line that ends on a joining word, continues the previous line."""
     out = []
+    label = None
     for raw in text.splitlines():
         line = raw.strip()
+        if label is not None:
+            if not line or line == ":":
+                continue
+            if _heading_label(line):
+                out.append(label)             # nothing followed the label; it stays a lone (skipped) label
+                label = None
+            else:
+                out.append(f"{label}: {line.lstrip(': ')}")
+                label = None
+                continue
+        if CLEARANCE_LABEL.fullmatch(line):
+            if out and out[-1] and _LEVEL_END.search(out[-1]):
+                out[-1] = out[-1] + " " + line    # "Top-Secret/SCI" / "Security Clearance required"
+            elif line[:1].isupper() or _BULLET.match(line):
+                label = line.rstrip(": ").strip()
+            elif out and out[-1]:
+                out[-1] = out[-1] + " " + line    # "Active Secret" / "clearance"
+            else:
+                out.append(line)
+            continue
         if not line:
             out.append("")
             continue
@@ -141,6 +175,8 @@ def rejoin_lines(text: str) -> list:
             out[-1] = out[-1] + sep + line
         else:
             out.append(line)
+    if label is not None:
+        out.append(label)
     return out
 
 
@@ -345,9 +381,11 @@ def split_requirements(text: str, max_units: int = 0) -> list:
             continue
         bulleted = bool(_BULLET.match(line)) or bool(QUALIFICATION_TERM.search(line))   # an itemized bullet (or a
         # named qualification) is a deliberate claim, even a short one
-        line_section = section if section == "drop" else (inline_section(line) or section)
         for piece in _pieces(_BULLET.sub("", line).strip()):
             piece = piece.strip()
+            # 2026-09-29.2: a stated status ("..., preferred", "Must ...") belongs to its own sentence, not to every
+            # sentence the rejoined line carries
+            line_section = inline_section(piece) or section
             if not (10 <= len(piece) <= MAX_UNIT + 50):   # short level lines count as level; short work drops below
                 continue
             klass, unit_text = classify(piece)

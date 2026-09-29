@@ -658,7 +658,7 @@ def cmd_retrain(con, a):
 def cmd_judge2(con, a):
     """The LLM second judge (sprint plan §25/§29, backend/finder/judge2.py). `run` refuses to make a live
     call without JUDGE2_LIVE_OK=1 or --i-have-approval; `--dry-run` never needs either."""
-    from backend.finder import judge2
+    from backend.finder import jev_cli, judge2
     if a.action == "status":
         judge2.status(con, background=a.background, background_path=a.background_file)
         return
@@ -679,7 +679,8 @@ def cmd_judge2(con, a):
         result = judge2.run(con, top_n=a.top, dry_run=a.dry_run, force=a.force, show=a.show,
                             background=a.background, background_path=a.background_file,
                             only_blind=a.eval_set, i_have_approval=a.i_have_approval,
-                            rerun=a.rerun, run_tag=a.run_tag)
+                            rerun=a.rerun, run_tag=a.run_tag,
+                            posting_ids=jev_cli.posting_ids_arg(a))
     except RuntimeError as exc:
         print(exc)
         sys.exit(1)
@@ -939,6 +940,9 @@ def main():
     s.add_argument("--run-tag", help="run: joins the storage/cache key (base_prompt_version:TAG) so a repeat "
                                      "run is stored separately for `judge2 eval --compare`; default: none, "
                                      "production caching unchanged")
+    s.add_argument("--posting", action="append",
+                   help="run: only this posting id (repeatable); narrows the chosen population")
+    s.add_argument("--postings-file", help="run: only the posting ids in this file (one per line)")
     s.add_argument("--background", choices=["public", "file"], default="public")
     s.add_argument("--background-file", help="path for --background file (default $JUDGE2_BACKGROUND_FILE)")
     s.add_argument("--i-have-approval", action="store_true",
@@ -962,6 +966,9 @@ def main():
                      help="run: the synthetic adversarial set (jev_eval.injection_postings), run tag 'inj'")
     pop.add_argument("--sentinel", action="store_true",
                      help="run: the pinned sentinel set (see `jev sentinel --init`); needs --run-tag")
+    s.add_argument("--posting", action="append",
+                   help="run: only this posting id (repeatable); narrows the chosen population")
+    s.add_argument("--postings-file", help="run: only the posting ids in this file (one per line)")
     s.add_argument("--limit", type=int, help="run --gated: at most N postings")
     s.add_argument("--dry-run", action="store_true", help="run: print request bodies and an estimate, call nothing")
     s.add_argument("--show", type=int, default=1, help="run --dry-run: how many postings' requests to print")

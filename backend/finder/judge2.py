@@ -276,7 +276,29 @@ def section_lines(jd_text: str, section: str) -> list:
     `requirements.split_requirements`, never re-implemented). Reads `section`, NOT `group`: requirements.py's
     'required' GROUP is Required + Preferred together (the person-facing group), and labelling a Preferred line
     as Required here is exactly the false `fails` this judge exists to avoid."""
-    return [u.text for u in requirements.split_requirements(jd_text) if u.section == section]
+    return [u.source or u.text for u in requirements.split_requirements(jd_text)
+            if u.section == section and not judge_noise(u.source or u.text)]
+
+
+# 2026-09-29: lines a judge must never rate -- pay, benefits, EEO / accommodation text, recruiting-scam notices,
+# employer marketing and remote-eligibility notices that survive the splitter's drop headings. A clearance,
+# citizenship or on-site line is a real requirement and is NOT matched here.
+JUDGE_NOISE = re.compile(
+    r"\$\s?\d|^\W*at [A-Z][\w&.'’ -]{1,40}, we\b"
+    r"|\b(?:salary|salaries|pay ranges?|pay structure|base pay|hourly rate|compensation package|total rewards"
+    r"|bonus (?:program|plan|eligib\w*)|(?:annual|discretionary) bonus|incentive plan|stock (?:options?|awards?|units?|purchase)"
+    r"|rsus?|equity (?:awards?|grants?|compensation)|401\(?k|retirement savings|health (?:and|&) welfare"
+    r"|time.off|paid (?:time|leave|holidays)|(?:we offer|our|industry.leading|details of)\b[^.]{0,60}\bbenefits"
+    r"|benefits (?:package|plan|program|include|will apply)|equal (?:employment )?opportunit\w*|eeo|affirmative action"
+    r"|accommodations?|individuals with disabilities|disability status|veteran status|qualified applicants"
+    r"|protected (?:class|characteristic|veteran)\w*|talent advisors|scams?|money or credit card|job postings are posted"
+    r"|virtual assistant|click here|apply now|careers?\.[a-z]+\.com|work personas?|registered entity|excluded states"
+    r"|remote eligible|good faith estimate|pay philosoph\w*|join us|great minds|world.s largest|we are proud"
+    r"|age-identifying|redact)\b", re.I)
+
+
+def judge_noise(line: str) -> bool:
+    return bool(JUDGE_NOISE.search(line or ""))
 
 
 def required_lines(jd_text: str) -> list:
@@ -1006,7 +1028,8 @@ def rederive(con, *, log=print) -> dict:
 def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, show: int = 1,
        background: str = "public", background_path: Optional[str] = None, jd_cap: int = DEFAULT_JD_CAP,
        only_blind: bool = False, i_have_approval: bool = False, transport=None, sleep_fn=None,
-       rpm: Optional[int] = None, rerun: bool = False, run_tag: Optional[str] = None, log=print) -> dict:
+       rpm: Optional[int] = None, rerun: bool = False, run_tag: Optional[str] = None,
+       posting_ids: Optional[list] = None, log=print) -> dict:
     """Builds payloads for the population (top N by rank, or every blind human-graded row when
     `only_blind=True`) and, unless `dry_run`, sends them to the live API through the INJECTED `transport`.
 
@@ -1031,6 +1054,9 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
     rows = con.execute(sql).fetchall()
     if not only_blind:
         rows = rows[:top_n]
+    if posting_ids:   # 2026-09-29: a targeted re-run (e.g. the rows where the judges disagree with gold)
+        wanted = set(posting_ids)
+        rows = [r for r in rows if r[0] in wanted]
     background_text = get_background(background, path=background_path)
     base_pv = prompt_version(background_text)
     pv = f"{base_pv}:{run_tag}" if run_tag else base_pv

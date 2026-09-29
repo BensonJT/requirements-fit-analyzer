@@ -11,8 +11,9 @@ Five formats, by header shape (see `detect_format`):
       report_feedback column, `basis` carried per row.
   F2  a narrow spot-check sheet: posting_id, employer, title, url, human_grade, level_fit, note.
   F3  the blind-sheet format `blind_sheet.import_sheet` reads: F2 plus location, required_fit, required_unmet.
-  F4  a single-lens (Applied-AI) grade sheet: human_grade_ai, not an overall human_grade -- written into the
-      `human_lens_grades` table (v19), lens='ai', through the SAME seed/merge/basis-conflict precedence
+  F4  a lens grade sheet: any of human_grade_process / human_grade_technical / human_grade_ai (2026-09-29: was
+      AI only), not an overall human_grade -- written into the
+      `human_lens_grades` table (v19), one row per filled lens column, through the SAME seed/merge/basis-conflict precedence
       `_parse_f2_f3` uses for the overall report_feedback sheet. NEVER writes to or alters `llm_labels`: the
       overall grade, required_fit, and the process/technical lenses are untouched -- see `ingest_f4`.
   F5  a derived train/frozen split (posting_id/half/baseline_judge_grade) -- never a grading sheet; refused.
@@ -40,15 +41,18 @@ PROPOSED_MARKER = "proposal_confidence"
 
 F5_MARKERS = {"half", "baseline_judge_grade"}
 F1_MARKERS = {"description_hash", "basis", "assessor", "confirmed_by_user", "verdict"}
-F4_MARKERS = {"human_grade_ai", "posting_status"}
+F4_MARKER = "posting_status"
+# lens -> column. 2026-09-29: process and technical join ai (the lens-derivation sheet, where the user's overall
+# grade is credited to a posting's clear primary lens, and a `wrong` to all three).
+F4_LENS_COLUMNS = {"process": "human_grade_process", "technical": "human_grade_technical", "ai": "human_grade_ai"}
 F3_MARKERS = {"required_fit", "required_unmet"}
 F2_REQUIRED = {"posting_id", "employer", "title", "url", "human_grade", "level_fit"}
 
 F2_KNOWN = F2_REQUIRED | {"row", "note"}
 F3_KNOWN = {"posting_id", "employer", "title", "location", "url", "human_grade", "required_fit",
             "required_unmet", "level_fit", "note"}
-F4_KNOWN = {"row", "posting_id", "employer", "title", "url", "posting_status", "human_grade_ai",
-            "level_fit", "confidence", "note"}
+F4_KNOWN = {"row", "posting_id", "employer", "title", "url", "posting_status", "level_fit", "confidence",
+            "note"} | set(F4_LENS_COLUMNS.values())
 F1_KNOWN = {_h.strip().lower() for _h in feedback.FEEDBACK_CSV_COLUMNS} | {"row"}
 
 
@@ -84,7 +88,7 @@ def detect_format(fieldnames) -> str:
         return "f5"
     if F1_MARKERS <= cols:
         return "f1"
-    if F4_MARKERS <= cols:
+    if F4_MARKER in cols and cols & set(F4_LENS_COLUMNS.values()):
         return "f4"
     if F3_MARKERS <= cols:
         return "f3"
@@ -300,7 +304,6 @@ def _parse_f2_f3(con, fmt, fr: FileReport, rows, basis, accumulator: dict) -> No
         fr.would_write += 1
 
 
-F4_LENS = "ai"  # the only lens F4's own header (human_grade_ai) can express
 
 HUMAN_LENS_GRADE_INSERT_SQL = """
     INSERT OR REPLACE INTO human_lens_grades (
@@ -346,9 +349,10 @@ def _merge_human_lens(existing, incoming):
 
 
 def ingest_f4(con, fr: FileReport, rows, basis, source_file, accumulator: dict) -> None:
-    """Parses, validates and folds the single-lens (Applied-AI) sheet's rows into the run-wide `accumulator`
-    (mutated in place, keyed by (posting_id, description_hash, lens)) as `human_lens_grades` rows (v19),
-    lens='ai' -- the SAME seed-from-DB / merge / basis-conflict precedence `_parse_f2_f3` gives the overall
+    """Parses, validates and folds a lens grade sheet's rows into the run-wide `accumulator` (mutated in place,
+    keyed by (posting_id, description_hash, lens)) as `human_lens_grades` rows (v19), one per filled
+    human_grade_<lens> column (2026-09-29: process and technical join ai; a row with every lens blank is a
+    skipped blank grade, one invalid lens grade rejects the whole row) -- the SAME seed-from-DB / merge / basis-conflict precedence `_parse_f2_f3` gives the overall
     report_feedback sheet, applied to the new table instead. NEVER writes to or alters `llm_labels`: the
     posting's overall grade, required_fit, and the process/technical lenses are untouched by this -- see the
     module header and store.py's `human_lens_grades` table comment for why this needed its own table rather
@@ -364,14 +368,6 @@ def ingest_f4(con, fr: FileReport, rows, basis, source_file, accumulator: dict) 
             fr.skipped_no_posting += 1
             continue
 
-        grade = _clean(raw.get("human_grade_ai"))
-        if grade is None:
-            fr.skipped_blank_grade += 1
-            continue
-        if grade not in rubric.GRADES:
-            fr.rejected.append({"line": line, "posting_id": pid, "field": "human_grade_ai", "value": grade})
-            continue
-
         level_fit, level_alias, level_invalid = _normalize_enum(raw.get("level_fit"), LEVEL_FIT_ALIASES,
                                                                  feedback.LEVEL_ORDER)
         if level_invalid:
@@ -382,18 +378,30 @@ def ingest_f4(con, fr: FileReport, rows, basis, source_file, accumulator: dict) 
             fr.aliases_applied.append({"line": line, "posting_id": pid, "field": "level_fit",
                                        "from": level_alias, "to": level_fit})
 
-        row = {"posting_id": pid, "description_hash": description_hash, "lens": F4_LENS, "grade": grade,
-               "level_fit": level_fit, "note": _clean(raw.get("note")), "basis": basis,
-               "source_file": source_file}
-        key = (pid, description_hash, F4_LENS)
-        if key not in accumulator:
-            accumulator[key] = _seed_human_lens_from_db(con, pid, description_hash, F4_LENS)
-        merged, conflict = _merge_human_lens(accumulator[key], row)
-        accumulator[key] = merged
-        if conflict:
-            fr.conflicts.append({"line": line, "posting_id": pid,
-                                 "existing": merged.get("basis"), "incoming": basis})
-        fr.would_write += 1
+        graded = [(lens, col, _clean(raw.get(col))) for lens, col in F4_LENS_COLUMNS.items()]
+        graded = [(lens, col, grade) for lens, col, grade in graded if grade is not None]
+        if not graded:
+            fr.skipped_blank_grade += 1
+            continue
+        bad = [(col, grade) for _lens, col, grade in graded if grade not in rubric.GRADES]
+        if bad:
+            for col, grade in bad:
+                fr.rejected.append({"line": line, "posting_id": pid, "field": col, "value": grade})
+            continue
+
+        for lens, _col, grade in graded:
+            row = {"posting_id": pid, "description_hash": description_hash, "lens": lens, "grade": grade,
+                   "level_fit": level_fit, "note": _clean(raw.get("note")), "basis": basis,
+                   "source_file": source_file}
+            key = (pid, description_hash, lens)
+            if key not in accumulator:
+                accumulator[key] = _seed_human_lens_from_db(con, pid, description_hash, lens)
+            merged, conflict = _merge_human_lens(accumulator[key], row)
+            accumulator[key] = merged
+            if conflict:
+                fr.conflicts.append({"line": line, "posting_id": pid, "lens": lens,
+                                     "existing": merged.get("basis"), "incoming": basis})
+            fr.would_write += 1
 
 
 def _write_human_lens_grades(con, accumulator: dict) -> int:

@@ -536,3 +536,37 @@ def test_prior_golden_csv_grade_makes_a_later_blind_sheet_row_seen(tmp_path):
     got = dict(con.execute("SELECT posting_id, basis FROM report_feedback WHERE assessor = 'user'").fetchall())
     assert got == {PID_A: "seen", PID_B: "blind"}
     assert [r[0] for r in con.execute("SELECT posting_id FROM vw_report_feedback_blind").fetchall()] == [PID_B]
+
+
+# ---------------------------------------------------------------- F4, all three lenses (2026-09-29)
+
+def test_f4_three_lens_sheet_writes_one_row_per_filled_lens(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "Lens_Derivation.csv"
+    _write(path, ["posting_id", "employer", "title", "url", "posting_status", "overall_grade", "tfidf_process",
+                  "human_grade_process", "human_grade_technical", "human_grade_ai", "note"],
+           [(PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "wrong", "0.20", "wrong", "wrong", "", "")])
+    result = gold_ingest.ingest(con, [(path, "blind")], log=_quiet)
+    assert result["files"][0]["format"] == "f4"
+    assert result["files"][0]["would_write"] == 2 and result["lens_grades_written"] == 2
+    rows = con.execute("SELECT lens, grade, basis FROM human_lens_grades ORDER BY lens").fetchall()
+    assert rows == [("process", "wrong", "blind"), ("technical", "wrong", "blind")]
+    assert con.execute("SELECT count(*) FROM llm_labels").fetchone()[0] == 0
+    con.close()
+
+
+def test_f4_row_with_every_lens_blank_is_skipped_and_a_bad_lens_rejects_the_row(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _posting(con, PID_A)
+    path = tmp_path / "Lens_Derivation.csv"
+    cols = ["posting_id", "employer", "title", "url", "posting_status", "human_grade_process",
+            "human_grade_technical", "human_grade_ai", "note"]
+    _write(path, cols, [(PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "", "", "", "blended")])
+    result = gold_ingest.ingest(con, [(path, "blind")], log=_quiet)
+    assert result["files"][0]["skipped_blank_grade"] == 1 and result["lens_grades_written"] == 0
+    _write(path, cols, [(PID_A, "Acme", "Role", f"https://x/{PID_A}", "active", "bullseye", "great", "", "")])
+    result = gold_ingest.ingest(con, [(path, "blind")], log=_quiet)
+    assert result["files"][0]["rejected"][0]["field"] == "human_grade_technical"
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+    con.close()

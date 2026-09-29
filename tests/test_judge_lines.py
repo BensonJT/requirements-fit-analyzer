@@ -131,6 +131,32 @@ def test_never_bridge_domain_blocks_the_bridge(monkeypatch):
     line = {"section": "required", "kind": "years_function", "verdict": "adjacent",
             "line": "10+ years of experience in HR operations or HR technology", "evidence": "x"}
     fit, why = judge2.derive_required_fit([line])
-    assert fit == "partial" and why.startswith("years line names a domain not worked in")
+    # 2026-09-29: stronger than a blocked bridge -- a years line inside a never-worked domain is unmet
+    assert fit == "fails" and why.startswith("hard gate unmet")
     ok = dict(line, line="10+ years of experience in business transformation, with HR experience preferred")
     assert judge2.derive_required_fit([ok])[0] == "meets"
+
+
+def test_great_fit_heading_opens_required():
+    jd = ("What You'll Be Doing:\n- Run the comp process\nWhat Makes You a Great Fit:\n"
+          "- Professional Experience: 5+ years of experience in incentive compensation or sales operations\n")
+    assert _required(jd) == ["Professional Experience: 5+ years of experience in incentive compensation or sales operations"]
+
+
+def test_kind_guards_and_years_lines():
+    k = judge2._effective_kind
+    assert k({"kind": "clearance", "line": "Familiarity with staffing and operational planning processes."}) == "skill"
+    assert k({"kind": "licence", "line": "Working knowledge of generative AI"}) == "skill"
+    assert k({"kind": "clearance", "line": "Active TS/SCI with Polygraph"}) == "clearance"
+    assert k({"kind": "skill", "line": "7+ years of program management experience"}) == "years_function"
+
+
+def test_years_line_in_a_never_worked_domain_is_unmet_whatever_the_model_said(monkeypatch):
+    from backend import profile as P
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", ["people project"], raising=False)
+    line = {"section": "required", "kind": "skill", "verdict": "met", "evidence": "x",
+            "line": "7+ years of People project, program, or operations management experience"}
+    fit, why = judge2.derive_required_fit([line])
+    assert fit == "fails" and why.startswith("hard gate unmet")
+    monkeypatch.setattr(P, "NEVER_BRIDGE_DOMAIN_TERMS", [], raising=False)
+    assert judge2.derive_required_fit([line])[0] == "meets"

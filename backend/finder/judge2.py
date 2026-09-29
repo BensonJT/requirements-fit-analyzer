@@ -311,12 +311,13 @@ JUDGE_NOISE = re.compile(
     r"|remote eligible|good faith estimate|pay philosoph\w*|join us|great minds|world.s largest|we are proud"
     r"|age-identifying|redact"
     # 2026-09-29.2: benefit, eligibility-notice and marketing lines still reaching the judges on the gold re-run
-    r"|stock-based|long-term incentives?|incentive compensation|sponsorship for this role|application (?:window|deadline)"
+    r"|stock-based|long-term incentives?|incentive compensation programs?|sponsorship for this role|application (?:window|deadline)"
     r"|tuition reimbursement|wellness|savings accounts?|vehicle (?:purchase|lease)|what you can expect of us"
     r"|highlights include|embrace all perspectives|respect for all|business partnering groups|considers several factors"
     r"|position is classified as|role type defined below|market leading businesses|push the boundaries"
     r"|flexible work models?|vehicle program|team member (?:vehicle|lease|discount)|community outreach"
-    r"|corporate sponsored)\b", re.I)
+    r"|corporate sponsored|puerto rico|as an organization dedicated|as we work to develop|brings the strength"
+    r"|include but are not limited to|penalized for)\b|\bredact\w*", re.I)
 
 
 # 2026-09-29.2: a line whose subject is WHERE or WHEN the work happens (on-site days, travel, residence, schedule)
@@ -637,6 +638,40 @@ def _get(obj, key, default=None):
     return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
 
+def _line_text(line_obj) -> str:
+    return _get(line_obj, "line") or _get(line_obj, "line_text") or ""
+
+
+# 2026-09-29: the model's `kind` is not trusted on its own for the two automatic gates. A line only acts as a
+# `clearance` gate when it uses clearance vocabulary, and only as a `licence` gate when it names a credential;
+# otherwise it is scored as a `skill` ("Familiarity with staffing and operational planning processes" was
+# typed clearance; "Working knowledge of generative AI" was typed licence).
+_CLEARANCE_WORDS = re.compile(r"clearance|secret|ts/sci|\bsci\b|public trust|polygraph|suitability|citizen"
+                              r"|background (?:investigation|check)|adjudicat|security screening|eligib", re.I)
+_LICENCE_WORDS = re.compile(r"certif|licen[cs]|credential|registered|registration|accredit|\bcpa\b|\bpmp\b"
+                            r"|\bcfa\b|\bcissp\b|black belt|green belt|scrum master|\bpsm\b|\bcsm\b|\bitil\b|board", re.I)
+
+
+def _effective_kind(line_obj) -> str:
+    kind = _get(line_obj, "kind")
+    text = _line_text(line_obj)
+    # a required line stating a years count is a years line whatever the model typed it ("7+ years of People
+    # project, program, or operations management" came back as `skill`)
+    if kind in ("skill", "tool") and requirements.YEARS_PHRASE.search(text) and re.search(r"\b(?:years?|yrs?)\b", text, re.I):
+        return "years_function"
+    if kind == "clearance" and not _CLEARANCE_WORDS.search(text):
+        return "skill"
+    if kind == "licence" and not _LICENCE_WORDS.search(text):
+        return "skill"
+    return kind
+
+
+def _scored(lines, section: str) -> list:
+    """The lines of `section` a derivation acts on: judge noise (pay, benefits, EEO, marketing) is dropped here
+    too, so an answer stored before a JUDGE_NOISE addition re-derives cleanly without re-asking the model."""
+    return [l for l in lines if _get(l, "section") == section and not judge_noise(_line_text(l))]
+
+
 def _tool_is_the_job(line_obj, title: str) -> bool:
     """§29.2: a `tool` line is a hard gate ONLY when the tool IS the job -- its name appears in the posting
     title, or the line itself asks for N+ years in that one tool (the model should have typed such a line
@@ -720,17 +755,21 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
         itself never counts a discarded `responsibility` entry -- see parse_response).
       - otherwise -> `partial`.
     """
-    required = [l for l in lines if _get(l, "section") == "required"]
+    required = _scored(lines, "required")
     if not required:
         return None, "no required lines survived validation"
     required = _collapse_degree_ladder(required)
     n_required = len(required)
 
-    hard = [l for l in required if _get(l, "kind") in HARD_GATE_KINDS
-           or (_get(l, "kind") == "tool" and _tool_is_the_job(l, title))]
+    hard = [l for l in required if _effective_kind(l) in HARD_GATE_KINDS
+           or (_effective_kind(l) == "tool" and _tool_is_the_job(l, title))]
     soft = [l for l in required if l not in hard]
 
-    hard_unmet = [l for l in hard if _effective_verdict(l) == "unmet"]
+    # 2026-09-29 (user rule, domain as FUNCTION): a years line whose firm qualifier names a domain the user never
+    # worked in is unmet whatever the model said -- the line asks for years INSIDE that domain.
+    hard_unmet = [l for l in hard if _effective_verdict(l) == "unmet"
+                  or (_effective_kind(l) == "years_function" and _effective_verdict(l) in ("met", "adjacent")
+                      and names_never_worked_domain(_line_text(l)))]
     if hard_unmet:
         return "fails", f"hard gate unmet: {_get(hard_unmet[0], 'line')}"
 
@@ -749,11 +788,11 @@ def lines_fit(lines, *, title: str = "", lines_discarded: int = 0) -> tuple:
         return "partial", f"{len(hard_adjacent)} hard gates adjacent"
     if len(hard_adjacent) == 1:
         candidate = hard_adjacent[0]
-        if _get(candidate, "kind") != "years_function":
+        if _effective_kind(candidate) != "years_function":
             # §30.3: only a years_function hard gate bridges -- a title tool (or a clearance/licence gate fed
             # in as adjacent uncoerced) never does, regardless of every other hard gate's verdict.
             return "partial", f"hard gate adjacent, not bridgeable: {_get(candidate, 'line')}"
-        if names_never_worked_domain(_get(candidate, "line")):
+        if names_never_worked_domain(_line_text(candidate)):
             # 2026-09-29.2 (user ruling): a years line in a domain the candidate never worked in is not bridged by
             # transferable skills -- the domain is the gap, whatever the skills.
             return "partial", f"years line names a domain not worked in: {_get(candidate, 'line')}"
@@ -790,23 +829,26 @@ SHAPE_MIN_LINES = 4          # fewer than this many GRADED (met/adjacent/unmet, 
                              # lines -> shape has no opinion (`shape_fit` NULL)
 SHAPE_WRONG_BELOW = 0.45     # shape_score below this -> `wrong`
 SHAPE_FITS_FROM = 0.60       # shape_score at or above this -> `fits`; between the two thresholds -> `split`
+SHAPE_ADJACENT_WEIGHT = 0.75  # 2026-09-29 (was 0.5): an `adjacent` responsibility line is the same skill in another
+                             # domain -- the user's own "I enter new domains" positioning -- so it earns most of a match.
+                             # Replayed on gold: Jev agree 0.66 -> 0.79, catch 0.85 -> 0.80 (with the kind guards).
 
 
 def shape_score(lines) -> tuple:
-    """§30.3: `(met + 0.5 * adjacent) / (met + adjacent + unmet)` over `section == "responsibility"` lines;
+    """§30.3: `(met + SHAPE_ADJACENT_WEIGHT * adjacent) / (met + adjacent + unmet)` over `section == "responsibility"` lines;
     `unclear` responsibility lines are ignored entirely (neither numerator nor denominator). Returns
     `(score_or_None, (met, adjacent, unmet))` -- the raw counts are returned unconditionally (0 each when no
     responsibility lines were graded) so callers can store `resp_met`/`resp_adjacent`/`resp_unmet` even when
     the score itself is NULL. `score` is None when fewer than `SHAPE_MIN_LINES` lines were graded (no opinion,
     never a 0.0 "wrong")."""
-    resp = [l for l in lines if _get(l, "section") == "responsibility"]
+    resp = _scored(lines, "responsibility")
     met = sum(1 for l in resp if _get(l, "verdict") == "met")
     adjacent = sum(1 for l in resp if _get(l, "verdict") == "adjacent")
     unmet = sum(1 for l in resp if _get(l, "verdict") == "unmet")
     graded = met + adjacent + unmet
     if graded < SHAPE_MIN_LINES:
         return None, (met, adjacent, unmet)
-    return (met + 0.5 * adjacent) / graded, (met, adjacent, unmet)
+    return (met + SHAPE_ADJACENT_WEIGHT * adjacent) / graded, (met, adjacent, unmet)
 
 
 def shape_fit(lines) -> tuple:

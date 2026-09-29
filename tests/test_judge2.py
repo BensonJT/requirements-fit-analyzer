@@ -280,14 +280,14 @@ def test_derive_zero_required_lines_returns_none():
 
 
 def test_derive_hard_gate_unmet_fails():
-    lines = [_line(kind="clearance", verdict="unmet"), _line(kind="skill", verdict="met")]
+    lines = [_line(line="Active Secret clearance required", kind="clearance", verdict="unmet"), _line(kind="skill", verdict="met")]
     fit, why = judge2.derive_required_fit(lines, title="")
     assert fit == "fails"
     assert "hard gate" in why
 
 
 def test_derive_hard_gate_unclear_is_partial_never_meets():
-    lines = [_line(kind="licence", verdict="unclear"), _line(kind="skill", verdict="met")]
+    lines = [_line(line="PMP certification required", kind="licence", verdict="unclear"), _line(kind="skill", verdict="met")]
     fit, why = judge2.derive_required_fit(lines, title="")
     assert fit == "partial"
 
@@ -963,7 +963,7 @@ def test_derive_discarded_lines_cap_meets_at_partial():
     fit, why = judge2.derive_required_fit(lines, title="Analyst", lines_discarded=1)
     assert fit == "partial" and "dropped" in why
     # a hard-gate fail is still a fail, never softened by the cap
-    lines.append(_line(kind="clearance", verdict="unmet", line="L3"))
+    lines.append(_line(kind="clearance", verdict="unmet", line="L3 Active Secret clearance"))
     assert judge2.derive_required_fit(lines, title="Analyst", lines_discarded=1)[0] == "fails"
 
 
@@ -1206,7 +1206,7 @@ def _resp(line="a duty", verdict="met"):
 
 
 def test_derive_bridge_one_adjacent_hard_gate_reaches_meets():
-    lines = [_line(kind="clearance", verdict="met", line="L1"),
+    lines = [_line(kind="clearance", verdict="met", line="L1 Secret clearance"),
             _line(kind="years_function", verdict="adjacent", line="L2")]
     fit, why = judge2.derive_required_fit(lines, title="Analyst")
     assert fit == "meets"
@@ -1222,7 +1222,7 @@ def test_derive_two_adjacent_hard_gates_partial_never_fails():
 
 
 def test_derive_adjacent_hard_gate_not_bridgeable_when_another_hard_gate_not_met():
-    lines = [_line(kind="clearance", verdict="unclear", line="L1"),
+    lines = [_line(kind="clearance", verdict="unclear", line="L1 Secret clearance"),
             _line(kind="years_function", verdict="adjacent", line="L2")]
     fit, _why = judge2.derive_required_fit(lines, title="Analyst")
     assert fit == "partial"   # the clearance line's own unclear -> partial fires first, never meets
@@ -1258,7 +1258,7 @@ def test_derive_years_function_adjacent_with_title_tool_met_bridges_to_meets():
 def test_derive_clearance_adjacent_fed_directly_not_bridgeable():
     # parse_response coerces a clearance `adjacent` to `unmet` before it ever reaches here (§30.1), but
     # lines_fit is a pure function and must not bridge on one even if fed in uncoerced.
-    lines = [_line(kind="clearance", verdict="adjacent", line="L1")]
+    lines = [_line(kind="clearance", verdict="adjacent", line="L1 Secret clearance")]
     fit, why = judge2.lines_fit(lines, title="Analyst")
     assert fit == "partial"
     assert "not bridgeable" in why

@@ -619,6 +619,22 @@ def _postings(result_rows) -> list:
             for pid, dh, title, employer, text, *_rest in result_rows]
 
 
+# 2026-09-29: every posting carrying a blind human LENS grade (vw_human_lens_grades_current), so `jev eval`'s lens
+# check can be measured on postings outside the required-fit eval set (e.g. the 9/18 AI-lens sheet).
+LENS_SET_SQL = """
+    SELECT DISTINCT h.posting_id, p.description_hash, p.title, p.employer, p.description_text
+    FROM vw_human_lens_grades_current h
+    JOIN postings p USING (posting_id)
+    WHERE h.basis = 'blind' AND p.description_text IS NOT NULL
+    ORDER BY h.posting_id
+"""
+
+
+def lens_set_postings(con) -> list:
+    """Every posting with a blind human lens grade (LENS_SET_SQL)."""
+    return _postings(con.execute(LENS_SET_SQL).fetchall())
+
+
 GATED_SQL = """
     SELECT f.posting_id, p.description_hash, p.title, p.employer, p.description_text
     FROM vw_lens_fit f

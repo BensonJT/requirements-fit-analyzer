@@ -19,7 +19,7 @@ from .jev_types import Posting
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_BACKGROUND = REPO / "judge2_background.local.md"
 SENTINEL_FILE_NAME = "jev_sentinel_ids.txt"
-POPULATIONS = ("eval_set", "gated", "injection", "sentinel")
+POPULATIONS = ("eval_set", "gated", "injection", "sentinel", "lens_set")
 
 
 class JevCliError(RuntimeError):
@@ -71,7 +71,7 @@ def sentinel_postings(con, path: Path, *, log=print) -> list:
 def chosen_population(a) -> str:
     chosen = [name for name in POPULATIONS if getattr(a, name, False)]
     if len(chosen) != 1:
-        raise JevCliError("jev run: give exactly one of --eval-set, --gated, --injection, --sentinel")
+        raise JevCliError("jev run: give exactly one of --eval-set, --gated, --injection, --sentinel, --lens-set")
     return chosen[0]
 
 
@@ -105,6 +105,8 @@ def _population(con, a, db_path: Optional[str], *, log=print) -> tuple:
     tag = a.run_tag
     if which == "eval_set":
         return jev.eval_set_postings(con), tag
+    if which == "lens_set":
+        return jev.lens_set_postings(con), tag
     if which == "gated":
         return jev.gated_postings(con, limit=a.limit), tag
     if which == "injection":

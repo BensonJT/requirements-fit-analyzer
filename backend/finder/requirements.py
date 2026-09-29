@@ -18,18 +18,41 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-09-16.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-09-28.1"   # bump when splitting or classing changes (part of the requirement cache key)
+                                    # 2026-09-28.1: heading vocabulary mined from the active corpus, the known-heading
+                                    # bypass of the verb filter, "About You" no longer dropped, and the no-Required
+                                    # rescue of years/degree lines (docs/JEV_PLAN.md, splitter Layer 1)
 MIN_UNIT, MAX_UNIT, MAX_UNITS = 25, 400, 40
 
 RESPONSIBILITY_HEADINGS = (r"responsibilit|what you.ll do|what you will do|duties|the role|key accountabilities"
                            r"|in this role|the opportunity|your impact|job overview|position summary|job summary"
-                           r"|role summary|day to day|day-to-day|what you.ll be doing")
+                           r"|role summary|day to day|day-to-day|what you.ll be doing"
+                           # 2026-09-28.1, mined from the active corpus (the heading above requirement or duty text)
+                           r"|typical day|any given day|essential functions|what you will be doing|what you get to do"
+                           r"|your role|role description|position description|the impact you will have"
+                           r"|how you will make an impact|success looks like|measures of success|success measures"
+                           r"|success metrics|^you will$|^you.ll$")
 # Person-side headings the rules' REQUIRED_HEADINGS does not carry; counted as Required for coverage only.
 PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you|your background"
-                   r"|what we.re looking for|what we are looking for|competenc|you have|you bring|you.ll bring")
+                   r"|what we.re looking for|what we are looking for|competenc|you have|you bring|you.ll bring"
+                   # 2026-09-28.1, mined from the active corpus (the heading above the first years line of
+                   # postings where no Required section was found)
+                   r"|what we look for|right fit|we expect|you must have|must.haves?|expertise|what you will need"
+                   r"|what you need|you.ll need|what it takes|ideal candidate|candidate profile|your profile"
+                   r"|this is you|what we seek|you should have|you will bring|you.re bringing|what we need"
+                   r"|need from you|to be successful")
+# Preferred headings the rules' PREFERRED_HEADINGS does not carry (splitter only; the rule engine is unchanged).
+SPLITTER_PREFERRED_HEADINGS = r"desirable|a plus|good to have"
 DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits|perks|what we offer|why join"
                  r"|compensation|pay range|salary|equal (employment )?opportunity|eeo|our commitment|life at"
-                 r"|accommodation|privacy|disclaimer|additional information|how to apply|pay transparency")
+                 r"|accommodation|privacy|disclaimer|additional information|how to apply|pay transparency"
+                 # 2026-09-28.1: logistics sections whose lines were being read as requirements
+                 r"|physical (?:demands|requirements)|work(?:ing)? (?:environment|conditions)|total rewards"
+                 r"|we offer|what you.ll get|what you get|in it for you|why you.ll love|why work (?:here|with|for)")
+# A degree or education-level line: with a years line, the shape of a qualification wherever it sits (the
+# no-Required rescue in split_requirements).
+DEGREE_LINE = re.compile(r"\b(?:bachelor|master|associate|doctorate|ph\.?\s?d|mba)[’']?s?\b[^.]{0,40}\bdegree\b"
+                         r"|\bdegree (?:in|from)\b|\bhigh school (?:diploma|education)\b|\bGED\b", re.I)
 SECTION_WEIGHTS = {"required": 1.0, "responsibility": 0.8, "body": 0.7, "intro": 0.5, "preferred": 0.4}
 GROUPS = {"required": "required", "preferred": "required", "responsibility": "role", "intro": "role", "body": "role"}
 
@@ -105,20 +128,47 @@ def _heading_kind(line: str):
     s = raw.rstrip(":").strip()
     ends_colon = raw.endswith(":") and len(s) <= 80
     short_label = bool(s) and len(s) <= 60 and len(s.split()) <= 4 and not s.endswith(".") and not _VERBISH.search(s)
-    if not (ends_colon or short_label):
+    # A short line phrased as a question that names a DROP section ("What do we offer?") is a heading too: a
+    # question is a label, never a claim, so it cannot swallow a real requirement the way a statement could.
+    drop_question = s.endswith("?") and len(s.split()) <= 8 and bool(re.search(DROP_HEADINGS, s, re.I))
+    if not (ends_colon or short_label or _known_heading_label(s) or drop_question):
         return None
     if LOGISTICS.search(s) and not re.search(DROP_HEADINGS, s, re.I):
         return None
     if re.search(DROP_HEADINGS, s, re.I if not re.match(r"about [A-Z]", s) else 0) and not re.search(
-            P.REQUIRED_HEADINGS + "|" + RESPONSIBILITY_HEADINGS, s, re.I):
-        return "drop"
-    if re.search(P.PREFERRED_HEADINGS, s, re.I):
+            P.REQUIRED_HEADINGS + "|" + RESPONSIBILITY_HEADINGS + "|" + PERSON_HEADINGS, s, re.I):
+        return "drop"   # 2026-09-28.1: PERSON_HEADINGS joins the exclusion, so "About You" is no longer dropped
+    if re.search(P.PREFERRED_HEADINGS, s, re.I) or re.search(SPLITTER_PREFERRED_HEADINGS, s, re.I):
         return "preferred"
     if re.search(P.REQUIRED_HEADINGS, s, re.I) or re.search(PERSON_HEADINGS, s, re.I):
         return "required"
     if re.search(RESPONSIBILITY_HEADINGS, s, re.I):
         return "responsibility"
     return None
+
+
+_CONNECTIVES = ("and", "or", "of", "the", "a", "an", "to", "for", "in", "on", "with", "&")
+
+
+def _title_case(s: str) -> bool:
+    """Every significant word starts upper-case (Title Case or ALL CAPS): the look of a label, not a sentence."""
+    words = [w for w in re.findall(r"[A-Za-z][\w'’-]*", s) if w.lower() not in _CONNECTIVES]
+    return bool(words) and all(w[0].isupper() for w in words)
+
+
+def _known_heading_label(s: str) -> bool:
+    """2026-09-28.1: a short line that names a KNOWN section (required, preferred, person or responsibility) is a
+    heading even when it carries a verb-ish word -- "What You'll Do", "Who You Are", "What You'll Bring" ('bring'
+    ends in -ing) were all rejected by the verb filter. Narrow on purpose: at most 8 words, no final period, and
+    Title Case / ALL CAPS or a closing '?'. DROP patterns never qualify (a stray "Competitive salary and
+    benefits" line must not swallow what follows it)."""
+    if not s or len(s) > 70 or len(s.split()) > 8 or s.endswith("."):
+        return False
+    if not (_title_case(s) or s.endswith("?")):
+        return False
+    known = "|".join([P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS, PERSON_HEADINGS,
+                      RESPONSIBILITY_HEADINGS])
+    return bool(re.search(known, s, re.I))
 
 
 def _subheading(line: str) -> bool:
@@ -202,7 +252,7 @@ def split_requirements(text: str, max_units: int = 0) -> list:
     kinds = [_heading_kind(l) if l else None for l in lines]
     has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
     section = "intro" if has_headings else "body"
-    units, seen = [], set()
+    units, seen, qual_shaped = [], set(), []
     for line, kind in zip(lines, kinds):
         if not line:
             continue
@@ -224,14 +274,34 @@ def split_requirements(text: str, max_units: int = 0) -> list:
                 continue
             seen.add(key)
             units.append(Requirement(unit_text, section, GROUPS[section], SECTION_WEIGHTS[section], klass))
+            qual_shaped.append(_qualification_shaped(piece))
+    units = _rescue_required(units, qual_shaped)
     if max_units and len(units) > max_units:
         keep = sorted(range(len(units)), key=lambda i: (-units[i].weight, i))[:max_units]
         units = [units[i] for i in sorted(keep)]
     return units
 
 
+def _qualification_shaped(piece: str) -> bool:
+    """A years-of-experience or degree line: the shape of a qualification, whatever heading it sits under."""
+    return bool((YEARS_PHRASE.search(piece) and re.search(r"\b(?:years?|yrs?)\b", piece, re.I))
+                or DEGREE_LINE.search(piece))
+
+
+def _rescue_required(units: list, qual_shaped: list) -> list:
+    """2026-09-28.1: a posting whose headings name no Required section still states its qualifications -- under
+    "Responsibilities", "Job Description", or no heading at all. When NO unit landed in `required`, every
+    years/degree-shaped unit outside `preferred` moves to `required`. A posting that has a Required section is
+    left exactly as it was."""
+    if any(u.section == "required" for u in units):
+        return units
+    return [Requirement(u.text, "required", GROUPS["required"], SECTION_WEIGHTS["required"], u.klass)
+            if shaped and u.section in ("intro", "body", "responsibility") else u
+            for u, shaped in zip(units, qual_shaped)]
+
+
 def splitter_fingerprint() -> str:
     """Changes when the splitter version or any heading pattern changes (hashed into rubric / cache versions)."""
     payload = "|".join([SPLITTER_VERSION, RESPONSIBILITY_HEADINGS, PERSON_HEADINGS, DROP_HEADINGS,
-                        P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS])
+                        P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]

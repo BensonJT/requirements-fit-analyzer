@@ -2227,6 +2227,45 @@ def test_rejoin_lines_glues_split_sentences_and_drops_labels():
     assert [u.text for u in units] == ["Serves as the strategic operations advisor to the medical officers."]
 
 
+def test_known_headings_survive_the_verb_filter_and_content_does_not_become_a_heading():
+    # 2026-09-28.1: "do" / "are" / "bring" (-ing) used to reject these known headings.
+    for heading, kind in (("What You'll Do", "responsibility"), ("Who You Are", "required"),
+                          ("WHAT YOU'LL BRING", "required"), ("Your Expertise:", "required"),
+                          ("A Typical Day:", "responsibility"), ("What We Look For", "required"),
+                          ("Here's What You Need", "required"), ("What do you need to be successful?", "required"),
+                          ("Essential Functions", "responsibility"), ("Desirable", "preferred"),
+                          ("About You", "required"), ("About Acme", "drop"), ("Physical Demands", "drop"),
+                          ("What do we offer?", "drop")):
+        assert requirements._heading_kind(heading) == kind, heading
+    # a sentence-case content line naming a person word is still content, not a heading
+    assert requirements._heading_kind("Experience with SQL and data pipelines") is None
+    assert requirements._heading_kind("Are you ready to go beyond?") is None
+
+
+def test_split_uses_the_new_headings_and_drops_physical_demands():
+    jd = ("About Acme\nWe build things.\n\nWhat You'll Do\n- Lead process improvement across finance teams\n"
+          "About You\n- 5+ years of process improvement experience\n- Strong SQL skills for reporting work\n"
+          "Physical Demands\n- Lift up to 25 pounds occasionally and stand for long periods\n")
+    got = [(u.section, u.text) for u in requirements.split_requirements(jd)]
+    assert ("responsibility", "Lead process improvement across finance teams") in got
+    assert ("required", "Strong SQL skills for reporting work") in got
+    assert not any("pounds" in text for _, text in got)
+
+
+def test_no_required_section_rescues_years_and_degree_lines_only():
+    jd = ("Responsibilities\n- Lead process improvement across teams\n- 5+ years of process improvement experience\n"
+          "- Bachelor's degree in business or a related field\n- Build dashboards for weekly reviews\n")
+    got = [(u.section, u.text) for u in requirements.split_requirements(jd)]
+    assert got == [("responsibility", "Lead process improvement across teams"),
+                   ("required", "Process improvement experience"),
+                   ("required", "Bachelor's degree in business or a related field"),
+                   ("responsibility", "Build dashboards for weekly reviews")]
+    # a posting WITH a Required section is left exactly as it was: its years line under duties stays a duty
+    jd2 = jd + "Required Qualifications\n- Strong stakeholder communication across functions\n"
+    sections = {u.text: u.section for u in requirements.split_requirements(jd2)}
+    assert sections["Process improvement experience"] == "responsibility"
+
+
 def test_split_requirements_keeps_short_bulleted_skill_lines():
     # A bullet marker is never a heading, even when it's short, Title Case, or names a PERSON_HEADINGS word.
     jd = """Required Qualifications

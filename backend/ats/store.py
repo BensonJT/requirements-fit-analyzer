@@ -14,19 +14,35 @@ each autocommitted statement costs ~40 ms. Every board's writes therefore go thr
 a staging table inside ONE transaction (measured 10x faster), not row-by-row.
 """
 import hashlib
+import json
 import os
 import re
 import shutil
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 import duckdb
+
+# Dataclasses only, no I/O and no imports of its own, so importing it here cannot cycle back into store.
+from ..finder.jev_types import LineRecord, ReviewRecord
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "db", "jobsearch.duckdb"
 )
 
-SCHEMA_VERSION = 22  # v22 (2026-09-21): the bridge-role track (sprint plan §31), place-scoped pulls kept
+SCHEMA_VERSION = 23  # v23 (2026-09-28): the Jev typed-decision tier (docs/JEV_PLAN.md §3, SPRINT_PLAN §33).
+                     #                  Additive only: three new tables (CREATE TABLE IF NOT EXISTS below is
+                     #                  enough, no migration function and no `_add_missing_columns` entry --
+                     #                  no existing table gains a column): `jev_reviews` (one row per
+                     #                  backend/finder/jev_types.ReviewRecord, PK posting_id+description_hash+
+                     #                  prompt_version+run_tag, run_tag '' for the canonical run), `jev_lines`
+                     #                  (its LineRecords, same key + line_no) and `jev_evals` (one row per eval
+                     #                  run and metric family). New views `vw_jev_latest`, `vw_jev_eval_latest`
+                     #                  and `vw_jev_bar`; `vw_lens_fit` gains REPORTED-only j3_* columns and
+                     #                  `jev_bar_passed` -- nothing the rank reads (effective_required_*,
+                     #                  lens_value, rank_lens_best, rank_score, rank_why) looks at them yet;
+                     # v22 (2026-09-21): the bridge-role track (sprint plan §31), place-scoped pulls kept
                      #                  apart from the fit pipeline. Additive only: `postings.track`
                      #                  (VARCHAR DEFAULT 'fit' -- every existing row is a fit row) and
                      #                  `postings.bridge_place` (comma-joined place names currently matching a
@@ -364,6 +380,70 @@ CREATE TABLE IF NOT EXISTS judge2_evals (
     passed                  BOOLEAN NOT NULL, reason VARCHAR
 );
 
+-- v23: the Jev typed-decision tier (backend/finder/jev.py, docs/JEV_PLAN.md §3). One row per
+-- backend/finder/jev_types.ReviewRecord, one column per field except `lines` (-> `jev_lines`). Keyed like
+-- judge2_reviews PLUS `run_tag`: a repeatability rerun ('r2', 'r3', ...) sits beside the canonical review
+-- ('' here, None in the dataclass) instead of overwriting it. Dict fields are JSON text. `raw_response`
+-- holds both raw responses and never leaves this gitignored DB. REPORTED ONLY in v23: `vw_lens_fit` shows
+-- the j3_* columns, but nothing the rank reads may look at them until the user rules on stage 2 (§4).
+CREATE TABLE IF NOT EXISTS jev_reviews (
+    posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
+    run_tag           VARCHAR NOT NULL DEFAULT '', -- '' = the canonical run; 'r2', 'r3', ... = repeat runs
+    endpoint          VARCHAR NOT NULL,          -- typesafe | vercel
+    model_requested   VARCHAR NOT NULL,
+    model_answered    VARCHAR,                   -- the response's own `model` field
+    version_drift     BOOLEAN NOT NULL DEFAULT FALSE, -- model_answered != the pinned id: excluded from
+                                                  -- vw_jev_latest and from every evaluation
+    input_tokens      INTEGER NOT NULL DEFAULT 0, -- sum over every request for this posting (the spend cap)
+    lens_process_score DOUBLE, lens_process_grade VARCHAR, lens_process_conf DOUBLE, lens_process_probs JSON,
+    lens_technical_score DOUBLE, lens_technical_grade VARCHAR, lens_technical_conf DOUBLE,
+    lens_technical_probs JSON,
+    lens_ai_score     DOUBLE, lens_ai_grade VARCHAR, lens_ai_conf DOUBLE, lens_ai_probs JSON,
+    gates             JSON,                      -- {question_id: noul or {"choice", "confidence", "probabilities"}}
+    injection_p       DOUBLE,                    -- the canary Noul
+    required_fit      VARCHAR,                   -- judge2.derive_required_fit over jev_lines, or NULL (no call)
+    derive_why        VARCHAR, lines_fit VARCHAR, shape_fit VARCHAR, shape_score DOUBLE,
+    raw_response      JSON,
+    reviewed_at       TIMESTAMP NOT NULL,        -- UTC, stored naive (same as judge2_reviews)
+    PRIMARY KEY (posting_id, description_hash, prompt_version, run_tag)
+);
+
+-- v23: one row per jev_types.LineRecord, under its parent jev_reviews key plus `line_no`. Replaced, never
+-- appended to, on a re-insert (store.insert_jev_review), the same as judge2_lines.
+CREATE TABLE IF NOT EXISTS jev_lines (
+    posting_id        VARCHAR NOT NULL, description_hash VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
+    run_tag           VARCHAR NOT NULL DEFAULT '',
+    line_no           INTEGER NOT NULL,
+    section           VARCHAR NOT NULL,          -- required | preferred | responsibility
+    line_text         VARCHAR NOT NULL,
+    kind              VARCHAR, kind_conf DOUBLE,
+    verdict           VARCHAR NOT NULL,          -- AFTER the evidence guard
+    verdict_raw       VARCHAR,                   -- Jev's own top choice, before the guard
+    verdict_probs     JSON,                      -- {"met": p, "adjacent": p, "unmet": p, "unclear": p}
+    verdict_conf      DOUBLE,
+    evidence_fact_id  VARCHAR,                   -- a fact id, or NULL when Jev chose "none"
+    evidence_p        DOUBLE,
+    evidence_text     VARCHAR,                   -- the chosen fact's text, resolved in code
+    evidence_downgraded BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (posting_id, description_hash, prompt_version, run_tag, line_no)
+);
+
+-- v23: one row per `jev eval` run and metric family (backend/finder/jev_eval.py, docs/JEV_PLAN.md §4). One
+-- table for every family rather than one column set per family: the families measure different things
+-- (rates, flip shares, Brier/ECE, canary catches), so their numbers live in `metrics` JSON and only
+-- `passed`/`reason` are common. `family` is validated in store.insert_jev_eval (JEV_EVAL_FAMILIES).
+CREATE TABLE IF NOT EXISTS jev_evals (
+    run_id            VARCHAR NOT NULL, prompt_version VARCHAR NOT NULL,
+    family            VARCHAR NOT NULL,          -- required | compare | lens | repeatability | calibration |
+                                                  -- injection | sentinel
+    n                 INTEGER,
+    metrics           JSON,
+    passed            BOOLEAN NOT NULL,
+    reason            VARCHAR,
+    evaluated_at      TIMESTAMP NOT NULL,        -- UTC, stored naive
+    PRIMARY KEY (run_id, family)
+);
+
 -- Jobs_Found files already read back for decisions (re-read only when mtime changes).
 CREATE TABLE IF NOT EXISTS readback_log (file VARCHAR PRIMARY KEY, mtime DOUBLE NOT NULL, read_at TIMESTAMP NOT NULL);
 
@@ -691,6 +771,32 @@ CREATE OR REPLACE VIEW vw_judge2_latest AS
 CREATE OR REPLACE VIEW vw_judge2_eval_latest AS
     SELECT * FROM judge2_evals QUALIFY row_number() OVER (PARTITION BY prompt_version ORDER BY evaluated_at DESC) = 1;
 
+-- v23: the canonical Jev review per posting -- same two-part "latest" as vw_judge2_latest (the posting's
+-- CURRENT description_hash, newest reviewed_at), minus repeat runs (run_tag <> '') and rows answered by a
+-- model other than the pinned one (version_drift). At most one row per posting_id.
+CREATE OR REPLACE VIEW vw_jev_latest AS
+    SELECT r.* FROM jev_reviews r JOIN postings p
+      ON p.posting_id = r.posting_id AND coalesce(p.description_hash, '') = r.description_hash
+    WHERE r.run_tag = '' AND NOT r.version_drift
+    QUALIFY row_number() OVER (PARTITION BY r.posting_id ORDER BY r.reviewed_at DESC, r.prompt_version DESC) = 1;
+
+-- v23: newest Jev evaluation per (prompt_version, family).
+CREATE OR REPLACE VIEW vw_jev_eval_latest AS
+    SELECT * FROM jev_evals
+    QUALIFY row_number() OVER (PARTITION BY prompt_version, family ORDER BY evaluated_at DESC, run_id DESC) = 1;
+
+-- v23: whether a Jev prompt_version has cleared its bar (docs/JEV_PLAN.md §4): TRUE only when its LATEST
+-- 'required', 'lens' AND 'repeatability' evals all exist and all passed. One row per prompt_version that has
+-- any eval. The three per-family columns are NULL when that family has never been evaluated. Reported beside
+-- the rank (vw_lens_fit.jev_bar_passed); in v23 it moves nothing.
+CREATE OR REPLACE VIEW vw_jev_bar AS
+    SELECT prompt_version,
+           bool_or(passed) FILTER (WHERE family = 'required') AS required_passed,
+           bool_or(passed) FILTER (WHERE family = 'lens') AS lens_passed,
+           bool_or(passed) FILTER (WHERE family = 'repeatability') AS repeatability_passed,
+           count(*) FILTER (WHERE family IN ('required', 'lens', 'repeatability') AND passed) = 3 AS jev_bar_passed
+    FROM vw_jev_eval_latest GROUP BY prompt_version;
+
 -- Same "a grade wins over a prediction" pattern as required_value, for the second judge's own three-way call.
 -- Deliberately NOT folded into required_value's own CASE -- required_value's ELSE branch is "no judge call at
 -- all, fall back to a model probability", which has no meaning for the second judge (it never has a bare
@@ -922,7 +1028,17 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
                -- or role shape, or a bridge) -- read here only to give the Why text a brief shape-decided note
                -- below (§30's item 5); `required_fit` stays the ONE value the rank itself reads.
                j2.derive_why AS judge2_derive_why,
-               je.passed AS judge2_bar_passed
+               je.passed AS judge2_bar_passed,
+               -- v23, the Jev tier (docs/JEV_PLAN.md §3): REPORTED ONLY. Nothing below -- not
+               -- effective_required_*, lens_value, lens_best, lens_breadth, rank_lens_best, rank_score nor
+               -- rank_why -- may read a j3_* column or jev_bar_passed until the user rules on stage 2
+               -- (tests/test_jev_store.py asserts the rank is byte-identical with and without Jev rows).
+               -- vw_jev_latest is one row per posting and vw_jev_bar one row per prompt_version, so neither
+               -- join can duplicate a row.
+               j3.required_fit AS j3_required_fit, j3.lens_process_grade AS j3_lens_process_grade,
+               j3.lens_technical_grade AS j3_lens_technical_grade, j3.lens_ai_grade AS j3_lens_ai_grade,
+               j3.injection_p AS j3_injection_p, j3.prompt_version AS j3_prompt_version,
+               coalesce(jb.jev_bar_passed, FALSE) AS jev_bar_passed
         FROM postings p
         JOIN vw_screen_latest s USING (posting_id)
         LEFT JOIN vw_llm_labels_latest g USING (posting_id)
@@ -931,6 +1047,8 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
         LEFT JOIN vw_required_embed_latest re USING (posting_id)
         LEFT JOIN vw_judge2_latest j2 USING (posting_id)
         LEFT JOIN vw_judge2_eval_latest je ON je.prompt_version = j2.prompt_version
+        LEFT JOIN vw_jev_latest j3 ON j3.posting_id = p.posting_id
+        LEFT JOIN vw_jev_bar jb ON jb.prompt_version = j3.prompt_version
         -- `p.track = 'fit'` is belt-and-suspenders here (sprint plan §31.5): a bridge posting is
         -- never screened in the first place (pipeline.py's candidate SQL is track-scoped), so the
         -- INNER JOIN to vw_screen_latest above already excludes it on its own.
@@ -1939,3 +2057,139 @@ def close_expired_postings(con, platforms, now):
         WHERE platform IN (SELECT unnest(?::VARCHAR[])) AND status = 'active'
           AND posting_end_at IS NOT NULL AND posting_end_at < ?
     """, [now, list(platforms), now.date()]).fetchone()[0]
+
+
+# ---------------------------------------------------------------- the Jev tier (v23, docs/JEV_PLAN.md §3)
+JEV_EVAL_FAMILIES = ("required", "compare", "lens", "repeatability", "calibration", "injection", "sentinel")
+
+_JEV_REVIEW_COLUMNS = (
+    "posting_id", "description_hash", "prompt_version", "run_tag", "endpoint", "model_requested",
+    "model_answered", "version_drift", "input_tokens",
+    "lens_process_score", "lens_process_grade", "lens_process_conf", "lens_process_probs",
+    "lens_technical_score", "lens_technical_grade", "lens_technical_conf", "lens_technical_probs",
+    "lens_ai_score", "lens_ai_grade", "lens_ai_conf", "lens_ai_probs",
+    "gates", "injection_p", "required_fit", "derive_why", "lines_fit", "shape_fit", "shape_score",
+    "raw_response", "reviewed_at",
+)
+_JEV_REVIEW_JSON = frozenset({"lens_process_probs", "lens_technical_probs", "lens_ai_probs", "gates",
+                              "raw_response"})
+_JEV_LINE_COLUMNS = (
+    "line_no", "section", "line_text", "kind", "kind_conf", "verdict", "verdict_raw", "verdict_probs",
+    "verdict_conf", "evidence_fact_id", "evidence_p", "evidence_text", "evidence_downgraded",
+)
+
+
+def _run_tag_key(run_tag: Optional[str]) -> str:
+    """The stored form of a run tag: '' for the canonical run (None in jev_types)."""
+    return run_tag or ""
+
+
+def _utc_naive(iso: str) -> datetime:
+    """An ISO timestamp as a naive UTC datetime (the TIMESTAMP convention of judge2_reviews). A string with
+    an offset is converted to UTC; a string without one is taken to be UTC already."""
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _json_or_none(value) -> Optional[str]:
+    return None if value is None else json.dumps(value)
+
+
+def jev_already_reviewed(con, posting_id: str, description_hash: str, prompt_version: str,
+                         run_tag: Optional[str]) -> bool:
+    """True when a Jev review is stored under this exact key (None run_tag means the canonical run, '').
+    Drifted rows count: a stored row is a cache hit whatever model answered it."""
+    return con.execute(
+        "SELECT count(*) FROM jev_reviews WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? "
+        "AND run_tag = ?", [posting_id, description_hash, prompt_version, _run_tag_key(run_tag)]
+    ).fetchone()[0] > 0
+
+
+def insert_jev_review(con, record: ReviewRecord) -> None:
+    """Stores one ReviewRecord: INSERT OR REPLACE its `jev_reviews` row, then replace (never append to) its
+    `jev_lines`, the same DELETE-then-INSERT as judge2._insert_lines. A re-insert under the same key
+    overwrites the row, `input_tokens` included."""
+    values = []
+    for col in _JEV_REVIEW_COLUMNS:
+        value = getattr(record, col)
+        if col == "run_tag":
+            value = _run_tag_key(value)
+        elif col == "reviewed_at":
+            value = _utc_naive(value)
+        elif col in _JEV_REVIEW_JSON:
+            value = _json_or_none(value)
+        values.append(value)
+    con.execute(f"INSERT OR REPLACE INTO jev_reviews ({', '.join(_JEV_REVIEW_COLUMNS)}) "
+                f"VALUES ({', '.join('?' * len(_JEV_REVIEW_COLUMNS))})", values)
+
+    key = [record.posting_id, record.description_hash, record.prompt_version, _run_tag_key(record.run_tag)]
+    con.execute("DELETE FROM jev_lines WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? "
+                "AND run_tag = ?", key)
+    if record.lines:
+        cols = ("posting_id", "description_hash", "prompt_version", "run_tag") + _JEV_LINE_COLUMNS
+        rows = [key + [_json_or_none(line.verdict_probs) if col == "verdict_probs" else getattr(line, col)
+                       for col in _JEV_LINE_COLUMNS]
+                for line in record.lines]
+        con.executemany(f"INSERT INTO jev_lines ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", rows)
+
+
+def jev_tokens_since(con, since_iso: str) -> int:
+    """Input tokens of every stored Jev review (all run tags) with reviewed_at >= `since_iso` -- the stored
+    half of the daily spend cap (jev_types.Caps)."""
+    return int(con.execute("SELECT coalesce(sum(input_tokens), 0) FROM jev_reviews WHERE reviewed_at >= ?",
+                           [_utc_naive(since_iso)]).fetchone()[0])
+
+
+def load_jev_review(con, posting_id: str, description_hash: str, prompt_version: str,
+                    run_tag: Optional[str] = None) -> Optional[ReviewRecord]:
+    """One stored review with its lines (in line_no order), JSON decoded, run_tag '' read back as None and
+    reviewed_at as a UTC ISO string with a '+00:00' offset. None when no such review is stored."""
+    key = [posting_id, description_hash, prompt_version, _run_tag_key(run_tag)]
+    row = con.execute(f"SELECT {', '.join(_JEV_REVIEW_COLUMNS)} FROM jev_reviews WHERE posting_id = ? "
+                      "AND description_hash = ? AND prompt_version = ? AND run_tag = ?", key).fetchone()
+    if row is None:
+        return None
+    fields = dict(zip(_JEV_REVIEW_COLUMNS, row))
+    for col in _JEV_REVIEW_JSON:
+        fields[col] = None if fields[col] is None else json.loads(fields[col])
+    fields["gates"] = fields["gates"] or {}
+    fields["raw_response"] = fields["raw_response"] or {}
+    fields["run_tag"] = fields["run_tag"] or None
+    fields["reviewed_at"] = fields["reviewed_at"].replace(tzinfo=timezone.utc).isoformat()
+
+    lines = []
+    for line_row in con.execute(f"SELECT {', '.join(_JEV_LINE_COLUMNS)} FROM jev_lines WHERE posting_id = ? "
+                                "AND description_hash = ? AND prompt_version = ? AND run_tag = ? "
+                                "ORDER BY line_no", key).fetchall():
+        line = dict(zip(_JEV_LINE_COLUMNS, line_row))
+        line["verdict_probs"] = None if line["verdict_probs"] is None else json.loads(line["verdict_probs"])
+        lines.append(LineRecord(**line))
+    return ReviewRecord(**fields, lines=lines)
+
+
+def update_jev_derivation(con, posting_id: str, description_hash: str, prompt_version: str,
+                          run_tag: Optional[str], *, required_fit: Optional[str], derive_why: Optional[str],
+                          lines_fit: Optional[str], shape_fit: Optional[str], shape_score: Optional[float]) -> int:
+    """Overwrites the five code-derived columns of one stored review (`finder.py jev rederive`); every Jev
+    answer stays as stored. Returns the number of rows updated (0 when no such review is stored)."""
+    key = [posting_id, description_hash, prompt_version, _run_tag_key(run_tag)]
+    before = con.execute("SELECT count(*) FROM jev_reviews WHERE posting_id = ? AND description_hash = ? "
+                         "AND prompt_version = ? AND run_tag = ?", key).fetchone()[0]
+    con.execute("UPDATE jev_reviews SET required_fit = ?, derive_why = ?, lines_fit = ?, shape_fit = ?, "
+                "shape_score = ? WHERE posting_id = ? AND description_hash = ? AND prompt_version = ? "
+                "AND run_tag = ?", [required_fit, derive_why, lines_fit, shape_fit, shape_score] + key)
+    return int(before)
+
+
+def insert_jev_eval(con, *, run_id: str, prompt_version: str, family: str, n: Optional[int], metrics: dict,
+                    passed: bool, reason: Optional[str]) -> None:
+    """Stores one metric family's result of a `jev eval` run, stamped now (UTC). `family` must be one of
+    JEV_EVAL_FAMILIES. vw_jev_bar reads the latest 'required', 'lens' and 'repeatability' rows."""
+    if family not in JEV_EVAL_FAMILIES:
+        raise ValueError(f"unknown jev eval family {family!r}; expected one of {JEV_EVAL_FAMILIES}")
+    con.execute("INSERT OR REPLACE INTO jev_evals (run_id, prompt_version, family, n, metrics, passed, reason, "
+                "evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [run_id, prompt_version, family, n, _json_or_none(metrics), bool(passed), reason,
+                 datetime.now(timezone.utc).replace(tzinfo=None)])

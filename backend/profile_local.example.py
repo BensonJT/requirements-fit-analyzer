@@ -49,3 +49,7 @@ ORG_BUILDING_TERMS = [
     "spans of control", "span of control", "executive leadership team", "member of the executive",
     "leaders of leaders", "manager of managers", "managers of managers", "org design",
 ]
+
+# Domains or functions you have never worked in. A judge's "adjacent" years line that names one is never
+# bridged to `meets` (judge2.derive_required_fit). Example: ["human resources", "healthcare", "content strategy"]
+NEVER_BRIDGE_DOMAIN_TERMS = []

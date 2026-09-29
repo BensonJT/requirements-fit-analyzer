@@ -559,7 +559,7 @@ def test_max_calls_cap_stops_cleanly(key_env):
 
 def test_daily_token_cap_counts_stored_and_run_tokens(key_env):
     rows = [_posting("P1"), _posting("P2")]
-    est = sum(jev.estimate_tokens(b) for b in [jev.build_role_request(rows[0], Q.PINNED_MODEL)]
+    est = sum(jev.plan_tokens(b) for b in [jev.build_role_request(rows[0], Q.PINNED_MODEL)]
               + jev.build_lines_requests(rows[0], _facts(), Q.PINNED_MODEL, log=lambda *a: None))
     # 1000 spent today; the first posting fits (1000 + est), the second would not (2400 + est)
     persist = FakePersist(tokens_today=1000)

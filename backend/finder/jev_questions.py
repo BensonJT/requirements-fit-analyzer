@@ -37,6 +37,7 @@ GATE_LENS_MIN = 0.70            # user ruling 2026-09-28: send when ANY lens mod
 CANARY_FLAG_AT = 0.50           # injection canary Noul at or above this flags the posting
 DEFAULT_MAX_CALLS_PER_RUN = 400
 DEFAULT_DAILY_TOKEN_CAP = 5_000_000   # ~ $0.21 at $0.042 / M input tokens
+PRICE_PER_M_INPUT = 0.042       # USD per million input tokens; output tokens are free
 MAX_CALLS_ENV = "JEV_MAX_CALLS_PER_RUN"
 DAILY_CAP_ENV = "JEV_DAILY_TOKEN_CAP"
 JD_CAP_CHARS = 12_000           # same trim as judge2.DEFAULT_JD_CAP
@@ -44,6 +45,10 @@ MAX_REQUIRED_LINES = 30         # beyond this, the rest are dropped and counted 
 MAX_RESPONSIBILITY_LINES = 12   # same as judge2.MAX_RESPONSIBILITY_LINES
 CHARS_PER_TOKEN = 4             # estimate only (the response's usage.input_tokens is the real count)
 MAX_REQUEST_TOKENS_EST = 48_000  # split the lines request into chunks under this (hard limit is 64k)
+# Spend planning (dry-run total, daily cap check). Fitted on the 9/28 gold pass: 111 postings used 3.43M real
+# tokens at 2.98 chars/token pooled (2.81-3.73 per posting). 2.8 sits at the low end so a plan does not run short.
+# Chunking keeps CHARS_PER_TOKEN so the requests (and stored reviews) stay the same.
+PLAN_CHARS_PER_TOKEN = 2.8
 RETRY_STATUSES = (408, 429, 500, 502, 503, 504, 529)
 BACKOFF_SECONDS = (1, 4, 16)
 REQUEST_TIMEOUT_S = 60

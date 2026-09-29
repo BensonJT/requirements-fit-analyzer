@@ -201,6 +201,12 @@ def estimate_tokens(body: dict) -> int:
     return math.ceil(len(json.dumps(body)) / Q.CHARS_PER_TOKEN)
 
 
+def plan_tokens(body: dict) -> int:
+    """The spend-planning estimate (dry-run total, daily cap check): calibrated on real usage, see
+    PLAN_CHARS_PER_TOKEN. Chunking still uses estimate_tokens."""
+    return math.ceil(len(json.dumps(body)) / Q.PLAN_CHARS_PER_TOKEN)
+
+
 def build_lines_requests(posting: Posting, facts: list, model: str, *, log=print) -> list:
     """Request(s) L. Line ids and question ids use each line's index within its own request. Lines are packed
     greedily into chunks under MAX_REQUEST_TOKENS_EST; every chunk carries the full facts and reading rules.
@@ -394,7 +400,7 @@ def _retry_after(resp) -> Optional[float]:
 def _tokens_used(data: dict, body: dict) -> int:
     usage = data.get("usage") if isinstance(data, dict) else None
     tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
-    return int(tokens) if _is_num(tokens) else estimate_tokens(body)
+    return int(tokens) if _is_num(tokens) else plan_tokens(body)
 
 
 def call_with_retry(transport, sleep_fn, url: str, key: str, body: dict, *, log=print,
@@ -533,7 +539,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                 summary.errors += 1
                 log(f"jev: {p.posting_id} could not be built ({exc})")
                 continue
-            est += sum(estimate_tokens(b) for b in [role_body] + lines_bodies)
+            est += sum(plan_tokens(b) for b in [role_body] + lines_bodies)
             if i < show:
                 log(f"--- jev dry-run role request: {p.posting_id} ({p.title!r} @ {p.employer!r}) ---")
                 log(json.dumps(role_body, indent=2, ensure_ascii=False))
@@ -541,7 +547,12 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                     log(f"--- jev dry-run lines request {j + 1}/{len(lines_bodies)}: {p.posting_id} ---")
                     log(json.dumps(body, indent=2, ensure_ascii=False))
         log(f"jev dry-run: endpoint={endpoint} model={model} prompt_version={pv} to_send={len(todo)} "
-            f"skipped_cached={summary.skipped_cached} estimated_input_tokens={est}")
+            f"skipped_cached={summary.skipped_cached} estimated_input_tokens={est} "
+            f"(~${est * Q.PRICE_PER_M_INPUT / 1e6:.2f})")
+        cap = (caps or caps_from_env()).daily_token_cap
+        used = persist.jev_tokens_since(con, _today_utc_iso()) if con is not None else 0
+        log(f"jev dry-run: used today (UTC) {used} + this run {est} = {used + est} of daily_token_cap={cap} -> "
+            + ("fits" if used + est <= cap else f"WOULD STOP at the cap; raise {Q.DAILY_CAP_ENV} or wait for 00:00 UTC"))
         return summary
 
     caps = caps or caps_from_env()
@@ -565,7 +576,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                 f"max_calls_per_run={caps.max_calls_per_run}")
             break
         used = tokens_before + meter.tokens
-        if used + sum(estimate_tokens(b) for b in planned) > caps.daily_token_cap:
+        if used + sum(plan_tokens(b) for b in planned) > caps.daily_token_cap:
             summary.stopped_by_cap = "daily_token_cap"
             log(f"jev: stopping, {used} tokens used today; the next posting would pass "
                 f"daily_token_cap={caps.daily_token_cap}")

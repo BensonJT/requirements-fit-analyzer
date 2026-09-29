@@ -140,6 +140,7 @@ def prompt_version(facts: list, endpoint: str) -> str:
         model_for(endpoint),
         endpoint,
         requirements.splitter_fingerprint(),
+        judge2.JUDGE_NOISE.pattern,   # 2026-09-29: which lines a judge never sees
         _facts_hash(facts),
         str(Q.JD_CAP_CHARS),
         str(Q.MAX_REQUIRED_LINES),
@@ -168,6 +169,13 @@ def select_lines(posting: Posting, *, log=print) -> list:
     jd = posting.description_text or ""
     required = judge2.section_lines(jd, "required")
     duties = judge2.section_lines(jd, "responsibility")
+    if len(required) > Q.MAX_REQUIRED_LINES:
+        # 2026-09-29: over the cap, qualification-shaped lines (years, degree, credential, "Must ...") are kept
+        # first, then the rest in document order; the kept lines stay in document order.
+        from . import requirements
+        keep = set(sorted(range(len(required)),
+                          key=lambda i: (not requirements.qualification_shaped(required[i]), i))[:Q.MAX_REQUIRED_LINES])
+        required = [t for i, t in enumerate(required) if i in keep] + [t for i, t in enumerate(required) if i not in keep]
     dropped_req = max(0, len(required) - Q.MAX_REQUIRED_LINES)
     dropped_resp = max(0, len(duties) - Q.MAX_RESPONSIBILITY_LINES)
     if dropped_req or dropped_resp:

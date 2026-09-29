@@ -76,7 +76,29 @@ def chosen_population(a) -> str:
 
 
 def population(con, a, db_path: Optional[str], *, log=print) -> tuple:
-    """(postings, run_tag) for `jev run`, validating the flag combinations."""
+    """(postings, run_tag) for `jev run`, validating the flag combinations; --posting / --postings-file narrow
+    the eval set or gated population to those ids."""
+    rows, tag = _population(con, a, db_path, log=log)
+    ids = posting_ids_arg(a)
+    if ids:
+        if chosen_population(a) not in ("eval_set", "gated"):
+            raise JevCliError("jev run: --posting / --postings-file narrow --eval-set or --gated only")
+        wanted = set(ids)
+        rows = [p for p in rows if p.posting_id in wanted]
+    return rows, tag
+
+
+def posting_ids_arg(a) -> list:
+    """--posting (repeatable) plus --postings-file (one id per line, '#' comments allowed); [] = no filter."""
+    ids = list(getattr(a, "posting", None) or [])
+    path = getattr(a, "postings_file", None)
+    if path:
+        with open(path, encoding="utf-8") as f:
+            ids += [l.split("#")[0].strip() for l in f if l.split("#")[0].strip()]
+    return ids
+
+
+def _population(con, a, db_path: Optional[str], *, log=print) -> tuple:
     which = chosen_population(a)
     if a.limit is not None and which != "gated":
         raise JevCliError("jev run: --limit applies to --gated only")

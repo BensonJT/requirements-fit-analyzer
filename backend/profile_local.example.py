@@ -53,3 +53,8 @@ ORG_BUILDING_TERMS = [
 # Domains or functions you have never worked in. A judge's "adjacent" years line that names one is never
 # bridged to `meets` (judge2.derive_required_fit). Example: ["human resources", "healthcare", "content strategy"]
 NEVER_BRIDGE_DOMAIN_TERMS = []
+
+# Domains or functions you HAVE worked in, named narrowly. A years line that offers one as an alternative
+# ("in data science, business analytics, process improvement, or related fields") is met through that
+# alternative, so the never-worked-domain rule stands down. Example: ["process improvement", "business analytics"]
+WORKED_ALTERNATIVE_TERMS = []

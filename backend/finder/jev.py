@@ -133,10 +133,10 @@ def prompt_version(facts: list, endpoint: str) -> str:
         json.dumps(Q.READING_RULES),
         json.dumps(Q.KIND_CRITERIA, sort_keys=True),
         json.dumps(Q.VERDICT_CRITERIA, sort_keys=True),
-        json.dumps(Q.kind_question(0), sort_keys=True),
-        json.dumps(Q.verdict_question(0, "required"), sort_keys=True),
-        json.dumps(Q.verdict_question(0, "responsibility"), sort_keys=True),
-        json.dumps(Q.evidence_question(0, ["f01"]), sort_keys=True),
+        json.dumps(Q.kind_question(0, "<line text>"), sort_keys=True),
+        json.dumps(Q.verdict_question(0, "required", "<line text>"), sort_keys=True),
+        json.dumps(Q.verdict_question(0, "responsibility", "<line text>"), sort_keys=True),
+        json.dumps(Q.evidence_question(0, ["f01"], "<line text>"), sort_keys=True),
         model_for(endpoint),
         endpoint,
         requirements.splitter_fingerprint(),
@@ -188,11 +188,11 @@ def select_lines(posting: Posting, *, log=print) -> list:
 def _lines_body(chunk: list, facts: list, model: str) -> dict:
     fact_ids = [f.id for f in facts]
     questions = {}
-    for i, (section, _text) in enumerate(chunk):
+    for i, (section, text) in enumerate(chunk):
         kid, vid, eid = Q.line_question_ids(i)
-        questions[kid] = Q.kind_question(i)
-        questions[vid] = Q.verdict_question(i, section)
-        questions[eid] = Q.evidence_question(i, fact_ids)
+        questions[kid] = Q.kind_question(i, text)
+        questions[vid] = Q.verdict_question(i, section, text)
+        questions[eid] = Q.evidence_question(i, fact_ids, text)
     return {
         "state": {
             "reading_rules": list(Q.READING_RULES),

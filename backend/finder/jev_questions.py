@@ -14,7 +14,7 @@ Design rules applied (vendor jaggedness notes for jev-1.13):
 - instructions and criteria never contradict each other; a high Noul always means "yes"
 """
 
-QUESTION_SET_VERSION = "2026-09-28.1"   # bump on ANY wording change below
+QUESTION_SET_VERSION = "2026-09-29.1"   # bump on ANY wording change below
 
 # ---------------------------------------------------------------- endpoints and model
 PINNED_MODEL = "jev-1.13.0"             # never an alias: aliases move (docs /models)
@@ -249,25 +249,34 @@ VERDICT_CRITERIA = {
 }
 
 
-def kind_question(i: int) -> dict:
+def line_ref(i: int, text: str) -> str:
+    """How a question names its line: the id AND the text, quoted. 2026-09-29: a bare `lines[i].text` index
+    made the model count through the array, and on long line lists it drifted one line (26 of 120 gold postings
+    showed a degree answer sitting on the line before the degree line; Grafana, McKesson and Amgen GenAI were
+    misjudged by it). Quoting the text removes the counting."""
+    quoted = " ".join((text or "").split()).replace('"', "'")
+    return f'line {i:02d} (`lines` id L{i:02d}): "{quoted}"'
+
+
+def kind_question(i: int, text: str) -> dict:
     return {
         "type": "choice",
-        "instructions": f"What kind of statement is `lines[{i}].text`?",
+        "instructions": f"What kind of statement is {line_ref(i, text)}?",
         "criteria": dict(KIND_CRITERIA),
     }
 
 
-def verdict_question(i: int, section: str) -> dict:
+def verdict_question(i: int, section: str, text: str) -> dict:
     """Required and preferred lines ask 'does the candidate meet it'; responsibility lines ask 'has the
     candidate done this kind of work' (judge2 §30.1 draws the same distinction)."""
     if section == "responsibility":
-        ask = f"Do the entries in `facts` show that the candidate has actually done the work in `lines[{i}].text`?"
+        ask = f"Do the entries in `facts` show that the candidate has actually done the work in {line_ref(i, text)}?"
     else:
-        ask = f"Do the entries in `facts` show that the candidate meets the qualification in `lines[{i}].text`?"
+        ask = f"Do the entries in `facts` show that the candidate meets the qualification in {line_ref(i, text)}?"
     return {"type": "choice", "instructions": ask, "criteria": dict(VERDICT_CRITERIA)}
 
 
-def evidence_question(i: int, fact_ids: list) -> dict:
+def evidence_question(i: int, fact_ids: list, text: str) -> dict:
     """Select instead of generate: Jev picks a fact id (verbatim by construction) or `none`. Option
     descriptions are null to save tokens; the ids match `facts[].id` in the state. A Choice allows at most
     255 options, so the fact sheet must parse to <= 254 facts (jev.py enforces this)."""
@@ -276,7 +285,7 @@ def evidence_question(i: int, fact_ids: list) -> dict:
     return {
         "type": "choice",
         "instructions": (f"Which single entry in `facts`, by its id, best shows that the candidate meets or has "
-                         f"done `lines[{i}].text`?"),
+                         f"done {line_ref(i, text)}?"),
         "criteria": criteria,
     }
 

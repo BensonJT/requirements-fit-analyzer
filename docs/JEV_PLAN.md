@@ -241,7 +241,18 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
   - Audit fixes: the lens and calibration bars read BLIND human grades only (§22.4 is binding), and all-basis numbers are reported only.
   - A note records that the TF-IDF comparison is probably in-sample, which makes it conservative against Jev.
   - For the user: the sentinel set gets pinned by `jev sentinel --init` in WP4.
-- [ ] WP4 CLI / launch / pipeline / report: IN FLIGHT on branch `jev-wp4` at `~/jobsearch_wt_jev_wp4`
-- [ ] WP5 audit, suite, scan, DB backup, merge to main
-- [ ] Live: dry run reviewed → gold run → eval → repeatability → injection set
+- [x] WP4 CLI / launch / pipeline / report: merged into `jev-tier` (`4ca1506`). 29 tests.
+  - Orchestrator fix: the sentinel eval reads the PINNED set.
+  - The new `launch.sh` preset renumbers only the last three menu items; presets 1-6 are unchanged.
+- [x] WP5 (2026-09-28):
+  - full suite on `jev-tier`: 753 passed + 1 known; that test passes on main, where `rubric_local.py` exists;
+  - scan clean;
+  - live DB backed up to `/mnt/e/backups/jobsearch/jobsearch_pre_v23_20260928.duckdb` (byte-identical);
+  - `jev-tier` merged into main (`6670b28`), and the live DB migrated to v23 (`vw_lens_fit` still 87,543 rows);
+  - not pushed: the user pushes.
+- [ ] Live, NEXT (each step needs the user's go):
+  1. The user reviews `backend/finder/jev_questions.py` and re-reads `judge2_background.local.md`.
+  2. The user reads the payload: `.venv/bin/python finder.py jev run --eval-set --dry-run --show 1 | less`. Summary already measured: 111 gold postings, about 2.38M tokens (about $0.10), prompt_version `5d412c2c3445`.
+  3. `finder.py jev sentinel --init`.
+  4. Either run the launch.sh preset "Jev gold score (MSA)" (7; about 7.2M tokens, so first set `JEV_DAILY_TOKEN_CAP=10000000` in `.env`), or run the steps by hand: `jev run --eval-set --i-have-approval`, `--run-tag r2`, `--run-tag r3`, `--injection`, then `jev eval`.
 - [ ] Results in STATUS.md; user rules on stage 2

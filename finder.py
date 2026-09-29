@@ -982,6 +982,7 @@ def main():
     s.add_argument("--background-file",
                    help="the fact sheet (default $JUDGE2_BACKGROUND_FILE, else judge2_background.local.md)")
     s.add_argument("--judge2-pv", help="eval: the judge2 prompt_version to compare with (default: the best)")
+    s.add_argument("--prompt-version", help="eval: evaluate this stored Jev prompt_version instead of the current one")
     s.add_argument("--tags", default="r2,r3", help="eval: comma-separated repeat run tags (default r2,r3)")
     s.add_argument("--sentinel-tag", help="eval: also compare this sentinel rerun tag with the canonical run")
     s.add_argument("--no-write", action="store_true", help="eval: print the report, store no jev_evals rows")

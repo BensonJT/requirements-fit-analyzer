@@ -144,6 +144,33 @@ catch), while agreeing (a second-judge `meets`, nothing softer) with at least 85
 column only -- ONE Rank and ONE Why still come from human > second judge (once it clears the bar) > first
 judge > models, computed once in `vw_lens_fit` and read everywhere the rank is used.
 
+### The Jev tier (§33) -- a typed appraiser, reported only
+
+`backend/finder/jev.py` sends each posting to TypeSafe's Jev as two small typed requests (the JD alone for the
+three lens grades, gates and an injection canary; the JD lines plus the parsed fact sheet for a verdict and a
+fact-id evidence pick per line). `required_fit` is derived by judge2's own `derive_required_fit`. Jev output
+shows in a **J3** report column only; nothing it writes moves the rank until its bar passes and the user rules on
+it. Design, bars and the live-phase steps: [`docs/JEV_PLAN.md`](docs/JEV_PLAN.md). Keys and caps: the Jev block in
+`.env.template`.
+
+```bash
+.venv/bin/python finder.py jev run --eval-set --dry-run --show 1       # print exactly what would be sent; no key needed
+.venv/bin/python finder.py jev run --eval-set --i-have-approval        # review the blind gold rows (or JEV_LIVE_OK=1)
+.venv/bin/python finder.py jev run --eval-set --run-tag r2 --i-have-approval   # repeatability rerun (also r3)
+.venv/bin/python finder.py jev run --injection --i-have-approval       # synthetic adversarial set, run tag inj
+.venv/bin/python finder.py jev run --gated --limit 50 --i-have-approval   # postings with any lens model fit >= 0.70
+.venv/bin/python finder.py jev eval                                    # the MSA study, every number beside its bar
+.venv/bin/python finder.py jev status                                  # counts, drift, canary, tokens today, bar
+.venv/bin/python finder.py jev rederive                                # re-derive required_fit from stored lines, no API call
+.venv/bin/python finder.py jev sentinel --init                         # pin 10 sentinel postings once (db/jev_sentinel_ids.txt)
+.venv/bin/python finder.py jev run --sentinel --run-tag wk40 --i-have-approval && \
+  .venv/bin/python finder.py jev eval --sentinel-tag wk40              # stability check against the canonical run
+```
+
+The daily pipeline runs a gated Jev stage just before the second judge only when both `JEV_STAGE_ENABLED=1` and
+`JEV_LIVE_OK=1` are set (off by default; a failure is logged and never stops the report). Spend is capped by
+`JEV_MAX_CALLS_PER_RUN` and `JEV_DAILY_TOKEN_CAP`.
+
 ## Supported platforms
 
 | Platform | List endpoint gives | Detail fetch | Registry identifiers |
@@ -314,7 +341,7 @@ bash launch.sh           # menu, start now
 bash launch.sh 02:00     # menu, then start at the next 02:00
 ```
 
-A menu of presets (full run with the second judge, full run after a retrain, light run without the judge, report only, dry run) prints the exact commands and runs a pre-flight check (setup, database lock, judge fact sheet, Gemini reachability, network) before you confirm, and again at the start time. It waits up to an hour if another process still holds the database. On WSL it registers a Windows scheduled task with WakeToRun five minutes before the start (`scripts/windows/wake_task.sh`), so the laptop can sleep until then; on exit it deletes its own wake tasks and restores sleep unless a keep-awake lease is present. Leave the terminal window open: the launcher is the process that waits. Each run is logged to `logs/launch_<stamp>.log`, and its duration is shown on the menu next time.
+A menu of presets (full run with the second judge, full run after a retrain, light run without the judge, the Jev gold score, report only, dry run) prints the exact commands and runs a pre-flight check (setup, database lock, judge fact sheet, Gemini reachability, the TypeSafe key and endpoint for Jev presets, network) before you confirm, and again at the start time. It waits up to an hour if another process still holds the database. On WSL it registers a Windows scheduled task with WakeToRun five minutes before the start (`scripts/windows/wake_task.sh`), so the laptop can sleep until then; on exit it deletes its own wake tasks and restores sleep unless a keep-awake lease is present. Leave the terminal window open: the launcher is the process that waits. Each run is logged to `logs/launch_<stamp>.log`, and its duration is shown on the menu next time.
 
 ## Querying
 

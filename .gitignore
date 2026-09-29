@@ -169,6 +169,7 @@ backend/profile_local.py
 db/models/
 db/snapshots/
 backend/finder/rubric_local.py
+backend/finder/jev_questions_local.py
 
 # Finder Phase 3: personal evidence manifest, LLM batch files
 evidence.local.toml
@@ -179,6 +180,9 @@ db/embed_lab/
 # The second judge's user-curated background sheet (sprint plan §25, `background="file"`). The example file
 # ships with placeholder content; the real one never does.
 judge2_background.local.md
+
+# The Jev tier's pinned sentinel posting ids (`finder.py jev sentinel --init`), local to its database.
+db/jev_sentinel_ids.txt
 
 # launch.sh per-preset timings (local machine history)
 logs/launch_timings.jsonl

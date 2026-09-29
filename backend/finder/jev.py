@@ -41,6 +41,7 @@ REQUEST_ID_HEADER = "x-typesafe-request-id"
 RETRY_AFTER_CAP_S = 60.0
 _BULLET_RE = re.compile(r"^\s*(?:[-*+•·▪◦●○■□➢►✓–—]|\d{1,3}[.)])\s+")   # a marker, then whitespace
 _WORD_RE = re.compile(r"\w")
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)   # Markdown/HTML comments (edit notes) are never facts
 
 
 class JevResponseError(ValueError):
@@ -92,10 +93,11 @@ def parse_facts(text: str) -> list:
     """Deterministic fact-sheet parser. A Markdown heading ('#...') sets the current heading and is not a
     fact; every other non-blank line (bullet marker stripped) is one Fact, ids f01, f02, ... in document order
     (three digits for every id once there are more than 99). A line with no letters or digits (a '---' rule)
-    is skipped. Raises ValueError past MAX_FACTS."""
+    is skipped, and HTML comments (<!-- ... -->, single- or multi-line) are removed first. Raises ValueError
+    past MAX_FACTS."""
     heading = ""
     items = []
-    for raw in (text or "").splitlines():
+    for raw in _COMMENT_RE.sub("", text or "").splitlines():
         stripped = raw.strip()
         if not stripped:
             continue

@@ -176,6 +176,12 @@ def test_parse_facts_ids_headings_and_markers():
     assert all(f.text != "---" for f in facts)
 
 
+def test_parse_facts_skips_html_comments():
+    text = "<!-- edit note: changed the tools list -->\n# Summary\n- Fact one\n<!-- multi\nline note -->\n- Fact two\n"
+    facts = jev.parse_facts(text)
+    assert [(f.id, f.heading, f.text) for f in facts] == [("f01", "Summary", "Fact one"), ("f02", "Summary", "Fact two")]
+
+
 def test_parse_facts_widens_ids_past_99_and_caps_at_254():
     facts = jev.parse_facts("\n".join(f"- fact number {i}" for i in range(100)))
     assert facts[0].id == "f001" and facts[-1].id == "f100"

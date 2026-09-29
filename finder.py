@@ -964,6 +964,8 @@ def main():
                      help="run: active undecided postings with any lens model fit >= 0.70, in rank order")
     pop.add_argument("--injection", action="store_true",
                      help="run: the synthetic adversarial set (jev_eval.injection_postings), run tag 'inj'")
+    pop.add_argument("--lens-set", action="store_true",
+                     help="run: every posting with a blind human lens grade (for the lens check)")
     pop.add_argument("--sentinel", action="store_true",
                      help="run: the pinned sentinel set (see `jev sentinel --init`); needs --run-tag")
     s.add_argument("--posting", action="append",

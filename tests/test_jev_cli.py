@@ -554,3 +554,15 @@ def test_launch_jev_preflight_fails_fast_without_a_key(tmp_path):
     res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
                          env=dict(env, TYPESAFE_API_KEY="sk-test-not-real"))
     assert "rc=0" in res.stdout and "GET /v1/models 200" in res.stdout
+
+
+def test_lens_set_population_is_blind_human_lens_graded_postings(tmp_path):
+    from backend.ats import store
+    from backend.finder import jev
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    for pid in ("p1", "p2"):
+        _posting(con, pid)
+    con.execute("INSERT INTO human_lens_grades VALUES ('p1', 'h', 'ai', 'bullseye', 'blind', NULL, NULL, 'f.csv', now())")
+    con.execute("INSERT INTO human_lens_grades VALUES ('p2', 'h', 'process', 'stretch', 'seen', NULL, NULL, 'f.csv', now())")
+    assert [p.posting_id for p in jev.lens_set_postings(con)] == ["p1"]
+    con.close()

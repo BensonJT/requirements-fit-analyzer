@@ -30,27 +30,47 @@ def base(**kw):
 
 
 # ---------------------------------------------------------------- workplace type
+# Longest key first at match time (never dict order): "office worker (not remote)" must never win on the
+# "remote" substring. Negation is checked before any key (DEFECT 2026-09-28, docs/STATUS.md).
 _WORKPLACE = {
-    "remote": "remote", "fully remote": "remote", "ora_remote": "remote",
+    "remote": "remote", "fully remote": "remote", "ora_remote": "remote", "virtual worker": "remote",
+    "virtual": "remote", "work from home": "remote", "wfh": "remote", "telework": "remote",
     "hybrid": "hybrid", "ora_hybrid": "hybrid",
     "onsite": "onsite", "on-site": "onsite", "on site": "onsite", "in office": "onsite",
     "in-office": "onsite", "ora_onsite": "onsite", "ora_on_site": "onsite", "office": "onsite",
+    "office worker": "onsite", "field": "onsite", "field based": "onsite", "field-based": "onsite",
 }
+_WORKPLACE_KEYS = sorted(_WORKPLACE, key=len, reverse=True)
+# "NOT Remote", "non-remote", "no remote", "not a remote", "isn't remote", "remote: no" -- the flag says the
+# posting is NOT remote, whatever else the string carries (AT&T Workday: "Office Worker (NOT Remote)").
+_NOT_REMOTE_RE = re.compile(r"\b(?:not|non|no|never|isn'?t|is not)\s*[-_ ]?\s*(?:a\s+)?remote\b"
+                            r"|\bremote\s*[:=]\s*(?:no|false|n)\b", re.I)
+
+
+def _negates_remote(text: str) -> bool:
+    return bool(_NOT_REMOTE_RE.search(text or ""))
 
 
 def workplace_type(value, *location_texts):
     """Maps a platform's workplace/remote flag to remote | hybrid | onsite | None.
-    Falls back to sniffing the location text for 'remote' / 'hybrid'."""
+
+    Order: a boolean flag; a stated negation of remote ("Office Worker (NOT Remote)") -> hybrid if the string
+    also says hybrid, else onsite; an exact key; the LONGEST key found as a substring. Falls back to sniffing
+    the location text for 'remote' / 'hybrid' -- unless that text negates remote too."""
     if isinstance(value, bool):
         return "remote" if value else None
     if value:
         v = str(value).strip().lower()
+        if _negates_remote(v):
+            return "hybrid" if "hybrid" in v else "onsite"
         if v in _WORKPLACE:
             return _WORKPLACE[v]
-        for key, out in _WORKPLACE.items():
+        for key in _WORKPLACE_KEYS:
             if key in v:
-                return out
+                return _WORKPLACE[key]
     joined = " ".join(t for t in location_texts if t).lower()
+    if _negates_remote(joined):
+        return "hybrid" if "hybrid" in joined else "onsite"
     if "remote" in joined:
         return "remote"
     if "hybrid" in joined:

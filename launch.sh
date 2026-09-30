@@ -67,6 +67,11 @@ fi
 #                      the next FULL run screens those rows because their JD is newer than their screen)
 #   sync               finder.py sync (mirror Application_Tracker.md)
 #   top                finder.py top (the END-of-pipeline Top_Jobs file)
+#   jevtop             finder.py top --jev: Jev reviews the Apply / Review subset first (stage 2, user's go 2026-09-30;
+#                      cached rows free, ~$0.15-0.20 a night), then the page is written with the demotion pass --
+#                      required `fails` or `wrong` on every lens leaves Apply / Review for the "Jev demoted" section,
+#                      Gemma's call beside it; adjudicated rows exempt; the rank never moves. A cap stop or a failed
+#                      call still writes the page from the stored reviews.
 #   judge2run          finder.py judge2 run --eval-set: Gemma judges every blind human-graded gold row
 #                      (vw_report_feedback_blind, read at start time, so rows graded today count tonight);
 #                      rows already judged under the current prompt_version are served from cache
@@ -87,15 +92,16 @@ fi
 # (see judge_env below). The top-100 judge and the gold eval set barely overlap (3 of 100 on 9/23), so
 # scoring Gemma against gold needs its own step; that is what FULL + GOLD SCORE adds.
 # The jev* steps export JEV_LIVE_OK=1 (jev_env below) and pre-flight checks the TypeSafe key and endpoint.
-# Jev is REPORTED only: nothing it writes moves the rank until the user rules on stage 2.
+# Stage 2 (user's go 2026-09-30): the jevtop step demotes rows out of Apply / Review on the page; the rank itself
+# (vw_lens_fit.rank_score) still never reads Jev.
 # Volume: Jev gold score sends three gold passes plus the injection set, ~6.8M input tokens at the plan's
 # ~2.2M per pass -- more than the 5M default JEV_DAILY_TOKEN_CAP. Raise the cap in .env for that night, or
 # the later steps stop cleanly at the cap (logged in RunSummary.stopped_by_cap, never an error).
 LABELS=(
-  "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Top_Jobs + maintenance"
+  "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Jev demotion pass + Top_Jobs + maintenance"
   "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (start at 00:00 to finish by ~7:30)"
   "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
-  "Overnight LIGHT           sweep + screen + coverage + Top_Jobs + maintenance; no Gemma judge"
+  "Overnight LIGHT           sweep + screen + coverage + Jev demotion pass + Top_Jobs + maintenance; no Gemma judge"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
   "Jev gold score (MSA)      Jev reviews the gold set, two repeat runs, the injection set, then jev eval; no sweep"
@@ -105,10 +111,10 @@ LABELS=(
 )
 ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
-  "sweep:--llm-top 100|top|maint"
-  "sweep:--llm-top 100|judge2run|judge2eval|top|maint"
-  "retrain|sweep:--llm-top 100|top|maint"
-  "sweep:|top|maint"
+  "sweep:--llm-top 100|jevtop|maint"
+  "sweep:--llm-top 100|judge2run|judge2eval|jevtop|maint"
+  "retrain|sweep:--llm-top 100|jevtop|maint"
+  "sweep:|jevtop|maint"
   "judge2run|judge2eval|maint"
   "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
   "jevrun|jevrep|jevinj|jeveval|maint"
@@ -164,7 +170,7 @@ case "$CHOICE" in
 esac
 
 DRY_RUN=false
-[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|top|maint"; }
+[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|jevtop|maint"; }
 IFS='|' read -r -a STEPS <<<"$PRESET"
 # jevrep is two runs; expand it so each rerun is its own step (own log line, own exit code).
 _steps=()
@@ -204,6 +210,7 @@ step_cmd() {  # the literal command line a step runs
     retrain) echo "$PY -u finder.py retrain" ;;
     sync)    echo "$PY -u finder.py sync" ;;
     top)     echo "$PY -u finder.py top" ;;
+    jevtop)  echo "$PY -u finder.py top --jev --background-file $JUDGE_BG" ;;
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
     judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
     judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;
@@ -277,7 +284,7 @@ echo
 echo "───────────────────────────────────────────────────────────────────────"
 for s in "${STEPS[@]}"; do echo "  step    : $(step_cmd "$s")"; done
 [ "$USES_JUDGE" = true ] && echo "  judge   : Gemma second judge ON, fact sheet $(basename "$JUDGE_BG")"
-[ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); reported only"
+[ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); jevtop = the demotion pass over Apply / Review"
 if [ "$WAIT_SECS" -gt 0 ]; then
   printf "  starts  : %s  (in %dh %dm)\n" "$(date -d "@$START_EPOCH" '+%a %Y-%m-%d %H:%M')" \
     "$((WAIT_SECS / 3600))" "$(((WAIT_SECS % 3600) / 60))"
@@ -371,7 +378,7 @@ for s in "${STEPS[@]}"; do
   if [ "$RC" -ne 0 ]; then
     STATUS=$RC
     # A failed retrain or sweep still leaves a usable database: keep going so Top_Jobs is written.
-    [ "$s" = "top" ] || echo "launch: step failed -- continuing so the report is still written"
+    [ "$s" = "top" ] || [ "$s" = "jevtop" ] || echo "launch: step failed -- continuing so the report is still written"
   fi
 done
 

@@ -201,3 +201,15 @@ def test_qualifications_we_prefer_opens_preferred():
     jd = ("Qualifications You Must Have\n- Bachelor's degree and 5 years of operations experience\n"
           "Qualifications We Prefer\n- Active and transferable U.S. government issued security clearance.\n")
     assert _required(jd) == ["Bachelor's degree and 5 years of operations experience"]
+
+
+def test_environment_qualifier_years_line_unclear_becomes_adjacent():
+    stripe = {"section": "required", "kind": "years_function", "verdict": "unclear", "evidence": None,
+              "line": "7+ years of work experience, with a significant portion in strategic / operational roles "
+                      "at high-growth tech companies or consulting."}
+    assert judge2._effective_verdict(stripe) == "adjacent"
+    ok = {"section": "required", "kind": "skill", "verdict": "met", "evidence": "x", "line": "SQL"}
+    fit, why = judge2.derive_required_fit([stripe, ok])
+    assert fit == "meets" and why.startswith("bridged:")
+    plain = dict(stripe, line="7+ years of experience in healthcare operations")
+    assert judge2._effective_verdict(plain) == "unclear"

@@ -14,7 +14,7 @@ Design rules applied (vendor jaggedness notes for jev-1.13):
 - instructions and criteria never contradict each other; a high Noul always means "yes"
 """
 
-QUESTION_SET_VERSION = "2026-09-29.1"   # bump on ANY wording change below
+QUESTION_SET_VERSION = "2026-09-29.2"   # bump on ANY wording change below
 
 # ---------------------------------------------------------------- endpoints and model
 PINNED_MODEL = "jev-1.13.0"             # never an alias: aliases move (docs /models)
@@ -212,8 +212,10 @@ READING_RULES = [
      "with no disqualifier shown. 'Active', 'current', 'required to start', a polygraph, or a held level the "
      "facts do not show is unmet unless the facts show it is currently held."),
     ("A certification line that names its issuing bodies is unmet unless the facts show that specific issuer."),
-    ("A line naming tools with 'such as', 'e.g.', 'or similar', 'or equivalent', or joined by 'or', is met by "
-     "any comparable tool of the same kind in the facts. A single named tool the facts do not show is unmet."),
+    ("A line naming tools with 'such as', 'e.g.', 'or similar', 'or equivalent', joined by 'or', or as examples "
+     "in parentheses after a category ('data visualization tools (Power BI, Tableau)'), asks for the category: "
+     "it is met by any comparable tool of the same kind in the facts. A single named tool the facts do not show "
+     "is unmet."),
     ("Finance: budget, forecast or cost-model work is met by budget-management work done outside a finance "
      "department. A line asking for time in a finance organization, FP&A, accounting, named finance systems, "
      "or a seat inside the CFO's organization is not met by that same work."),
@@ -224,7 +226,8 @@ READING_RULES = [
      "(process redesign, data, transformation or program management applied to that domain) is rated on that "
      "work: entering unfamiliar domains is the candidate's pattern (the Enterprise Access Management entry). An "
      "environment qualifier ('at high-growth tech companies', 'in consulting') is not a domain: comparable "
-     "transformation work inside a large enterprise is adjacent."),
+     "transformation work inside a large enterprise is adjacent, never unclear; the candidate's IT and network "
+     "organizations are technology settings."),
     ("A degree line that allows 'or equivalent experience' or 'equivalent years may substitute' is met when the "
      "facts show those years, whatever the degree subject."),
 ]

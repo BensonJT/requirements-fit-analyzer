@@ -616,6 +616,14 @@ def _names_a_function(line_text: str) -> bool:
     return len(words) >= 2
 
 
+# 2026-09-29 (user ruling): an ENVIRONMENT qualifier on a years line ("a significant portion in strategic /
+# operational roles at high-growth tech companies or consulting") is close, not unknown: a years line the model
+# left `unclear` on such a qualifier is scored `adjacent` (it can bridge; it never fails the posting on its own).
+_ENVIRONMENT_QUALIFIER_RE = re.compile(
+    r"high[- ]growth|hyper[- ]growth|start[- ]?ups?|scale[- ]?ups?|tech(?:nology)? compan|\bin consulting\b"
+    r"|consulting firm|professional services firm|big ?(?:4|four)|top[- ]tier|fortune \d+", re.I)
+
+
 def _effective_verdict(line_obj) -> str:
     """The verdict `derive_required_fit` acts on: the stored verdict, except that a `years_function` line
     that NAMES a function, rated `met` on evidence that shows no span of time, counts as `unclear` (a generic
@@ -624,6 +632,9 @@ def _effective_verdict(line_obj) -> str:
     A line with NO `evidence` key at all (a plain-dict test fixture) is left as rated."""
     verdict = _get(line_obj, "verdict")
     evidence = _get(line_obj, "evidence")
+    if (verdict == "unclear" and _effective_kind(line_obj) == "years_function"
+            and _ENVIRONMENT_QUALIFIER_RE.search(_line_text(line_obj))):
+        return "adjacent"
     if (verdict == "met" and _get(line_obj, "kind") == "years_function" and evidence is not None
             and not _EVIDENCE_HAS_YEARS_RE.search(evidence)
             and _names_a_function(_get(line_obj, "line") or "")):

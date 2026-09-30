@@ -951,7 +951,7 @@ def test_derive_soft_unclear_lines_do_not_block_meets_until_a_majority():
             _line(kind="skill", verdict="met", line="L2"), _line(kind="skill", verdict="met", line="L3"),
             _line(kind="skill", verdict="unclear", line="Strong communication skills")]
     assert judge2.derive_required_fit(lines, title="Analyst")[0] == "meets"
-    lines = [_line(kind="years_function", verdict="met", line="L1"),
+    lines = [_line(kind="years_function", verdict="met", line="L1 5+ years of operations"),
             _line(kind="skill", verdict="met", line="L2"),
             _line(kind="skill", verdict="unclear", line="L3"), _line(kind="skill", verdict="unclear", line="L4")]
     assert judge2.derive_required_fit(lines, title="Analyst")[0] == "partial"
@@ -1207,7 +1207,7 @@ def _resp(line="a duty", verdict="met"):
 
 def test_derive_bridge_one_adjacent_hard_gate_reaches_meets():
     lines = [_line(kind="clearance", verdict="met", line="L1 Secret clearance"),
-            _line(kind="years_function", verdict="adjacent", line="L2")]
+            _line(kind="years_function", verdict="adjacent", line="L2 5+ years of operations")]
     fit, why = judge2.derive_required_fit(lines, title="Analyst")
     assert fit == "meets"
     assert why.startswith("bridged:") and "L2" in why
@@ -1248,7 +1248,7 @@ def test_derive_title_tool_adjacent_with_years_function_met_still_partial():
 def test_derive_years_function_adjacent_with_title_tool_met_bridges_to_meets():
     # the years_function gate is the one rated adjacent this time -- it bridges, and the title-tool gate,
     # rated met, is just another hard gate that is already met.
-    lines = [_line(kind="years_function", verdict="adjacent", line="L1"),
+    lines = [_line(kind="years_function", verdict="adjacent", line="L1 5+ years of operations"),
             _line(kind="tool", verdict="met", line="Experience with Tableau required.")]
     fit, why = judge2.derive_required_fit(lines, title="Tableau Analyst")
     assert fit == "meets"

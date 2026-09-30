@@ -185,3 +185,19 @@ def test_or_list_with_a_worked_alternative_is_not_a_never_worked_domain_line(mon
     assert judge2.derive_required_fit([line])[0] == "meets"
     monkeypatch.setattr(P, "WORKED_ALTERNATIVE_TERMS", [], raising=False)
     assert judge2.names_never_worked_domain(amgen)             # empty list = the old behaviour
+
+
+def test_derive_noise_and_years_kind_without_a_years_count():
+    finra = {"section": "required", "kind": "licence", "verdict": "unclear", "evidence": None,
+             "line": "FINRA licenses are not required and will not be supported for this role."}
+    ok = {"section": "required", "kind": "skill", "verdict": "met", "evidence": "x", "line": "Process mapping"}
+    assert judge2.derive_required_fit([finra, ok])[0] == "meets"
+    assert judge2._effective_kind({"kind": "years_function",
+                                   "line": "Experience in biotechnology or another regulated industry."}) == "skill"
+    assert judge2._effective_kind({"kind": "years_function", "line": "5+ years in operations"}) == "years_function"
+
+
+def test_qualifications_we_prefer_opens_preferred():
+    jd = ("Qualifications You Must Have\n- Bachelor's degree and 5 years of operations experience\n"
+          "Qualifications We Prefer\n- Active and transferable U.S. government issued security clearance.\n")
+    assert _required(jd) == ["Bachelor's degree and 5 years of operations experience"]

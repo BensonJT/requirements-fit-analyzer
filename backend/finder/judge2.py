@@ -659,6 +659,10 @@ def _effective_kind(line_obj) -> str:
     # project, program, or operations management" came back as `skill`)
     if kind in ("skill", "tool") and requirements.YEARS_PHRASE.search(text) and re.search(r"\b(?:years?|yrs?)\b", text, re.I):
         return "years_function"
+    # 2026-09-29: and a line with NO years count is not a years line ("Experience in biotechnology,
+    # pharmaceuticals, healthcare or another regulated industry" came back as `years_function`)
+    if kind == "years_function" and not re.search(r"\b(?:years?|yrs?)\b", text, re.I):
+        return "skill"
     if kind == "clearance" and not _CLEARANCE_WORDS.search(text):
         return "skill"
     if kind == "licence" and not _LICENCE_WORDS.search(text):
@@ -666,10 +670,23 @@ def _effective_kind(line_obj) -> str:
     return kind
 
 
+# 2026-09-29: lines that reach a judge but are never a requirement of the candidate: a line that says something is
+# NOT required ("FINRA licenses are not required and will not be supported for this role" was scored as an
+# unclear licence gate), and apply-anyway boilerplate. Derive-time only (not hashed into any prompt_version), so
+# stored answers re-derive without a re-ask.
+DERIVE_NOISE = re.compile(
+    r"\b(?:is|are) not (?:required|a requirement)\b|\bnot a requirement\b|\bwill not be supported\b"
+    r"|\bencouraged to apply\b|\bminimum requirements to be considered\b"
+    r"|\bin the fight against\b",   # mission slogans in the Required block (Amgen)
+    re.I)
+
+
 def _scored(lines, section: str) -> list:
     """The lines of `section` a derivation acts on: judge noise (pay, benefits, EEO, marketing) is dropped here
-    too, so an answer stored before a JUDGE_NOISE addition re-derives cleanly without re-asking the model."""
-    return [l for l in lines if _get(l, "section") == section and not judge_noise(_line_text(l))]
+    too, so an answer stored before a JUDGE_NOISE addition re-derives cleanly without re-asking the model;
+    DERIVE_NOISE likewise."""
+    return [l for l in lines if _get(l, "section") == section and not judge_noise(_line_text(l))
+            and not DERIVE_NOISE.search(_line_text(l))]
 
 
 def _tool_is_the_job(line_obj, title: str) -> bool:

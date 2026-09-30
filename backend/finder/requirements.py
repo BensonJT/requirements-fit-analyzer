@@ -18,7 +18,7 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-09-29.3"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-09-29.4"   # bump when splitting or classing changes (part of the requirement cache key)
                                     # 2026-09-29.3: "What Makes You a Great Fit" (and good/strong fit) opens Required
                                     # 2026-09-29.2: a bare clearance label ("Clearance Required", "Security
                                     # Clearance:") is joined to the requirement that follows it; benefit sections
@@ -52,7 +52,7 @@ PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you
                    # 2026-09-29.3: Grafana's "What Makes You a Great Fit:" was read as more responsibilities
                    r"|great fit|good fit|strong fit|makes you")
 # Preferred headings the rules' PREFERRED_HEADINGS does not carry (splitter only; the rule engine is unchanged).
-SPLITTER_PREFERRED_HEADINGS = r"desirable|a plus|good to have"
+SPLITTER_PREFERRED_HEADINGS = r"desirable|a plus|good to have|\bwe prefer\b|\bprefer(?:red)? to have\b"   # 2026-09-29.4: RTX "Qualifications We Prefer"
 DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits|perks|what we offer|why join"
                  r"|compensation|pay range|salary|equal (employment )?opportunity|eeo|our commitment|life at"
                  r"|accommodation|privacy|disclaimer|additional information|how to apply|pay transparency"

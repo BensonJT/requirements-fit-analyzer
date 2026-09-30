@@ -688,7 +688,10 @@ def _effective_kind(line_obj) -> str:
 DERIVE_NOISE = re.compile(
     r"\b(?:is|are) not (?:required|a requirement)\b|\bnot a requirement\b|\bwill not be supported\b"
     r"|\bencouraged to apply\b|\bminimum requirements to be considered\b"
-    r"|\bin the fight against\b",   # mission slogans in the Required block (Amgen)
+    r"|\bin the fight against\b|\bour unique contributions to serve\b"   # mission slogans (Amgen)
+    r"|with these qualifications:?\s*$"        # a heading sentence that survived as a line
+    r"|^(?:this|the) role (?:sits|is|reports|works|lives)\b"   # describes the job, not the candidate (McKesson)
+    r"|^there is no dedicated\b",
     re.I)
 
 

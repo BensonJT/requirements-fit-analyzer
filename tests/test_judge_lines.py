@@ -213,3 +213,12 @@ def test_environment_qualifier_years_line_unclear_becomes_adjacent():
     assert fit == "meets" and why.startswith("bridged:")
     plain = dict(stripe, line="7+ years of experience in healthcare operations")
     assert judge2._effective_verdict(plain) == "unclear"
+
+
+def test_derive_noise_drops_role_description_and_heading_sentences():
+    noise = ["This role sits in Finance, not in a BI or data engineering organization.",
+             "The professional we seek is an Enterprise Generative AI Platform Engineer with these qualifications:",
+             "We are all different, yet we all use our unique contributions to serve patients."]
+    for t in noise:
+        assert judge2.DERIVE_NOISE.search(t), t
+    assert not judge2.DERIVE_NOISE.search("This role requires 5+ years of process improvement")

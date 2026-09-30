@@ -317,7 +317,10 @@ JUDGE_NOISE = re.compile(
     r"|position is classified as|role type defined below|market leading businesses|push the boundaries"
     r"|flexible work models?|vehicle program|team member (?:vehicle|lease|discount)|community outreach"
     r"|corporate sponsored|puerto rico|as an organization dedicated|as we work to develop|brings the strength"
-    r"|include but are not limited to|penalized for)\b|\bredact\w*", re.I)
+    r"|include but are not limited to|penalized for"
+    # 2026-09-30.1: USAJobs application mechanics
+    r"|education credentials have been deemed|standard position descriptions|spd library|department of education"
+    r"|accredited \(or pre-accredited\)|time-in-grade|sf-50)\b|\bredact\w*", re.I)
 
 
 # 2026-09-29.2: a line whose subject is WHERE or WHEN the work happens (on-site days, travel, residence, schedule)
@@ -691,7 +694,10 @@ DERIVE_NOISE = re.compile(
     r"|\bin the fight against\b|\bour unique contributions to serve\b"   # mission slogans (Amgen)
     r"|with these qualifications:?\s*$"        # a heading sentence that survived as a line
     r"|^(?:this|the) role (?:sits|is|reports|works|lives)\b"   # describes the job, not the candidate (McKesson)
-    r"|^there is no dedicated\b",
+    r"|^there is no dedicated\b"
+    # 2026-09-30.1: USAJobs application mechanics that reached the judges as 'required' lines
+    r"|education credentials have been deemed|standard position descriptions|spd library|department of education"
+    r"|accredited \(or pre-accredited\)|time-in-grade|\bsf-50\b",
     re.I)
 
 

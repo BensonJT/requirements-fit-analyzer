@@ -18,7 +18,12 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-09-29.4"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-09-30.1"   # bump when splitting or classing changes (part of the requirement cache key)
+                                    # 2026-09-30.1: USAJobs paragraph dumps -- an inline qualification opener
+                                    # ("SPECIALIZED EXPERIENCE GS-14:", "Specialized experience is defined as:")
+                                    # opens Required mid-paragraph; application mechanics (time-in-grade, SF-50,
+                                    # transcripts) drop sentence by sentence; sentences split on a missing space
+                                    # and on inline "1) ... 2) ..." enumerations
                                     # 2026-09-29.3: "What Makes You a Great Fit" (and good/strong fit) opens Required
                                     # 2026-09-29.2: a bare clearance label ("Clearance Required", "Security
                                     # Clearance:") is joined to the requirement that follows it; benefit sections
@@ -97,6 +102,49 @@ NOTICE = re.compile(r"\b(scams?|fraud\w*|money transfers?|credit card numbers|of
                     r"|eligible for (?:a |an )?(?:bonus|incentive|commission)|for more information about career"
                     r"|to advance to a new job level|not genuine)\b", re.I)
 PAY = re.compile(r"\$\s?\d|\b(?:salary|pay range|base pay|hourly rate)\b", re.I)
+# 2026-09-30.1: USAJobs announcements arrive as a few giant paragraphs. The qualifications are sentences inside
+# them, opened by a label the heading pass cannot see ("SPECIALIZED EXPERIENCE GS-14:", "Specialized experience
+# is defined as:", "To qualify for this position, ..."); everything from that opener on is Required until the next
+# heading. The application mechanics around them (time-in-grade, SF-50, transcripts, OPM standards) are notices
+# dropped piece by piece: dropping the whole paragraph would drop the requirements with it.
+USAJOBS_REQUIRED_OPENER = re.compile(
+    r"\b(?:specialized experience(?: requirements?)?\s*:|specialized experience (?:is defined as|would be demonstrated by"
+    r"|includes?|include|for this position includes?)|examples? of specialized experience includes?"
+    r"|qualifying specialized experience includes?"
+    r"|(?:you|applicants) must have (?:at least )?one(?: \(1\))?[- ]year of specialized experience"
+    r"|to qualify (?:for|at) (?:this position|the [A-Z0-9/-]+ (?:grade |pay band|level)|the GS-\d+)"
+    r"|basic requirements?(?: for [^:]{0,60})?\s*:|minimum qualifications?\s*:|basic education requirement)", re.I)
+USAJOBS_NOTICE = re.compile(
+    r"\b(?:time-in-grade|sf-50|(?:your )?resume must|transcripts?|opm|office of personnel management|qualification standards"
+    r"|closing date of (?:this|the) announcement|paid and unpaid experience|volunteer work|to be creditable"
+    r"|substitution of education|superior academic achievement|usa hire|equivalent in other pay systems"
+    r"|next lower grade|federal employees|52 weeks|education credentials have been deemed|conventional u\.s\. education"
+    r"|accredited \(or pre-accredited\)|department of education|standard position descriptions?|spd library"
+    r"|position descriptions?|who may apply|credit for specialized experience|per week for each period"
+    r"|level of difficulty and responsibility|equivalent to (?:at least )?the [A-Z]{2}-\d+|in the federal (?:service|government)"
+    r"|receive credit for|qualifying experience|volunteer experience|full year of work|hours of work per week"
+    r"|part-time experience|credited on the basis|nature of (?:their|your) duties|physical (?:requirements|demands)"
+    r"|sedentary|americorps|peace corps|office setting|you may qualify based on|as described below"
+    # assessment mechanics
+    r"|will be (?:evaluated|assessed) (?:based )?on|assessment (?:results|process|for this application)|situational judgment test"
+    r"|ssjt|timed test|cut score|answer each item|must be fully documented|application materials|supporting documents"
+    r"|applicants may (?:also )?(?:substitute|combine)|education portion|month and year start)\b", re.I)
+LONG_LINE = 600   # a paragraph-dump line: handled sentence by sentence, never dropped or kept whole
+_SENTENCE_SPLIT = re.compile(r"(?<!\bU\.S)(?<=[.!?])\s+(?=[A-Z(])|(?<=[a-z][a-z][.!?])(?=[A-Z][a-z])|\s(?=\(?\d{1,2}\)\s+[A-Z])")
+
+
+def _unwrap_paragraphs(text: str) -> str:
+    """2026-09-30.1: a line longer than LONG_LINE (a USAJobs announcement is a handful of 2-6K-character paragraphs)
+    becomes one line per sentence BEFORE boilerplate stripping, so `strip_boilerplate`'s two-markers-per-line drop
+    and the heading pass judge sentences, not paragraphs. Sentences split on ". Capital", on a missing space after a
+    period ("service.Specialized"), and before inline "1) ..." / "(2) ..." items."""
+    out = []
+    for line in (text or "").splitlines():
+        if len(line) > LONG_LINE:
+            out.extend(p.strip() for p in _SENTENCE_SPLIT.split(line) if p and p.strip())
+        else:
+            out.append(line)
+    return "\n".join(out)
 # Action verbs that rescue a line from `logistics`: a line naming a piece of work (even one that
 # also mentions hybrid/remote/clearance/etc.) is `work`, not logistics -- the verb is the subject.
 WORK_RESCUE = re.compile(
@@ -310,7 +358,7 @@ def _subheading(line: str) -> bool:
 def _pieces(line: str) -> list:
     """A content line as unit-sized pieces: sentences, then ';' splits, then word-bounded chunks."""
     out = []
-    for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z(])", line):
+    for sent in _SENTENCE_SPLIT.split(line):
         parts = [sent] if len(sent) <= MAX_UNIT else re.split(r";\s*", sent)
         for part in parts:
             while len(part) > MAX_UNIT:
@@ -369,7 +417,7 @@ def classify(text: str) -> tuple:
 def split_requirements(text: str, max_units: int = 0) -> list:
     """Requirement units in document order. `max_units` > 0 keeps the highest-weight units (ties: earlier first);
     coverage applies the §16.3 cap itself after specificity is known."""
-    lines = rejoin_lines(strip_boilerplate(text or ""))
+    lines = rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or "")))
     kinds = [_heading_kind(l) if l else None for l in lines]
     has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
     section = "intro" if has_headings else "body"
@@ -385,7 +433,14 @@ def split_requirements(text: str, max_units: int = 0) -> list:
         bulleted = bool(_BULLET.match(line)) or bool(QUALIFICATION_TERM.search(line))   # an itemized bullet (or a
         # named qualification) is a deliberate claim, even a short one
         for piece in _pieces(_BULLET.sub("", line).strip()):
-            piece = piece.strip()
+            piece = re.sub(r"^\(?\d{1,2}\)\s*", "", piece.strip())    # an inline "1) ..." item
+            opener = USAJOBS_REQUIRED_OPENER.search(piece)
+            if opener:
+                section = "required"     # 2026-09-30.1: the opener holds for the rest of the paragraph and beyond
+                if opener.start() <= 3:
+                    piece = piece[opener.end():].lstrip(":;,- ").strip()
+            if USAJOBS_NOTICE.search(piece):
+                continue
             # 2026-09-29.2: a stated status ("..., preferred", "Must ...") belongs to its own sentence, not to every
             # sentence the rejoined line carries
             line_section = inline_section(piece) or section

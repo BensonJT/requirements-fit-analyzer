@@ -542,6 +542,7 @@ MODEL_LENS_MIN = {"fit_process": 0.70, "fit_technical": 0.80, "fit_ai": 0.70}
 MODEL_REQ_APPLY = 0.60
 MODEL_REQ_REVIEW = 0.40
 TOP_UNCLEAR_CAP = 60
+UNMET_CELL_CHARS = 110       # Gemma's first unmet line in the Jev demoted table
 TOP_UNCLEAR_BANDS = ("very_strong", "strong")
 
 _MODEL_LENS_SQL = " OR ".join(f"coalesce(f.{col}, 0) >= {t}" for col, t in MODEL_LENS_MIN.items())
@@ -670,8 +671,13 @@ def _prob(p) -> str:
 
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
                    review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS,
-                   unclear_cap: int = TOP_UNCLEAR_CAP) -> Path:
+                   unclear_cap: int = TOP_UNCLEAR_CAP, jev_gate_on: bool = True) -> Path:
     """Writes Top_Jobs_YYYYMMDD.md: the end-of-pipeline list.
+
+    Jev's demotion pass (backend/finder/jev_gate.py, stage 2, user's go 2026-09-30) runs last: a row Jev's
+    canonical review fails on required fit, or grades wrong on every lens, leaves Apply / Review for a visible
+    "Jev demoted" section with Jev's reason and Gemma's call beside it. Adjudicated rows are exempt; the rank
+    itself never moves. `jev_gate_on=False` writes the page without the pass.
 
     Apply / Review come from the judge's grades where a posting has one (`vw_selection`) and from the lens
     models where it does not (`model_rows`, marked "model" in the Required column with the probability shown
@@ -715,8 +721,22 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
     unclear = unclear_rows(con, include_decided=include_decided, levels=levels)
     n_non_us += sum(1 for r in unclear if non_us_primary(r[7]))
     unclear = [r for r in unclear if not non_us_primary(r[7])]
+    # The Jev demotion pass, last of all (jev_gate.py): reads stored reviews only, never calls anything.
+    from . import jev_gate
+    demoted, jev_status = {}, "off"
+    if jev_gate_on:
+        candidates = {}
+        for r in apply_rows:
+            candidates.setdefault(r[0], "apply")
+        for r in review_rows:
+            candidates.setdefault(r[0], "review")
+        demoted = jev_gate.demotions(con, candidates)
+        jev_status = jev_gate.gate_status(con)
+        demoted_rows = [r for r in apply_rows + review_rows if r[0] in demoted]
+        apply_rows = [r for r in apply_rows if r[0] not in demoted]
+        review_rows = [r for r in review_rows if r[0] not in demoted]
     shown_ids = [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]] + \
-                [r[0] for r in unclear[:unclear_cap]]
+                [r[0] for r in unclear[:unclear_cap]] + list(demoted)
     far = _long_commute_sites(con, shown_ids)
     held = _held_ids(con, shown_ids)
     apply_gates = _gate_counts(con, "apply", levels)
@@ -732,11 +752,13 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
          f"{len(model_apply)} apply, {len(model_review)} review, {len(unclear)} requirement unclear "
          f"({n_non_us} with a non-US primary location left out). "
          f"**Levels shown:** {', '.join(levels)}. **Decided/in-tracker rows:** "
-         f"{'included' if include_decided else 'hidden'}.\n",
+         f"{'included' if include_decided else 'hidden'}. **Jev demotion pass:** {jev_status}; "
+         f"{len(demoted)} row(s) demoted out of Apply / Review (see the Jev demoted section).\n",
          "_Rows marked `model` in the Required column were graded by the lens models, not the judge: the grade "
          "column shows each lens model's probability, and the Required cell shows the required-fit model's "
-         "probability (Apply at 0.60 or above, Review from 0.40). **J3** is Jev's call, reported only and "
-         "never ranked: required m/p/f, then process·technical·AI grade initials (B/A/S/W)._\n"]
+         "probability (Apply at 0.60 or above, Review from 0.40). **J3** is Jev's call: required m/p/f, then "
+         "process·technical·AI grade initials (B/A/S/W). It never moves the rank; since 2026-09-30 it can demote a "
+         "row into the Jev demoted section below._\n"]
 
     def gate_line(gates: dict, label: str) -> str:
         return (f"of {gates['total']} judged {label}-tier rows: "
@@ -777,6 +799,34 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         w.append(header)
         w.extend(row_line(r) for r in review_rows[:review_cap])
     w.append("")
+    if jev_gate_on:
+        w.append(f"## Jev demoted — {len(demoted)}\n")
+        w.append("_Rows Jev's own review took out of Apply / Review: required fit `fails`, or `wrong` on every lens, "
+                 "under a prompt_version whose required bar passed. Your adjudicated rows are exempt (human > Jev). "
+                 "Gemma's call sits beside each as evidence, not a tiebreaker. **To overrule:** `finder.py mark "
+                 "<id> build` — that makes it a human label, exempts the row from now on, and becomes a gold "
+                 "ruling the next `jev eval` scores Jev against._\n")
+        if not demoted:
+            w.append("_Nothing demoted this run._\n")
+        else:
+            w.append("| Was | Company | Title | Judge P / T / AI · req | Jev P / T / AI · req | Gemma | Jev why |\n"
+                     "|---|---|---|---|---|---|---|")
+            for r in demoted_rows:
+                d = demoted[r[0]]
+                (pid, employer, title, url, gp, gt, ga, _n_good, _bull, req_fit, _unmet, *_rest) = r[:22]
+                if pid in model_ids:
+                    judge = f"{_prob(gp)} / {_prob(gt)} / {_prob(ga)} · model"
+                else:
+                    judge = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)} · {req_fit or '—'}"
+                jev = " / ".join(_grade_compact(g) for g in d.grades) + f" · {d.required_fit or '—'}"
+                gemma = d.gemma_required or "—"
+                if d.gemma_required == "fails" and d.gemma_unmet:
+                    gemma += f": {_cell(str(d.gemma_unmet)[:UNMET_CELL_CHARS])}"
+                why = "; ".join(d.reasons) + (f" — {_cell(d.derive_why)}" if d.derive_why else "")
+                if d.unmet:
+                    why += " · unmet: " + " ; ".join(_cell(u) for u in d.unmet)
+                w.append(f"| {d.was} | {_cell(employer)} | {_link(title, url)} | {judge} | {jev} | {gemma} | {why} |")
+        w.append("")
     w.append(f"## Requirement unclear (strong score, no judge grade, required-fit model below "
              f"{MODEL_REQ_REVIEW:.2f} or no lens above its bar) — {len(unclear)}\n")
     w.append("_The required-fit model is unreliable in this range, so these are never hidden: read the "

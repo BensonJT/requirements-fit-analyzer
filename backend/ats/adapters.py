@@ -223,7 +223,10 @@ def _workday_pull(c, url, public, applied, max_pages, search_text=""):
                 title=p.get("title"),
                 url=f"{public}{p.get('externalPath', '')}",
                 location_primary=N.primary_location(loc_text),
-                workplace_type=N.workplace_type(None, loc_text),
+                # The list feed carries `remoteType` too (AT&T "Office Worker (NOT Remote)", GM "Hybrid"); ignoring
+                # it here left list-only rows NULL and let a location sniff overwrite the detail's flag (DEFECT
+                # 2026-09-28).
+                workplace_type=N.workplace_type(p.get("remoteType"), loc_text),
                 posted_at=N.parse_date(p.get("postedOn")),
                 raw_json=N.raw(p),
                 _external_path=p.get("externalPath"),

@@ -298,18 +298,30 @@ def cmd_lenses(con, a):
 
 
 def cmd_top(con, a):
-    """END-of-pipeline apply/review list, read off vw_selection -- run by hand after a judge import."""
+    """END-of-pipeline apply/review list, read off vw_selection -- run by hand after a judge import.
+    `--jev` first sends the Apply / Review subset to Jev (stage 2, backend/finder/jev_gate.py; live only with
+    --i-have-approval or JEV_LIVE_OK=1); the page is written either way, with the demotion pass applied from
+    the stored reviews unless --no-jev-gate."""
     if not a.out and not a.vault and not a.stdout:
         sys.exit("top: set JOBSEARCH_VAULT_DIR, or pass --out or --stdout")
+    if a.jev:
+        from backend.finder import jev_cli, jev_gate
+        try:
+            facts = jev_cli.load_facts(a.background_file)
+            jev_gate.run_over_top(con, facts=facts, live_ok=jev_cli.live_ok(a.i_have_approval),
+                                  include_decided=a.include_decided, apply_cap=a.apply_cap, review_cap=a.review_cap)
+        except jev_cli.JevCliError as exc:
+            print(f"top --jev: {exc}; writing the report from the stored reviews")
     if a.stdout:
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = report.write_top_jobs(con, a.vault, out_path=tmp, apply_cap=a.apply_cap,
-                                         review_cap=a.review_cap, include_decided=a.include_decided)
+                                         review_cap=a.review_cap, include_decided=a.include_decided,
+                                         jev_gate_on=not a.no_jev_gate)
             print(path.read_text(encoding="utf-8"))
         return
     path = report.write_top_jobs(con, a.vault, out_path=a.out, apply_cap=a.apply_cap, review_cap=a.review_cap,
-                                 include_decided=a.include_decided)
+                                 include_decided=a.include_decided, jev_gate_on=not a.no_jev_gate)
     print(path)
 
 
@@ -785,6 +797,13 @@ def main():
     s.add_argument("--include-decided", action="store_true", help="also show already-decided / in-tracker rows")
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
     s.add_argument("--stdout", action="store_true", help="print the markdown instead of writing a file")
+    s.add_argument("--jev", action="store_true",
+                   help="first have Jev review the Apply / Review subset (stage 2 demotion pass; needs "
+                        "--i-have-approval or JEV_LIVE_OK=1 for the live call)")
+    s.add_argument("--i-have-approval", action="store_true", help="--jev: authorize the live Jev call")
+    s.add_argument("--background-file", help="--jev: the fact sheet (default judge2_background.local.md)")
+    s.add_argument("--no-jev-gate", action="store_true",
+                   help="write the page without the Jev demotion pass (stored reviews are still shown in J3)")
     s.set_defaults(func=cmd_top)
 
     s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")

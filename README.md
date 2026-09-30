@@ -144,14 +144,18 @@ catch), while agreeing (a second-judge `meets`, nothing softer) with at least 85
 column only -- ONE Rank and ONE Why still come from human > second judge (once it clears the bar) > first
 judge > models, computed once in `vw_lens_fit` and read everywhere the rank is used.
 
-### The Jev tier (§33) -- a typed appraiser, reported only
+### The Jev tier (§33) -- a typed appraiser; the end-of-pipeline demotion pass
 
 `backend/finder/jev.py` sends each posting to TypeSafe's Jev as two small typed requests (the JD alone for the
 three lens grades, gates and an injection canary; the JD lines plus the parsed fact sheet for a verdict and a
 fact-id evidence pick per line). `required_fit` is derived by judge2's own `derive_required_fit`. Jev output
-shows in a **J3** report column only; nothing it writes moves the rank until its bar passes and the user rules on
-it. Design, bars and the live-phase steps: [`docs/JEV_PLAN.md`](docs/JEV_PLAN.md). Keys and caps: the Jev block in
-`.env.template`.
+shows in a **J3** report column, and -- stage 2, the user's go of 2026-09-30, `backend/finder/jev_gate.py` --
+Jev reviews the Top Jobs Apply / Review subset last of all (`finder.py top --jev`, the `jevtop` launch step) and
+DEMOTES a row into a visible "Jev demoted" section when its required fit is `fails` or every lens is `wrong`,
+under a prompt_version whose required bar passed. Adjudicated rows are exempt; Gemma's call is shown beside each
+demotion as evidence, never a veto; `finder.py mark <id> build` overrules (a human label, and a gold ruling). The
+rank itself (`vw_lens_fit.rank_score`) still never reads Jev. Design, bars and the live-phase steps:
+[`docs/JEV_PLAN.md`](docs/JEV_PLAN.md). Keys and caps: the Jev block in `.env.template`.
 
 ```bash
 .venv/bin/python finder.py jev run --eval-set --dry-run --show 1       # print exactly what would be sent; no key needed

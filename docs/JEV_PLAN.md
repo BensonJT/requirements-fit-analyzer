@@ -257,4 +257,8 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
   2. The user reads the payload: `.venv/bin/python finder.py jev run --eval-set --dry-run --show 1 | less`. Summary already measured: 111 gold postings, about 2.38M tokens (about $0.10), prompt_version `5d412c2c3445`.
   3. `finder.py jev sentinel --init`.
   4. Either run the launch.sh preset "Jev gold score (MSA)" (7; about 7.2M tokens, so first set `JEV_DAILY_TOKEN_CAP=10000000` in `.env`), or run the steps by hand: `jev run --eval-set --i-have-approval`, `--run-tag r2`, `--run-tag r3`, `--injection`, then `jev eval`.
-- [ ] Results in STATUS.md; user rules on stage 2
+- [x] Results in STATUS.md; user rules on stage 2 -- **2026-09-30: stage 2 built as a DEMOTION pass, not a rank input**
+  (`backend/finder/jev_gate.py`, `finder.py top --jev`, launch step `jevtop`): Jev reviews the Top Jobs Apply / Review
+  subset after the judge stage; required `fails` or `wrong` on every lens moves a row to a visible "Jev demoted"
+  section, only under a prompt_version with a passed REQUIRED bar; adjudicated rows exempt; Gemma reported beside,
+  never a veto; a `mark build` overrule = a gold ruling. `vw_lens_fit.rank_score` still never reads Jev.

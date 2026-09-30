@@ -457,15 +457,20 @@ def _table_rows(text, heading):
 
 
 def test_report_row_order_is_identical_with_and_without_jev_rows(tmp_path):
+    """The v23 guarantee, narrowed by stage 2 (2026-09-30, tests/test_jev_gate.py): the RANK never reads Jev,
+    and the page written with `jev_gate_on=False` is row-for-row the same with or without Jev rows. The
+    default page now carries the demotion pass; that behaviour is tested in test_jev_gate.py."""
     con = store.connect(str(tmp_path / "t.duckdb"))
     _report_fixture(con)
-    top_before = report.write_top_jobs(con, None, out_path=str(tmp_path / "before")).read_text(encoding="utf-8")
+    top_before = report.write_top_jobs(con, None, out_path=str(tmp_path / "before"),
+                                       jev_gate_on=False).read_text(encoding="utf-8")
     lens_before = report.write_lens_lists(con, None, out_path=str(tmp_path / "before")).read_text(encoding="utf-8")
     rank_before = con.execute("SELECT posting_id, rank_score, rank_why FROM vw_lens_fit ORDER BY 1").fetchall()
 
     _add_extreme_jev(con)
     assert con.execute("SELECT count(*) FROM vw_lens_fit WHERE jev_bar_passed").fetchone()[0] == 6
-    top_after = report.write_top_jobs(con, None, out_path=str(tmp_path / "after")).read_text(encoding="utf-8")
+    top_after = report.write_top_jobs(con, None, out_path=str(tmp_path / "after"),
+                                      jev_gate_on=False).read_text(encoding="utf-8")
     lens_after = report.write_lens_lists(con, None, out_path=str(tmp_path / "after")).read_text(encoding="utf-8")
     assert con.execute("SELECT posting_id, rank_score, rank_why FROM vw_lens_fit ORDER BY 1").fetchall() == rank_before
 

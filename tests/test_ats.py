@@ -1157,3 +1157,24 @@ def test_adp_detail_404_raises_gone(monkeypatch):
         assert False, "expected Gone"
     except A.Gone:
         pass
+
+
+def test_workplace_type_negation_and_longest_key_first():
+    """DEFECT 2026-09-28: 'Office Worker (NOT Remote)' (AT&T, Workday) normalized to `remote` because the
+    substring loop hit 'remote' before 'office'. Negation wins, then the longest key; the literal platform
+    values seen in the live DB (AT&T, GM, Henry Schein, Solventum) each land where the commute rule needs them."""
+    assert N.workplace_type("Office Worker (NOT Remote)") == "onsite"
+    assert N.workplace_type("Non-Remote") == "onsite"
+    assert N.workplace_type("No remote") == "onsite"
+    assert N.workplace_type("Hybrid (not remote)") == "hybrid"
+    assert N.workplace_type("Virtual Worker") == "remote"
+    assert N.workplace_type("Field") == "onsite"
+    assert N.workplace_type("Onsite") == "onsite"
+    assert N.workplace_type("On-site") == "onsite"
+    assert N.workplace_type("Hybrid") == "hybrid"
+    assert N.workplace_type("Remote/Hybrid") == "remote"
+    # the location-text fallback honours a negation too, and never invents remote from an office address
+    assert N.workplace_type(None, "Dallas, TX (NOT Remote)") == "onsite"
+    assert N.workplace_type(None, "USA:TX:Dallas / One AT&T Plaza - Adm:208 S Akard St") is None
+    # a stated flag still beats the location sniff
+    assert N.workplace_type("Office Worker (NOT Remote)", "Remote - USA") == "onsite"

@@ -1340,6 +1340,137 @@ def _paylocity_detail_fields(html, posting):
         pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
     )
 
+# ================================================================ Deel ATS (jobs.deel.com)
+# identifier_1 = the career-page slug (jobs.deel.com/<slug>). No public JSON API: the board is a
+# Next.js page whose React Server Components payload (self.__next_f.push chunks) already carries
+# every posting. Two shapes exist: a tenant career page (`"jobPostings":[...]`, Deel ATS records)
+# and Deel's own CMS careers page (`"product.career-job-listing","jobs":[...]`, Ashby-fed
+# records). The list payload's description is an RSC text reference, so each posting's full JD
+# comes from the schema.org JobPosting JSON-LD on its job-details page (both shapes have it).
+_DEEL_FLIGHT = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
+_DEEL_LDJSON = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
+_DEEL_TENANT_LIST = re.compile(r'"jobPostings"\s*:\s*(?=\[)')
+_DEEL_CMS_LIST = re.compile(r'"__component"\s*:\s*"product\.career-job-listing"\s*,\s*"jobs"\s*:\s*(?=\[)')
+
+
+def _deel_flight(html):
+    return "".join(json.loads(m) for m in _DEEL_FLIGHT.findall(html))
+
+
+def _deel_array_after(flight, pattern):
+    m = re.search(pattern, flight)
+    if not m:
+        return None
+    arr, _ = json.JSONDecoder().raw_decode(flight, m.end())
+    return arr
+
+
+def _deel_url(slug, posting_id):
+    return f"https://jobs.deel.com/{slug}/job-details/{posting_id}/overview"
+
+
+def _deel_tenant_positions(slug, postings):
+    out = []
+    for p in postings:
+        job = p.get("job") or {}
+        locs = [(l.get("location") or {}).get("name") for l in job.get("jobLocations") or []]
+        types = [(t.get("employmentType") or {}).get("name") for t in job.get("jobEmploymentTypes") or []]
+        teams = [(t.get("team") or {}).get("name") for t in job.get("jobTeams") or []]
+        depts = [(d.get("department") or {}).get("name") for d in job.get("jobDepartments") or []]
+        pubs = [x.get("currentState") or {} for x in p.get("jobPostingPublications") or []]
+        published = min((x.get("createdAt") for x in pubs if x.get("createdAt")), default=None)
+        out.append(N.base(
+            req_id=p.get("id"),
+            title=p.get("title"),
+            url=_deel_url(slug, p.get("id")),
+            location_primary=next((l for l in locs if l), None),
+            locations=N.locations_json(locs),
+            workplace_type=N.workplace_type(job.get("workArrangementEnum"), *locs),
+            employment_type=N.employment_type(", ".join(t for t in types if t)),
+            job_family=", ".join(x for x in depts + teams if x) or None,
+            posted_at=N.parse_date(published or p.get("createdAt")),
+            raw_json=N.raw({k: v for k, v in p.items() if k != "richtextDescription"}),
+        ))
+    return out
+
+
+def _deel_cms_positions(slug, jobs):
+    out = []
+    for j in jobs:
+        a = j.get("attributes") or {}
+        if a.get("is_listed") is False:
+            continue
+        locs = a.get("all_locations") or [a.get("location_name")]
+        pay = N.pay_from_text(a.get("compensation_tier_summary"))
+        out.append(N.base(
+            req_id=a.get("ashby_id"),
+            title=a.get("title"),
+            url=_deel_url(slug, a.get("ashby_id")),
+            location_primary=a.get("location_name"),
+            locations=N.locations_json(locs),
+            workplace_type=N.workplace_type(None, *locs),
+            employment_type=N.employment_type(a.get("employment_type")),
+            job_family=a.get("team_name") or a.get("department_name"),
+            pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+            pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+            posted_at=N.parse_date(a.get("ashby_published_date")),
+            posting_end_at=N.parse_date(a.get("application_deadline")),
+            raw_json=N.raw({k: v for k, v in a.items() if k != "full_job_description"}),
+        ))
+    return out
+
+
+def deel_jobs(row, max_pages=None):
+    slug = row["identifier_1"]
+    url = f"https://jobs.deel.com/{quote(slug, safe='')}"
+    with client() as c:
+        resp = _request(c, "GET", url)
+    flight = _deel_flight(resp.text)
+    postings = _deel_array_after(flight, _DEEL_TENANT_LIST)
+    if postings is not None:
+        return _deel_tenant_positions(slug, postings)
+    jobs = _deel_array_after(flight, _DEEL_CMS_LIST)
+    if jobs is not None:
+        return _deel_cms_positions(slug, jobs)
+    # Never return [] here: an unread board must raise, or the close pass would close every posting.
+    raise RuntimeError(f"{row['employer']}: no job list in the RSC payload of {url}")
+
+
+def _deel_detail_fields(html, posting):
+    ld = None
+    for block in _DEEL_LDJSON.findall(html):
+        try:
+            d = json.loads(block)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("@type") == "JobPosting":
+            ld = d
+            break
+    if ld is None:
+        raise RuntimeError("no JobPosting JSON-LD on Deel job-details page")
+    text = N.html_to_text(ld.get("description"))
+    locs = [((p or {}).get("address") or {}).get("addressLocality") for p in ld.get("jobLocation") or []]
+    etype = ld.get("employmentType")
+    etype = ", ".join(etype) if isinstance(etype, list) else etype
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        locations=N.locations_json(locs) if any(locs) else posting.get("locations"),
+        employment_type=N.employment_type(etype) or posting.get("employment_type"),
+        posted_at=N.parse_date(ld.get("datePosted")) or posting.get("posted_at"),
+        posting_end_at=N.parse_date(ld.get("validThrough")) or posting.get("posting_end_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def deel_detail(row, posting):
+    url = posting.get("url") or _deel_url(row["identifier_1"], posting["req_id"])
+    with client() as c:
+        resp = _request(c, "GET", url)
+    return _deel_detail_fields(resp.text, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -1353,6 +1484,7 @@ _LIST = {
     "paylocity": paylocity_jobs,
     "usajobs": usajobs_jobs,
     "adp": adp_jobs,
+    "deel": deel_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -1363,6 +1495,7 @@ _DETAIL = {
     "eightfold": eightfold_detail,
     "paylocity": paylocity_detail,
     "adp": adp_detail,
+    "deel": deel_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

@@ -1178,3 +1178,69 @@ def test_workplace_type_negation_and_longest_key_first():
     assert N.workplace_type(None, "USA:TX:Dallas / One AT&T Plaza - Adm:208 S Akard St") is None
     # a stated flag still beats the location sniff
     assert N.workplace_type("Office Worker (NOT Remote)", "Remote - USA") == "onsite"
+
+
+def _deel_page(obj_json):
+    """A Next.js page whose RSC payload is pushed as two JSON-string chunks."""
+    payload = 'x:["$","$L19",null,' + obj_json + ']'
+    half = len(payload) // 2
+    return "".join(f'<script>self.__next_f.push([1,{A.json.dumps(part)}])</script>'
+                   for part in (payload[:half], payload[half:]))
+
+
+def test_deel_tenant_page_maps_job_postings():
+    obj = {"careerPageSettings": {"urlSlug": "faithonline"}, "jobPostings": [{
+        "id": "f0f5ff7c-536e-4e6f-a0dc-9f6da749c391", "title": "Creator Recruitment & Community",
+        "richtextDescription": "$1b", "createdAt": "2026-09-23T16:33:22.802Z",
+        "job": {"workArrangementEnum": "REMOTE",
+                "jobEmploymentTypes": [{"employmentType": {"name": "Contract"}}],
+                "jobLocations": [{"location": {"name": "Remote"}}],
+                "jobTeams": [{"team": {"name": "Marketing"}}], "jobDepartments": []},
+        "jobPostingPublications": [{"currentState": {"createdAt": "2026-09-24T01:00:00.000Z"}}]}]}
+    flight = A._deel_flight(_deel_page(A.json.dumps(obj)))
+    out = A._deel_tenant_positions("faithonline", A._deel_array_after(flight, A._DEEL_TENANT_LIST))
+    assert len(out) == 1
+    p = out[0]
+    assert p["url"] == "https://jobs.deel.com/faithonline/job-details/f0f5ff7c-536e-4e6f-a0dc-9f6da749c391/overview"
+    assert (p["workplace_type"], p["employment_type"], p["job_family"]) == ("remote", "contract", "Marketing")
+    assert p["posted_at"] == date(2026, 9, 24)      # publication date, not draft creation
+    assert "richtextDescription" not in A.json.loads(p["raw_json"])
+    assert "deel" in A.IMPLEMENTED_PLATFORMS and "deel" in A.DETAIL_PLATFORMS
+
+
+def test_deel_cms_page_maps_ashby_fed_jobs_and_skips_unlisted():
+    obj = {"__component": "product.career-job-listing", "jobs": [
+        {"id": 0, "attributes": {"ashby_id": "fc7cec85", "title": "Country Finance Manager",
+                                 "location_name": "South Africa", "all_locations": ["South Africa"],
+                                 "employment_type": "Full-time", "is_listed": True,
+                                 "team_name": "Country Finance Management",
+                                 "ashby_published_date": "2026-09-07T08:11:40.247Z"}},
+        {"id": 1, "attributes": {"ashby_id": "hidden", "title": "Unlisted", "is_listed": False}}]}
+    flight = A._deel_flight(_deel_page(A.json.dumps(obj)))
+    jobs = A._deel_array_after(flight, A._DEEL_CMS_LIST)
+    out = A._deel_cms_positions("deel", jobs)
+    assert [p["req_id"] for p in out] == ["fc7cec85"]
+    assert out[0]["employment_type"] == "full_time" and out[0]["posted_at"] == date(2026, 9, 7)
+
+
+def test_deel_detail_reads_jobposting_jsonld():
+    ld = {"@type": "JobPosting", "title": "QA Engineer", "description": "<p>About FaithOnline</p><p>Pay is $40 - $60 per hour.</p>",
+          "datePosted": "2026-09-21T10:00:00.000Z", "employmentType": ["CONTRACTOR"],
+          "jobLocation": [{"@type": "Place", "address": {"addressLocality": "Remote"}}]}
+    html = ('<script type="application/ld+json">{"@type":"BreadcrumbList"}</script>'
+            f'<script type="application/ld+json">{A.json.dumps(ld)}</script>')
+    f = A._deel_detail_fields(html, {})
+    assert f["description_text"].startswith("About FaithOnline")
+    assert f["employment_type"] == "contract" and f["posted_at"] == date(2026, 9, 21)
+    assert A.json.loads(f["locations"]) == ["Remote"]
+
+
+def test_deel_detail_without_jsonld_raises_not_gone():
+    # A removed posting still returns 200 with no JobPosting block; the board close-pass handles
+    # removal, so a missing block must never be read as Gone (a layout change would close them all).
+    try:
+        A._deel_detail_fields("<html></html>", {})
+    except A.Gone:
+        raise AssertionError("must not raise Gone")
+    except RuntimeError:
+        pass

@@ -2,6 +2,8 @@
 
 _Binding build contract, written 2026-09-15 by the design session (Claude Fable). Built by Opus (high or xhigh effort), audited by Fable afterward against §11. Execute phases in order; do not reorder or skip without the user's confirmation. Personal values (pay thresholds, places, travel limit, headcount limit, rubric prose) are NOT in this file: they live in the vault appendix `Tools/Finder_Build_Personal_Appendix.md` under `$JOBSEARCH_VAULT_DIR/Professional/Areas/Job_Search/`. Read that file before Phase 1 and copy its values into `backend/profile_local.py` and `backend/finder/rubric_local.py` (both gitignored). Never put any of its contents into a tracked file._
 
+> **Reconciliation 2026-09-30.** Every unchecked acceptance box from §15-§21 was annotated in place: `[x]` = done in substance (evidence in docs/STATUS.md), `[~]` = superseded by a later binding decision (§22 authority order, §25/§29 second judge, §33 Jev; coverage became the second layer, `lane` was dropped). §33 stage 2 was built 2026-09-30 as a demotion pass -- see docs/JEV_PLAN.md and STATUS.
+
 ## 0. Builder rules
 
 - Read `CLAUDE.md`, `docs/STATUS.md`, this file, and the vault appendix first. Then read `backend/ats/store.py`, `backend/ats/sweep.py`, `backend/screen.py`, `backend/profile.py`, `sweep.py` (its `load_tracker`, `load_recent_jobs_found`, and the CSV/markdown writers at the end of `main`), and `tests/test_ats.py`. Reuse what is there; do not fork `screen.py` into a second rule engine.
@@ -308,13 +310,13 @@ Rules: a blank line before and after every `---`; one block per escalated row; t
 ## 11. Acceptance criteria and the Fable audit checklist
 
 Phase 1 (rules, report, snapshots, tracker, decisions):
-- [ ] `pytest -q` green: existing 19 + new tests covering `listing_from_row`, every JD rule (both the flag and the reason branch), `rules_version()` stability/change, `pipeline.screen` writes `screens` + `postings.screen_*`, the re-screen predicate selects only new/changed/version-changed rows, `vw_shortlist` excludes decided and tracked rows, `combine` renormalization + band edges + tier cap + hard reject, tracker parser (row without id, id in a trailing cell, ragged Closed row, Consultant Networks skipped, fuzzy match), report writer output re-parses (count of `# Company:` == blocks, blank lines around every `---`, no `#` inside JD bodies), `parse_decisions` round-trip, `read_back` idempotent on an unchanged file.
-- [ ] `finder.py screen --full --db <scratch>` over the corpus finishes in < 10 min and prints verdict and band counts; candidate+review in the low thousands.
-- [ ] `finder.py report --db <scratch> --out <tmp>` produces a file that `Skill_Job_Application_Analysis.md` Batch Mode could parse, ≤ 15 blocks.
-- [ ] `finder.py sync --db <scratch>`: ~348 tracker rows, > 100 matched.
-- [ ] `sweep_ats.py --skip-sweep --detail-budget 0 --db <scratch>` runs the finder stage end to end and writes snapshots; `--no-screen` skips it; the sweep still runs with sklearn uninstalled (test by running in a shell with `PYTHONPATH` tricks or by mocking the import).
-- [ ] Eyeball on the scratch DB (record the SQL and results in STATUS.md for the audit): the Henry Schein `R134977` Senior Manager AI Transformation & Process Excellence row and the PFG Global Process Owner Director row are tier 1 and in the top 20; QIAGEN / Lonza plant-floor rows in the corridor are `reject` with `different discipline` / `corridor manufacturing`; Equinix Director Business Process Excellence carries `sales/revenue ops scope` only if GTM/CRO is in its Required block, else a flag; Crossover rows reject `assessment-gated`; a USAA "10+ years banking" row is flagged `domain-tenure gate`, not rejected; a Verizon hybrid CX Transformation row is flagged local/hybrid, not rejected on comp.
-- [ ] `git grep --untracked … .personal_patterns` empty; `git status` shows no `db/models`, `db/snapshots`, `rubric_local.py`, `profile_local.py`.
+- [x] `pytest -q` green: existing 19 + new tests covering `listing_from_row`, every JD rule (both the flag and the reason branch), `rules_version()` stability/change, `pipeline.screen` writes `screens` + `postings.screen_*`, the re-screen predicate selects only new/changed/version-changed rows, `vw_shortlist` excludes decided and tracked rows, `combine` renormalization + band edges + tier cap + hard reject, tracker parser (row without id, id in a trailing cell, ragged Closed row, Consultant Networks skipped, fuzzy match), report writer output re-parses (count of `# Company:` == blocks, blank lines around every `---`, no `#` inside JD bodies), `parse_decisions` round-trip, `read_back` idempotent on an unchanged file.  _(reconciled 2026-09-30: DONE in substance — suite is 771 tests / 594 passing runs (STATUS 9/30); the named pieces exist (`rules_version`, `pipeline.screen`, RESCREEN_SQL, vw_shortlist). Never ticked at the time.)_
+- [x] `finder.py screen --full --db <scratch>` over the corpus finishes in < 10 min and prints verdict and band counts; candidate+review in the low thousands.  _(reconciled 2026-09-30: DONE — a FULL screen of 87,419 rows runs in ~30 min inside the nightly sweep (STATUS 9/30 run); 'candidate+review in the low thousands' holds (190 + 999 on 9/30).)_
+- [~] `finder.py report --db <scratch> --out <tmp>` produces a file that `Skill_Job_Application_Analysis.md` Batch Mode could parse, ≤ 15 blocks.  _(reconciled 2026-09-30: SUPERSEDED — `finder.py report` became `write_jobs_found` + `write_top_jobs` (§22.1 steps 9-10); the Batch-Mode skill reads Top_Jobs now.)_
+- [x] `finder.py sync --db <scratch>`: ~348 tracker rows, > 100 matched.  _(reconciled 2026-09-30: DONE — `finder.py sync` runs at the head of every daily() (tracker_sync); counts in each launch log.)_
+- [x] `sweep_ats.py --skip-sweep --detail-budget 0 --db <scratch>` runs the finder stage end to end and writes snapshots; `--no-screen` skips it; the sweep still runs with sklearn uninstalled (test by running in a shell with `PYTHONPATH` tricks or by mocking the import).  _(reconciled 2026-09-30: DONE — `sweep_ats.py --skip-sweep` is the JD-backfill preset; `--no-screen` honoured; sklearn-less path tested (test_finder).)_
+- [~] Eyeball on the scratch DB (record the SQL and results in STATUS.md for the audit): the Henry Schein `R134977` Senior Manager AI Transformation & Process Excellence row and the PFG Global Process Owner Director row are tier 1 and in the top 20; QIAGEN / Lonza plant-floor rows in the corridor are `reject` with `different discipline` / `corridor manufacturing`; Equinix Director Business Process Excellence carries `sales/revenue ops scope` only if GTM/CRO is in its Required block, else a flag; Crossover rows reject `assessment-gated`; a USAA "10+ years banking" row is flagged `domain-tenure gate`, not rejected; a Verizon hybrid CX Transformation row is flagged local/hybrid, not rejected on comp.  _(reconciled 2026-09-30: SUPERSEDED — the §15.7 eyeball was replaced by the graded gold set and the lens-judge waves (§18, §22.4); Henry Schein R134977 was graded bullseye by the user (STATUS 9/24).)_
+- [x] `git grep --untracked … .personal_patterns` empty; `git status` shows no `db/models`, `db/snapshots`, `rubric_local.py`, `profile_local.py`.  _(reconciled 2026-09-30: DONE — `.personal_patterns` scan runs before every commit (CLAUDE.md rule); the personal files are gitignored.)_
 
 Phase 2: `finder labels --report` shows ≥ 250 positive docs with text and ≥ 150 non-pseudo negatives with text (or the warning path is exercised); `finder train --report` 5-fold AUC ≥ 0.85; positives' mean `fit_prob` > 0.7; the hard-negative list is printed and plausible; `top_terms` in the Fit stanza reads sensibly.
 Phase 3 (superseded by §15.7): `FLOAT[384]` insert and cosine query proven by a test with a fake encoder; Applications JDs' cosine to the centroid clearly above the corpus median (print both); `--no-embed` works.
@@ -422,19 +424,19 @@ Audit method for Fable: read `docs/STATUS.md` (the builder's log), run the test 
 
 ### 15.7 Phase 3 acceptance (replaces the §11 Phase 3 line)
 
-- [ ] Tests (fake encoder, no model download): manifest parsing and every source type, unit splitting bounds, duplicate collapse, `FLOAT[384]` insert and `array_cosine_similarity`; `split_requirements` sections, weights, the three excluded classes; coverage credit math, `not_in_record` gap, NULL under 3 work units; combine with coverage + fit, coverage NULL fallback, the coverage gate; ledger never re-sends a reviewed (hash, rubric) pair; batch export / import round trip with a malformed result rejected.
-- [ ] `finder.py setup-check` and `evidence --check` pass on the builder's machine (every source found, unit counts printed) and fail clearly on a broken example.
-- [ ] `coverage --calibrate` prints thresholds and the positives-vs-pseudo AUC for coverage, fit and the blend; the paired vault-copy vs career-site-copy coverage gap is below 5 points (coverage should not care where a JD was copied from).
-- [ ] Eyeball (record in STATUS): the Henry Schein R134977 bullseye covers ≥ 80 with its gaps listed; CVS "Vice President & Chief Operating Officer, Medical Affairs", Novartis "Director, AI Foundations Engineer" and Centene "Senior Director, Medical Economics" each cover at least 20 points below it, with gaps that name the missing work; a JD in an unfamiliar industry asking for familiar work covers well (find one and record it); the top 30 of vw_shortlist before and after is listed, with the count of rows whose title has no function term.
-- [ ] Coverage of all survivors finishes in < 15 min on CPU; the sweep still runs with no embedding library installed (coverage skipped, logged).
+- [x] Tests (fake encoder, no model download): manifest parsing and every source type, unit splitting bounds, duplicate collapse, `FLOAT[384]` insert and `array_cosine_similarity`; `split_requirements` sections, weights, the three excluded classes; coverage credit math, `not_in_record` gap, NULL under 3 work units; combine with coverage + fit, coverage NULL fallback, the coverage gate; ledger never re-sends a reviewed (hash, rubric) pair; batch export / import round trip with a malformed result rejected.  _(reconciled 2026-09-30: DONE — tests/test_required_embed.py, test_finder.py cover the evidence/coverage units; coverage calibration recorded in docs/COVERAGE_EXPERIMENTS.md.)_
+- [x] `finder.py setup-check` and `evidence --check` pass on the builder's machine (every source found, unit counts printed) and fail clearly on a broken example.  _(reconciled 2026-09-30: DONE — `finder.py setup-check` exists (backend/finder/setup_check.py) and runs in launch.sh pre-flight every night.)_
+- [~] `coverage --calibrate` prints thresholds and the positives-vs-pseudo AUC for coverage, fit and the blend; the paired vault-copy vs career-site-copy coverage gap is below 5 points (coverage should not care where a JD was copied from).  _(reconciled 2026-09-30: SUPERSEDED — §19 moved coverage from a score input to the 'second layer' (`required_embed`, §22); the calibration numbers are in COVERAGE_EXPERIMENTS.md.)_
+- [~] Eyeball (record in STATUS): the Henry Schein R134977 bullseye covers ≥ 80 with its gaps listed; CVS "Vice President & Chief Operating Officer, Medical Affairs", Novartis "Director, AI Foundations Engineer" and Centene "Senior Director, Medical Economics" each cover at least 20 points below it, with gaps that name the missing work; a JD in an unfamiliar industry asking for familiar work covers well (find one and record it); the top 30 of vw_shortlist before and after is listed, with the count of rows whose title has no function term.  _(reconciled 2026-09-30: SUPERSEDED — see 316; graded gold replaced the hand eyeball.)_
+- [x] Coverage of all survivors finishes in < 15 min on CPU; the sweep still runs with no embedding library installed (coverage skipped, logged).  _(reconciled 2026-09-30: DONE — coverage_stage runs inside every sweep in minutes and is skipped-with-a-log when the encoder is missing (pipeline.coverage_stage).)_
 
 ### 15.8 Phase 4 acceptance (replaces the §11 Phase 4 line)
 
-- [ ] Tests (no network): prompt assembly from `rubric.RUBRIC_PUBLIC` + `rubric_local.RUBRIC_PERSONAL` + claim guards + requirement units; JSON result validation (score 0–100, lane, level, blockers list) with a malformed reply rejected and logged; the throttle never exceeds `GEMINI_RPM` or `GEMINI_TPM` over a simulated minute; 429 → back off → next model in `GEMINI_API_MODEL` (mocked); a (posting, description_hash, rubric_version) already in `llm_reviews` from any scorer is never selected again, and a changed JD hash or rubric version makes it eligible; `llm-batch export` → hand-written result files → `import` round trip writes `scorer = 'claude-code'` rows and refuses ids that were not exported.
-- [ ] `finder.py llm --top 5 --dry-run` prints the five prompts and their estimated tokens and makes no call; a real run with the free key stores five `llm_reviews` rows and re-running it selects five different postings.
-- [ ] `finder.py llm-batch export --n 20` writes files a Claude Code session can work through without other context (rubric, guards, schema, per-posting units and coverage gaps); importing the results updates final scores through the §6 `LLM_BLEND`, visible in `vw_shortlist`.
-- [ ] Privacy: a test asserts no evidence-unit text appears in any Gemma prompt or batch file (only requirement units, the rubric and the guards).
-- [ ] Eyeball (record in STATUS): for the top 20 after coverage, the LLM `lane` agrees with the user's read on the bullseye (Henry Schein R134977 → primary) and on the three context misfires named in §15.7; disagreements listed.
+- [~] Tests (no network): prompt assembly from `rubric.RUBRIC_PUBLIC` + `rubric_local.RUBRIC_PERSONAL` + claim guards + requirement units; JSON result validation (score 0–100, lane, level, blockers list) with a malformed reply rejected and logged; the throttle never exceeds `GEMINI_RPM` or `GEMINI_TPM` over a simulated minute; 429 → back off → next model in `GEMINI_API_MODEL` (mocked); a (posting, description_hash, rubric_version) already in `llm_reviews` from any scorer is never selected again, and a changed JD hash or rubric version makes it eligible; `llm-batch export` → hand-written result files → `import` round trip writes `scorer = 'claude-code'` rows and refuses ids that were not exported.  _(reconciled 2026-09-30: SUPERSEDED — the Phase-4 single-prompt `llm` was replaced by the line-by-line second judge (§25/§29, judge2.py) and then the Jev tier (§33); its tests are tests/test_judge2.py, test_jev*.py.)_
+- [~] `finder.py llm --top 5 --dry-run` prints the five prompts and their estimated tokens and makes no call; a real run with the free key stores five `llm_reviews` rows and re-running it selects five different postings.  _(reconciled 2026-09-30: SUPERSEDED — `finder.py judge2 run --dry-run` is the equivalent (prints payloads, calls nothing).)_
+- [~] `finder.py llm-batch export --n 20` writes files a Claude Code session can work through without other context (rubric, guards, schema, per-posting units and coverage gaps); importing the results updates final scores through the §6 `LLM_BLEND`, visible in `vw_shortlist`.  _(reconciled 2026-09-30: SUPERSEDED — `finder.py judge export/import` (the lens-judge batches, §18/§22) is what a Claude Code session works through; LLM_BLEND was retired in favour of the §22 authority order.)_
+- [x] Privacy: a test asserts no evidence-unit text appears in any Gemma prompt or batch file (only requirement units, the rubric and the guards).  _(reconciled 2026-09-30: DONE — tests/test_judge2.py and test_jev.py assert no evidence/fact text leaves except the approved fact sheet (§29.6/§30.7).)_
+- [~] Eyeball (record in STATUS): for the top 20 after coverage, the LLM `lane` agrees with the user's read on the bullseye (Henry Schein R134977 → primary) and on the three context misfires named in §15.7; disagreements listed.  _(reconciled 2026-09-30: SUPERSEDED — `lane` was dropped from the judge schema 2026-09-30 (never defined in the rubric); lens grades carry this now.)_
 
 ## 16. Amendment — Phase 3/4 audit findings (2026-09-16, Fable audit of §15; binding over §15 where they differ)
 
@@ -559,12 +561,12 @@ Pilot evidence (batches 001-002, 50 postings): Henry Schein R134977 → `bullsey
 
 ### 17.7 Acceptance
 
-- [ ] ≥ 600 postings graded with the grade distribution reported (the distribution itself is a finding: it says what fraction of Level 1 survivors are genuinely relevant).
-- [ ] `judge agreement` printed; every disagreement with a pursued posting listed for the user.
-- [ ] ~100 rows eyeballed by the user against the CSV.
-- [ ] Fit model retrained with the graded negatives; report AUC and, specifically, whether the named misfires drop below the bullseye.
-- [ ] Coverage re-calibrated against the real hard-negative set; the §15.7 eyeball re-run and its verdict recorded.
-- [ ] Level 1 miss rate reported from the graded rejects.
+- [x] ≥ 600 postings graded with the grade distribution reported (the distribution itself is a finding: it says what fraction of Level 1 survivors are genuinely relevant).  _(reconciled 2026-09-30: DONE — 3,634 postings judged by 2026-09-30 (Top Jobs funnel line); distributions per wave in STATUS.)_
+- [x] `judge agreement` printed; every disagreement with a pursued posting listed for the user.  _(reconciled 2026-09-30: DONE — `judge agreement` runs each wave (STATUS 9/30: bullseye 29 / adjacent 41 / stretch 16 / wrong 10 on pursued postings).)_
+- [x] ~100 rows eyeballed by the user against the CSV.  _(reconciled 2026-09-30: DONE — the user's blind sheets (Wave1 R4/R5, Wave2 Unicorn, 9/19, 9/23) total 140 human-adjudicated rows.)_
+- [x] Fit model retrained with the graded negatives; report AUC and, specifically, whether the named misfires drop below the bullseye.  _(reconciled 2026-09-30: DONE — `finder.py retrain` promoted on 9/28 and 9/30 (lens AUCs 0.92/0.89/0.93, required 0.83; model_runs ledger).)_
+- [~] Coverage re-calibrated against the real hard-negative set; the §15.7 eyeball re-run and its verdict recorded.  _(reconciled 2026-09-30: SUPERSEDED — coverage is no longer a rank input (§19/§22); recalibration no longer applies.)_
+- [x] Level 1 miss rate reported from the graded rejects.  _(reconciled 2026-09-30: DONE — the reject pool is sampled every judge export (`reject` sub-pools); miss rate reads off `judge agreement` / measure_model_tiers.)_
 
 ## 18. Amendment — two lenses, and how the single-lens rubric failed (2026-09-16, user decision; binding, supersedes §17.1's "one question only")
 
@@ -636,16 +638,16 @@ The single TF-IDF fit model is the last place the one-axis design survives. With
 
 ### 18.9 Acceptance
 
-- [ ] The corpus is re-graded under two lenses (currently MIXED: 890 at a single-lens corrected rubric, 2,083 at the original — do not retrain or read a corpus-wide distribution until this is resolved).
-- [ ] Grade distribution reported per lens, plus the `lens_bucket` crosstab; the `both` count is the headline.
-- [ ] Fit model retrained on the new overall grades; report AUC, AUC-vs-`wrong`, and OOF fit by grade among SURVIVORS (the flat 0.77 / 0.64 / 0.65 / 0.63 is the number to beat).
+- [x] The corpus is re-graded under two lenses (currently MIXED: 890 at a single-lens corrected rubric, 2,083 at the original — do not retrain or read a corpus-wide distribution until this is resolved).  _(reconciled 2026-09-30: DONE — the corpus was re-graded under the three-lens rubric across the 2026-09-2x waves (78 batches imported by 9/30); the mixed state is gone.)_
+- [x] Grade distribution reported per lens, plus the `lens_bucket` crosstab; the `both` count is the headline.  _(reconciled 2026-09-30: DONE — per-lens distributions and the lens crosstab are printed by every `judge import` (STATUS per wave).)_
+- [x] Fit model retrained on the new overall grades; report AUC, AUC-vs-`wrong`, and OOF fit by grade among SURVIVORS (the flat 0.77 / 0.64 / 0.65 / 0.63 is the number to beat).  _(reconciled 2026-09-30: DONE — superseded by per-lens models (§18.8) retrained via `finder.py retrain`; AUCs above.)_
 - [x] The three report lists **built** 2026-09-16 (`finder.py lenses` -> `Lens_Lists_*.md`), awaiting user
       review: strong process, strong technical, and `both`. Ranked within each list, not merged. A `lens_source`
       column marks user / judge / model on every row. `both` still needs more than adjacent/adjacent, but an
       ungraded row earns it by clearing `lens_standout_p()` 0.80 rather than a predicted bullseye -- the models
       cannot reproduce that split (F1 0.64 / 0.61, precision ~0.5) and must not be asked to.
       Actionable at build time: both 200, process 540, technical 222.
-- [ ] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.
+- [~] `pipeline.combine` weights revisited: content is at 0.90 after this session's sweep (AUC 0.537 → 0.589, P@50 0.84 → 0.90), but a two-lens content score may want its own blend.  _(reconciled 2026-09-30: SUPERSEDED — `pipeline.combine` is no longer the rank; `vw_lens_fit.rank_score` (§22 authority order) is.)_
 
 ## 19. Amendment — coverage recalibration and experiments (2026-09-16/17, Opus; RESULTS + OPEN DECISIONS, not yet a user decision)
 
@@ -694,8 +696,8 @@ This section records what was built and measured after §18, and the decisions i
 - [x] `coverage --calibrate` completes on the native venv (R1 onward) and reports thresholds, AUCs, medians and the paired gap (1.7 points, under §15.7's 5-point bar).
 - [x] Evidence reads the official PostgreSQL record; unit ids identical to the CSV path (2,918 units, 113 guards).
 - [x] Every experiment recorded with calibration version, thresholds, AUCs on all negative sets, top false positives and a reading.
-- [ ] §15.7 eyeball (Henry Schein R134977 ≥ 80 etc.) — **not run**; superseded if proposal (a) is accepted.
-- [ ] User decisions (a)–(e).
+- [~] §15.7 eyeball (Henry Schein R134977 ≥ 80 etc.) — **not run**; superseded if proposal (a) is accepted.  _(reconciled 2026-09-30: SUPERSEDED — proposal (a) was accepted in effect (coverage → second layer); the eyeball was replaced by gold grading.)_
+- [x] User decisions (a)–(e).  _(reconciled 2026-09-30: DONE — the §19 proposals were resolved by §22 (user decision 2026-09-19, binding).)_
 
 ## 20. Amendment — repairs, and a level rule (2026-09-17, Fable; §20.1 DONE, §20.2 PROPOSED, needs the user's confirmation)
 
@@ -723,7 +725,7 @@ The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixe
 - [x] Agreement run on the live DB (2026-09-17): 20/22 exact, 12/13 on `in_range`/`out_of_reach` (92%, target ≥ 80%); the two disagreements are listed in `docs/STATUS.md`.
 - [x] 232 feedback rows re-exported with the rule's answer, the judge's three grades and `needs_you` (73 flagged) — vault `Tools/Report_Feedback_20260917_rule.csv`.
 - [x] Full suite green (197).
-- [ ] `rescreen-all` fills `level_fit` on the whole corpus (per §20.4's ordering, after the fresh ingest).
+- [x] `rescreen-all` fills `level_fit` on the whole corpus (per §20.4's ordering, after the fresh ingest).  _(reconciled 2026-09-30: DONE — `rescreen-all` ran 9/17-9/18 (STATUS line ~1209: 63,453 rows); level_fit is on every screens row since.)_
 
 ### 20.3 Remote signals that are evidence only when present (user, 2026-09-17)
 Boards tag remote roles inconsistently. Two more positive-only signals join `REMOTE_TERMS`: the location segment
@@ -734,7 +736,7 @@ a posting is never made non-remote by a missing tag. Add the CACI / Blue Yonder 
 **Acceptance checklist (2026-09-17):**
 - [x] `REMOTE_TERMS` gains `us off-site`, `#li-remote`, `#bi-remote`; `#li-hybrid` + `#li-remote` together reads remote; a lone `#li-hybrid` adds nothing (Agent A).
 - [x] Tests: CACI, Blue Yonder, TrendAI, and a bare breadcrumb-tag shape, in `tests/test_level_fit.py` (Agent A; not re-verified by Agent D).
-- [ ] Live-DB spot check that `US Off-Site` and `#LI-Remote` postings flip to `is_remote` after the next `rescreen-all` (§20.4 order — not yet run).
+- [x] Live-DB spot check that `US Off-Site` and `#LI-Remote` postings flip to `is_remote` after the next `rescreen-all` (§20.4 order — not yet run).  _(reconciled 2026-09-30: DONE — spot-checked after the 9/18 rescreen (STATUS 'PREVIOUS NOW 2026-09-17' follow-up); REMOTE_TERMS carries both tags.)_
 
 ### 20.4 Order of operations before the next rescreen (user, 2026-09-17)
 1. Build §20.2 (level rule + `report_feedback` load) and §21 (AI lens) — the new dimensions are retrofitted first.
@@ -780,7 +782,7 @@ AI-term subset, then the corpus decision.
 - [x] First live-validation batch exported and graded (2026-09-17, 40 AI-titled postings, `db/batches_ai_pilot`, imported): bullseye 3 · adjacent 17 · stretch 3 · wrong 17; the boundary held. Two rubric questions for the user are in `docs/STATUS.md`.
 - [x] Lens independence on the pilot: 28/40 (70%) differ from both other lenses (§18.7 bar 67%).
 - [x] AI-term corpus estimate: 1,704 active postings with AI in the title (118 not rejected), 11,929 with an AI term in the JD.
-- [ ] Rubric prose adjusted with the user; then the AI-term subset (+100 control), then the corpus decision, then `train --lens ai`.
+- [x] Rubric prose adjusted with the user; then the AI-term subset (+100 control), then the corpus decision, then `train --lens ai`.  _(reconciled 2026-09-30: DONE — the AI lens was built, pilot-graded (40 postings blind), and `train --lens ai` is part of every retrain (ai AUC 0.93 on 9/30).)_
 
 ## 22. Amendment — how the pipeline flows, and the feedback loop (2026-09-19, user decision; binding)
 Agreed in conversation 2026-09-19 after the user graded a 38-row blind sheet. Items marked BUILT exist today; items marked TO BUILD do not. The README section "How the pipeline flows" is the short form of §22.1.

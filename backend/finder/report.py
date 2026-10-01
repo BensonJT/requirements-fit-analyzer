@@ -507,9 +507,13 @@ def top_rows(con, tier: str, *, include_decided: bool = False, levels=TOP_LEVELS
                v.n_lenses_good, v.any_bullseye, v.required_fit, v.required_unmet, v.level_fit,
                f.location_primary, f.pay_min, f.pay_max, f.pay_interval, f.final_score, f.first_seen_at,
                f.days_since_first_seen, f.lens_breadth, f.rank_score, f.rank_why,
-               {', '.join('f.' + c for c in J3_COLUMNS)}
+               {', '.join('f.' + c for c in J3_COLUMNS)},
+               -- trailing: the user's own overall grade on an adjudicated row (its per-lens grades are NULL;
+               -- `mark` records one grade), so the page can show it instead of None / None / None
+               CASE WHEN v.adjudicated THEN g.grade END AS human_grade
         FROM vw_selection v
         LEFT JOIN vw_lens_fit f USING (posting_id)
+        LEFT JOIN vw_llm_labels_latest g USING (posting_id)
         WHERE {' AND '.join(where)}
         ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC
         """, [tier, list(levels)]).fetchall()
@@ -775,8 +779,11 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
          interval, score, first_seen, age, breadth, rank, why) = row[:22]
         j3 = row[22:22 + len(J3_COLUMNS)]
         star = "★ " if n_good == 3 else ""
+        human_grade = row[22 + len(J3_COLUMNS)] if len(row) > 22 + len(J3_COLUMNS) else None
         if pid in model_ids:
             grades = f"{_prob(gp)} / {_prob(gt)} / {_prob(ga)}"
+        elif human_grade and not any((gp, gt, ga)):
+            grades = f"your call: {_grade_compact(human_grade)}"
         else:
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
         return (f"| {(rank or 0):.0f} | {star}{_cell(employer)} | {_link(title, url)} | "

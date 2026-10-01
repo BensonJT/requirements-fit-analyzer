@@ -310,6 +310,12 @@ def cmd_top(con, a):
             facts = jev_cli.load_facts(a.background_file)
             jev_gate.run_over_top(con, facts=facts, live_ok=jev_cli.live_ok(a.i_have_approval),
                                   include_decided=a.include_decided, apply_cap=a.apply_cap, review_cap=a.review_cap)
+            # Gemma second-reads ONLY what Jev demoted (user's call 2026-09-30); live gate = JUDGE2_LIVE_OK=1,
+            # which launch.sh's judge_env exports for every jevtop preset.
+            jev_gate.run_gemma_on_demoted(con, background_path=jev_cli.background_path(a.background_file),
+                                          live_ok=bool(os.environ.get("JUDGE2_LIVE_OK")) or a.i_have_approval,
+                                          include_decided=a.include_decided, apply_cap=a.apply_cap,
+                                          review_cap=a.review_cap)
         except jev_cli.JevCliError as exc:
             print(f"top --jev: {exc}; writing the report from the stored reviews")
     if a.stdout:

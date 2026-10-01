@@ -529,7 +529,7 @@ def load_results(con, out_dir: str, scorer: str = "claude-sonnet-batch", log=pri
                 ru = " ; ".join(str(x) for x in ru)
             ru = ru[:800] if ru is not None else None
             seen[pid] = (g, gp, gt, ga)
-            rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, ga, obj.get("lane"),
+            rows.append([pid, meta["postings"][pid], version, scorer, g, gp, gt, ga, None,   # lane dropped 2026-09-30
                          obj.get("confidence"), (obj.get("blocker") or "")[:400],
                          (obj.get("rationale") or "")[:600], rf, ru, name, _now()])
     hashes = dict(_rows(con, "SELECT posting_id, coalesce(description_hash, '') FROM postings"))

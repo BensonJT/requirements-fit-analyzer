@@ -199,3 +199,14 @@ def test_run_over_top_sends_the_subset_minus_adjudicated_and_never_fails_the_rep
     assert any("7 Top Jobs row(s) (6 apply / 1 review), 1 adjudicated exempt, 6 with a JD" in l for l in logs)
     assert any("run failed (RuntimeError: cap reached)" in l for l in logs)
     con.close()
+
+
+def test_judge2_run_filters_posting_ids_before_the_top_n_cut(tmp_path):
+    """2026-10-01: with posting_ids, top_n must count the WANTED rows, not the top N of the whole population
+    (the cut came first and dropped wanted ids ranked below N)."""
+    from backend.finder import judge2
+    con = _fixture(tmp_path)
+    wanted = ["review-demote"]                      # lowest-ranked fixture row
+    res = judge2.run(con, top_n=1, posting_ids=wanted, dry_run=True, show=0, background="public", log=lambda *_: None)
+    assert res["count"] == 1
+    con.close()

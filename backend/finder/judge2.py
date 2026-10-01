@@ -1204,11 +1204,13 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         force = True
     sql = EVAL_SET_SQL if only_blind else POPULATION_SQL
     rows = con.execute(sql).fetchall()
-    if not only_blind:
-        rows = rows[:top_n]
+    # 2026-10-01: filter by posting_ids BEFORE the top_n cut. Cutting first kept only the wanted ids that also
+    # sat in the top N by rank, so Gemma-beside-Jev (top_n = number of demotions) silently skipped 16 of 41.
     if posting_ids:   # 2026-09-29: a targeted re-run (e.g. the rows where the judges disagree with gold)
         wanted = set(posting_ids)
         rows = [r for r in rows if r[0] in wanted]
+    if not only_blind:
+        rows = rows[:top_n]
     background_text = get_background(background, path=background_path)
     base_pv = prompt_version(background_text)
     pv = f"{base_pv}:{run_tag}" if run_tag else base_pv

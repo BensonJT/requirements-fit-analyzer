@@ -96,7 +96,7 @@ posting's own stated requirements.
 OUTPUT: one JSON object per posting, nothing else:
 {"posting_id": "<id>", "grade_process": "bullseye|adjacent|stretch|wrong",
  "grade_technical": "bullseye|adjacent|stretch|wrong", "grade_ai": "bullseye|adjacent|stretch|wrong",
- "lane": "primary|secondary|wrong", "confidence": "high|medium|low",
+ "confidence": "high|medium|low",
  "blocker": "<the single biggest gap, or empty>",
  "required_fit": "meets|arguable|fails",
  "required_unmet": "<the unmet qualification lines, quoted briefly and separated by ' ; ', or empty>",

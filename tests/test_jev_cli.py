@@ -151,6 +151,9 @@ def _ns(**kw):
 
 def _cli(args, tmp_path, db, env_extra=None):
     env = {k: v for k, v in os.environ.items() if k not in KEY_VARS}
+    # finder.py load_dotenv()s the repo .env, which may hold a REAL key; dotenv never overrides a variable that
+    # is already set, so an explicit empty value keeps every subprocess here key-less (no live call, ever).
+    env.update({k: "" for k in KEY_VARS})
     env["JOBSEARCH_DB"] = str(tmp_path / "default_fallback.duckdb")   # never the live DB
     env.update(env_extra or {})
     return subprocess.run([sys.executable, FINDER, "jev"] + args + ["--db", db], cwd=tmp_path,

@@ -88,7 +88,9 @@ fi
 #                      and merged branches, drop in-repo db backups older than 7 days. Ends every
 #                      overnight preset so the file never carries a week of rescreen bloat.
 #   @dryrun            pre-flight + plan only
-# --llm-top N and the judge2* steps turn on the Gemma second judge with the user's approved fact sheet
+# --llm-top N, the judge2* steps and jevtop turn on the Gemma second judge with the user's approved fact sheet.
+# 2026-09-30 (user): the nightly top-100 Gemma run is RETIRED (3h45m, little added value beside Jev); Gemma now
+# reads only the rows Jev demoted, inside jevtop, and is shown beside each demotion as evidence.
 # (see judge_env below). The top-100 judge and the gold eval set barely overlap (3 of 100 on 9/23), so
 # scoring Gemma against gold needs its own step; that is what FULL + GOLD SCORE adds.
 # The jev* steps export JEV_LIVE_OK=1 (jev_env below) and pre-flight checks the TypeSafe key and endpoint.
@@ -98,10 +100,10 @@ fi
 # ~2.2M per pass -- more than the 5M default JEV_DAILY_TOKEN_CAP. Raise the cap in .env for that night, or
 # the later steps stop cleanly at the cap (logged in RunSummary.stopped_by_cap, never an error).
 LABELS=(
-  "Overnight FULL            sweep + screen + coverage + Gemma judge (top 100) + Jev demotion pass + Top_Jobs + maintenance"
-  "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (start at 00:00 to finish by ~7:30)"
+  "Overnight FULL            sweep + screen + coverage + Jev demotion pass (Gemma on the demotions only) + Top_Jobs + maintenance"
+  "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (~3.5 h extra)"
   "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
-  "Overnight LIGHT           sweep + screen + coverage + Jev demotion pass + Top_Jobs + maintenance; no Gemma judge"
+  "Overnight LIGHT           sweep + screen + coverage + Jev demotion pass + Top_Jobs + maintenance; no Gemma at all"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
   "Jev gold score (MSA)      Jev reviews the gold set, two repeat runs, the injection set, then jev eval; no sweep"
@@ -109,11 +111,11 @@ LABELS=(
   "Disk maintenance          compact the DuckDB file, scratch files, worktrees, old in-repo backups (what every overnight preset ends with)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~3.75 h (9/23 measured)" "~7-7.5 h (3.75 h FULL + ~3.5 h eval set)" "~5-5.5 h (estimate)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
+ESTIMATES=("~1.5-2.5 h (no top-100 Gemma since 9/30; Gemma reads the ~20-40 demotions)" "~5-6 h (FULL + ~3.5 h eval set)" "~3-3.5 h (retrain ~65 min + FULL)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
-  "sweep:--llm-top 100|jevtop|maint"
-  "sweep:--llm-top 100|judge2run|judge2eval|jevtop|maint"
-  "retrain|sweep:--llm-top 100|jevtop|maint"
+  "sweep:|jevtop|maint"
+  "sweep:|judge2run|judge2eval|jevtop|maint"
+  "retrain|sweep:|jevtop|maint"
   "sweep:|jevtop|maint"
   "judge2run|judge2eval|maint"
   "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
@@ -170,7 +172,7 @@ case "$CHOICE" in
 esac
 
 DRY_RUN=false
-[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:--llm-top 100|jevtop|maint"; }
+[ "$PRESET" = "@dryrun" ] && { DRY_RUN=true; PRESET="sweep:|jevtop|maint"; }
 IFS='|' read -r -a STEPS <<<"$PRESET"
 # jevrep is two runs; expand it so each rerun is its own step (own log line, own exit code).
 _steps=()
@@ -179,7 +181,8 @@ for s in "${STEPS[@]}"; do
 done
 STEPS=("${_steps[@]}")
 USES_JUDGE=false
-case "$PRESET" in *--llm-top*|*judge2*) USES_JUDGE=true ;; esac
+# jevtop runs Gemma on Jev's demotions only (2026-09-30), so it needs judge_env too
+case "$PRESET" in *--llm-top*|*judge2*|*jevtop*) USES_JUDGE=true ;; esac
 USES_JEV=false
 case "$PRESET" in *jev*) USES_JEV=true ;; esac
 
@@ -210,7 +213,7 @@ step_cmd() {  # the literal command line a step runs
     retrain) echo "$PY -u finder.py retrain" ;;
     sync)    echo "$PY -u finder.py sync" ;;
     top)     echo "$PY -u finder.py top" ;;
-    jevtop)  echo "$PY -u finder.py top --jev --background-file $JUDGE_BG" ;;
+    jevtop)  echo "$PY -u finder.py top --jev --background-file $JUDGE_BG" ;;   # Gemma on the demotions needs judge_env
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
     judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
     judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;

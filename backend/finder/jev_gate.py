@@ -105,6 +105,31 @@ def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, slee
     return summary
 
 
+def run_gemma_on_demoted(con, *, background_path=None, live_ok: bool = False, log=print, **top_kw):
+    """Gemma (judge2) as the second opinion on Jev's demotions ONLY (user's call 2026-09-30: Gemma leaves the
+    nightly top-100 run; it is reported beside each demotion, never a veto). Cached verdicts cost nothing; a
+    failure is one log line. Returns judge2.run's dict, or None when nothing was sent."""
+    from . import judge2
+    shown = top_subset_ids(con, **top_kw)
+    ids = sorted(demotions(con, shown))
+    if not ids:
+        log("Gemma beside Jev: no demotions to second-read")
+        return None
+    if not live_ok:
+        log(f"Gemma beside Jev: {len(ids)} demotion(s), skipped (JUDGE2_LIVE_OK not set)")
+        return None
+    t = time.monotonic()
+    try:
+        result = judge2.run(con, top_n=len(ids), posting_ids=ids, i_have_approval=True, background="file",
+                            background_path=background_path, log=log)
+    except Exception as exc:
+        log(f"Gemma beside Jev: failed ({type(exc).__name__}: {exc}); the page shows what is stored")
+        return None
+    log(f"Gemma beside Jev: {len(ids)} demotion(s), {result.get('reviewed', 0)} reviewed fresh "
+        f"({time.monotonic() - t:.1f}s)")
+    return result
+
+
 # ---------------------------------------------------------------- the demotion rule
 _DEMOTION_SQL = """
     SELECT j.posting_id, j.required_fit, j.lens_process_grade, j.lens_technical_grade, j.lens_ai_grade,

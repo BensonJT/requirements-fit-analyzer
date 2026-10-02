@@ -16,6 +16,8 @@ Options:
     --jd            print description_text after the summary
     --search RE     case-insensitive regex over title + description; add --all to include closed postings
     --limit N       rows for --search (default 25)
+
+Several matches: an exact title wins; otherwise the matches are listed (exit code 3) and you re-run with an id.
     --db PATH       database (default db/jobsearch.duckdb)
 
 What the summary shows, and where it comes from:
@@ -138,11 +140,16 @@ def main():
     hits = resolve_posting(con, a.target)
     if not hits:
         sys.exit(f"lookup: no posting matches {a.target!r}. Try --search '<regex>'.")
+    if len(hits) > 1 and "|" in a.target:
+        # The fuzzy title match is loose; an exact (case-insensitive) title wins if there is exactly one.
+        want = a.target.split("|", 1)[1].strip().lower()
+        exact = [h for h in hits if (h[2] or "").strip().lower() == want]
+        hits = exact if len(exact) == 1 else hits
     if len(hits) > 1:
-        print(f"{len(hits)} postings match; showing the first. Others:")
-        for h in hits[1:10]:
+        print(f"{len(hits)} postings match {a.target!r}; re-run with one posting_id:")
+        for h in hits[:20]:
             print(f"  {h[0]}  {h[3]:<7} {h[1]} | {h[2]}")
-        print()
+        return 3
     summary(con, hits[0][0], a.jd)
     return 0
 

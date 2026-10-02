@@ -353,6 +353,8 @@ Open the database with the [DuckDB CLI](https://duckdb.org/docs/installation/) (
 
 **One posting at a glance:** `.venv/bin/python scripts/lookup.py <posting_id | URL | "employer|title">` prints its identity, screen scores, latest judge and Jev reviews, coverage and any decision, read-only; `--jd` adds the full description and `--search "<regex>"` lists matching postings. The docstring (`--help`) lists every source view.
 
+**From Claude Desktop / Cowork:** `scripts/mcp_lookup_server.py` is a read-only stdio MCP server (stdlib only) with two tools, `lookup_posting(target, include_jd)` and `search_postings(regex, limit, include_closed)`. Each call runs `lookup.py` and returns its text, and nothing can write. Desktop launches it inside WSL: `"command": "wsl.exe", "args": ["-d", "<distro>", "--cd", "<repo>", "--exec", ".venv/bin/python", "scripts/mcp_lookup_server.py"]`.
+
 Parameterized table macros take a look-back window or a regex:
 
 ```sql

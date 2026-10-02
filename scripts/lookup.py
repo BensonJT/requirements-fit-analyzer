@@ -54,6 +54,7 @@ def connect(path):
         sys.exit(f"lookup: cannot open {path} read-only ({exc}).\n"
                  "A sweep or overnight run probably holds the write lock; retry when it finishes.")
     con.execute(f"SET memory_limit = '{MEMORY_LIMIT}'")
+    con.execute("SET enable_progress_bar = false")  # the bar floods captured output on a long --search
     return con
 
 

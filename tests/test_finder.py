@@ -464,6 +464,21 @@ def test_match_rows_fuzzy_falls_back_without_a_parseable_date():
     assert matches[0][1:] == ("old", "fuzzy")
 
 
+def test_match_rows_a_named_req_beats_a_newer_same_titled_sibling():
+    """2026-10-15 (NFCU 31756 vs 32609): no date applied, two same-titled reqs; the Role cell names one."""
+    rows = [tracker_sync.TrackerRow("Active", "\u2014", "Navy Federal Credit Union",
+                                    "Senior Business Intelligence Analyst (Consumer Loan Operational Analytics) (Vienna VA, req 31756)")]
+    postings = [
+        ("loan", "Navy Federal Credit Union", "Senior Business Intelligence Analyst (Consumer Loan Operational Analytics)",
+         datetime(2026, 10, 5), "31756"),
+        ("card", "Navy Federal Credit Union", "Senior Business Intelligence Analyst (Credit Card Account Engagement)",
+         datetime(2026, 10, 15), "32609"),
+    ]
+    assert tracker_sync.match_rows(rows, postings)[0][1:] == ("loan", "fuzzy")
+    # a named req that no posting carries matches nothing, never the sibling
+    assert tracker_sync.match_rows(rows, postings[1:])[0][1:] == (None, "none")
+
+
 # ---------------------------------------------------------------- report
 JD_WITH_HEADINGS = """## About the role
 Lead operational excellence with stakeholders.

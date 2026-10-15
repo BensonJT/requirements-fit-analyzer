@@ -95,8 +95,23 @@ def _parse_row_date(s):
         return None
 
 
+# "req 31756", "Req #32609", "requisition R-12345" in the tracker's Role cell (2026-10-15).
+_REQ_IN_ROLE = re.compile(r"\breq(?:uisition)?\.?\s*(?:id\s*)?#?\s*:?\s*([A-Za-z0-9][A-Za-z0-9_-]{2,})", re.I)
+
+
+def _req_named(role: str):
+    m = _REQ_IN_ROLE.search(role or "")
+    return m.group(1).lower() if m else None
+
+
 def match_rows(rows: list, postings: list) -> list:
-    """(row, matched_posting_id, match_kind) per tracker row. `postings` = (posting_id, employer, title, first_seen_at).
+    """(row, matched_posting_id, match_kind) per tracker row. `postings` = (posting_id, employer, title,
+    first_seen_at[, req_id]).
+
+    2026-10-15: when the Role cell names a req ("req 31756") and the postings carry req_id, ONLY a posting of
+    that employer with that req matches -- a same-titled sibling req never does (NFCU's new Senior BI Analyst
+    32609 stole the 31756 row's match the day it appeared, because that row has no date applied and the
+    date-blind fallback picks the newest same-titled posting). A named req with no such posting is "none".
 
     Exact when the row's posting id exists (an exact req/url match, since the tracker only ever
     records a posting id when a build recorded one). Else fuzzy on company keys + similar title
@@ -107,8 +122,11 @@ def match_rows(rows: list, postings: list) -> list:
     """
     known = {p[0] for p in postings}
     by_employer = defaultdict(list)
-    for pid, employer, title, first_seen in postings:
+    req_of = {}
+    for pid, employer, title, first_seen, *rest in postings:
         by_employer[employer].append((pid, title or "", first_seen))
+        if rest and rest[0]:
+            req_of[pid] = str(rest[0]).strip().lower()
     employer_keys = {e: norm_company(e) for e in by_employer}
     out = []
     for r in rows:
@@ -117,11 +135,16 @@ def match_rows(rows: list, postings: list) -> list:
             continue
         keys = company_keys(r.company)
         applied_date = _parse_row_date(r.date_applied)
+        named = _req_named(r.role) if req_of else None
         cands = []
         for employer, key in employer_keys.items():
             if not company_matches(key, keys):
                 continue
             for pid, title, first_seen in by_employer[employer]:
+                if named is not None:
+                    if req_of.get(pid) == named:
+                        cands.append((first_seen, pid))
+                    continue
                 if not similar_title(r.role, title):
                     continue
                 if applied_date is not None and first_seen is not None:
@@ -140,7 +163,7 @@ def sync(con, vault_dir: str, verbose: bool = False, log=print) -> dict:
         log(f"Tracker sync: {path} not found; skipped.")
         return {"rows": 0, "exact": 0, "fuzzy": 0, "none": 0}
     rows = parse_tracker(path)
-    postings = con.execute("SELECT posting_id, employer, title, first_seen_at FROM postings").fetchall()
+    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id FROM postings").fetchall()
     matches = match_rows(rows, postings)
     now = _now()
     counts = {"rows": len(rows), "exact": 0, "fuzzy": 0, "none": 0, "decisions_added": 0}

@@ -735,7 +735,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         for r in review_rows:
             candidates.setdefault(r[0], "review")
         demoted = jev_gate.demotions(con, candidates)
-        jev_status = jev_gate.gate_status(con)
+        jev_status = jev_gate.gate_status(con, list(candidates))
         demoted_rows = [r for r in apply_rows + review_rows if r[0] in demoted]
         apply_rows = [r for r in apply_rows if r[0] not in demoted]
         review_rows = [r for r in review_rows if r[0] not in demoted]

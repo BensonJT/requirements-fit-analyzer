@@ -86,6 +86,7 @@ def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, slee
     `jev.run` itself; a cap stop or an error is logged and the caller still writes the report. Returns the
     RunSummary, or None when nothing was sent."""
     from . import jev
+    ensure_required_bar(con, facts=facts, live_ok=live_ok, transport=transport, sleep_fn=sleep_fn, log=log)
     wanted = top_subset_ids(con, **top_kw)
     exempt = adjudicated_ids(con, list(wanted))
     rows = subset_postings(con, [pid for pid in wanted if pid not in exempt])
@@ -178,9 +179,53 @@ def demotions(con, shown: dict) -> dict:
     return out
 
 
-def gate_status(con) -> str:
-    """One line for the report header: which prompt_version(s) may demote right now."""
+def gate_status(con, shown_ids=None) -> str:
+    """One line for the report header: which prompt_version(s) may demote right now, and -- 2026-10-15 -- how
+    many shown rows Jev reviewed under a prompt_version WITHOUT a passed required bar (those are never demoted,
+    so a fact-sheet edit that re-keys the prompt_version must not look like 'active, 0 demoted')."""
     rows = con.execute("SELECT prompt_version FROM vw_jev_bar WHERE required_passed ORDER BY 1").fetchall()
-    if not rows:
-        return "INACTIVE (no Jev prompt_version has a passed required bar; run the Jev gold score preset)"
-    return "active under prompt_version " + ", ".join(r[0] for r in rows)
+    head = ("INACTIVE (no Jev prompt_version has a passed required bar; run the Jev gold score preset)" if not rows
+            else "active under prompt_version " + ", ".join(r[0] for r in rows))
+    if shown_ids:
+        unmeasured = con.execute("""
+            SELECT j.prompt_version, count(*) FROM vw_jev_latest j
+            LEFT JOIN vw_jev_bar b ON b.prompt_version = j.prompt_version
+            WHERE j.posting_id IN (SELECT unnest(?::VARCHAR[])) AND NOT coalesce(b.required_passed, FALSE)
+            GROUP BY 1 ORDER BY 2 DESC""", [list(shown_ids)]).fetchall()
+        if unmeasured:
+            head += (" — **WARNING: " + ", ".join(f"{n} shown row(s) reviewed under {pv}" for pv, n in unmeasured)
+                     + ", whose required bar has not passed, are NOT demoted** (a fact-sheet edit re-keys the "
+                     "prompt_version; `top --jev` re-measures it automatically)")
+    return head
+
+
+def ensure_required_bar(con, *, facts=None, live_ok: bool = False, transport=None, sleep_fn=None, log=print):
+    """2026-10-15: a fact-sheet edit re-keys Jev's prompt_version, and a review under a prompt_version with no
+    passed REQUIRED bar never demotes -- so the gate silently stopped demoting on 10/5 (two sheet edits, no bar
+    re-run). Before reviewing Top Jobs, if the CURRENT prompt_version has no stored required eval, Jev reviews
+    the blind gold set (~2.5M tokens, ~$0.10, ~3 min) and `evaluate_required` scores it. Returns the
+    required result dict, or None (already measured, not live, or failed -- logged, never raised)."""
+    from . import jev, jev_eval
+    from datetime import datetime, timezone
+    pv = jev.prompt_version(facts if facts is not None else jev.load_facts(), jev.endpoint_from_env())
+    done = con.execute("SELECT passed FROM vw_jev_eval_latest WHERE prompt_version = ? AND family = 'required'",
+                       [pv]).fetchone()
+    if done is not None:
+        if not done[0]:
+            log(f"Jev gate: required bar at {pv} was measured and NOT passed -- its reviews will not demote")
+        return None
+    if not live_ok:
+        log(f"Jev gate: prompt_version {pv} has no required bar yet; not live, so it was not measured")
+        return None
+    log(f"Jev gate: prompt_version {pv} has no required bar yet -- reviewing the gold set and scoring it")
+    try:
+        jev.run(con, jev.eval_set_postings(con), live_ok=True, facts=facts, transport=transport, sleep_fn=sleep_fn,
+                log=log)
+        run_id = datetime.now(timezone.utc).strftime("jev-gate-%Y%m%dT%H%M%SZ")
+        res = jev_eval.evaluate_required(con, pv, run_id=run_id, write=True)
+    except Exception as exc:
+        log(f"Jev gate: required-bar measurement failed ({type(exc).__name__}: {exc}); reviews under {pv} won't demote")
+        return None
+    log(f"Jev gate: required bar at {pv}: {'PASSED' if res.get('passed') else 'NOT PASSED'} "
+        f"({res.get('reason', '')})")
+    return res

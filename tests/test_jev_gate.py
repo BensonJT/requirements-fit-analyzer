@@ -164,7 +164,8 @@ def test_write_top_jobs_moves_demoted_rows_to_their_own_section(tmp_path):
     assert cells[6].startswith("required fails — hard gate unmet: Secret · unmet: Active Secret clearance required.")
     cells = [c.strip() for c in demoted[1].strip("|").split("|")]
     assert cells[4] == "wrong / wrong / wrong · meets" and cells[5] == "meets" and cells[6].startswith("wrong on every lens")
-    assert f"**Jev demotion pass:** active under prompt_version {PV}; 3 row(s) demoted" in text
+    assert f"**Jev demotion pass:** active under prompt_version {PV} — **WARNING: 1 shown row(s) reviewed under pv-new" in text
+    assert "; 3 row(s) demoted" in text
     assert "finder.py mark <id> build" in text
     # the rank itself never moved: Apply is still in rank order and the demoted rows keep their rank_score
     assert con.execute("SELECT count(*) FROM vw_lens_fit WHERE rank_score IS NOT NULL").fetchone()[0] == 7
@@ -191,6 +192,7 @@ def test_run_over_top_sends_the_subset_minus_adjudicated_and_never_fails_the_rep
         raise RuntimeError("cap reached")           # a failure must be logged, not raised
 
     monkeypatch.setattr(jev, "run", fake_run)
+    monkeypatch.setattr(jev_gate, "ensure_required_bar", lambda *a, **k: None)
     logs = []
     assert jev_gate.run_over_top(con, facts=[], live_ok=True, log=logs.append) is None
     assert set(sent) == {"keep-meets", "demote-fails", "demote-all-wrong", "keep-unevaluated-pv", "keep-no-review",
@@ -209,4 +211,41 @@ def test_judge2_run_filters_posting_ids_before_the_top_n_cut(tmp_path):
     wanted = ["review-demote"]                      # lowest-ranked fixture row
     res = judge2.run(con, top_n=1, posting_ids=wanted, dry_run=True, show=0, background="public", log=lambda *_: None)
     assert res["count"] == 1
+    con.close()
+
+
+# ---------------------------------------------------------------- 2026-10-15: a re-keyed prompt_version
+def test_gate_status_warns_about_shown_rows_under_an_unmeasured_prompt_version(tmp_path):
+    con = _fixture(tmp_path)
+    line = jev_gate.gate_status(con, list(jev_gate.top_subset_ids(con)))
+    assert line.startswith(f"active under prompt_version {PV}")
+    assert "1 shown row(s) reviewed under pv-new" in line and "are NOT demoted" in line
+    assert "WARNING" not in jev_gate.gate_status(con)          # no shown ids: the old one-liner
+    con.close()
+
+
+def test_ensure_required_bar_measures_only_an_unmeasured_current_pv_and_only_live(tmp_path, monkeypatch):
+    from backend.finder import jev, jev_eval
+    con = _fixture(tmp_path)
+    calls = []
+    monkeypatch.setattr(jev, "prompt_version", lambda facts, endpoint: "pv-new")
+    monkeypatch.setattr(jev, "eval_set_postings", lambda con_: ["gold"])
+    monkeypatch.setattr(jev, "run", lambda con_, rows, **kw: calls.append(("run", rows)))
+
+    def fake_eval(con_, pv, *, run_id, write):
+        calls.append(("eval", pv))
+        store.insert_jev_eval(con_, run_id=run_id, prompt_version=pv, family="required", n=115, metrics={},
+                              passed=True, reason="test")
+        return {"passed": True, "reason": "test"}
+
+    monkeypatch.setattr(jev_eval, "evaluate_required", fake_eval)
+    logs = []
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=False, log=logs.append) is None
+    assert calls == [] and any("not live" in l for l in logs)
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append)["passed"]
+    assert calls == [("run", ["gold"]), ("eval", "pv-new")]
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append) is None   # measured now
+    assert len(calls) == 2
+    # and the row under pv-new now demotes
+    assert "keep-unevaluated-pv" in jev_gate.demotions(con, jev_gate.top_subset_ids(con))
     con.close()

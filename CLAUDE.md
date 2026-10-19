@@ -128,7 +128,7 @@ If `docs/SPRINT_PLAN.md` exists, it is a binding contract.
   - Blank line
   - Body: 2-5 bullets explaining what changed and why
 - Group related changes into one commit.
-- Do NOT push to GitHub — the user handles all pushes.
+- Push to GitHub after committing (user's standing go, 2026-10-19): run the `.personal_patterns` check first, and never push a commit that fails it.
 
 ## Public repo rules (added 2026-09-15)
 This repo is public on GitHub (`origin` = git@github.com:BensonJT/jobsearch.git).

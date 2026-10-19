@@ -2,11 +2,18 @@
 data-loss guard (§31.4), written FIRST per the branch's process instructions. No network."""
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.ats import bridge, store  # noqa: E402
 from backend.ats.normalize import base as job  # noqa: E402
+
+# `vw_bridge_open(_all)` measures days_stale / days_open against DuckDB's wall clock (`now()`), and a view
+# takes no clock parameter. So the seeded sweeps are pinned relative to today -- the previous sweep the day
+# before yesterday, the latest one yesterday, both at 10:00 -- instead of a fixed calendar date that ages
+# out of the BRIDGE_STALE_DAYS window (these tests seeded 2026-09-21 and failed from 2026-10-01).
+DAY1 = datetime.combine(date.today() - timedelta(days=1), time(10))
+DAY0 = DAY1 - timedelta(days=1)
 
 
 # ---------------------------------------------------------------- location_matches (§31.3)
@@ -72,8 +79,8 @@ def test_bridge_pull_never_closes_a_place_it_did_not_look_at(tmp_path):
     """A ring-2 place not attempted this run must never be closed just because it's absent from
     a ring-1-only pull's results."""
     con = store.connect(str(tmp_path / "t1.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
 
     # Run 1: two places attempted, both succeed. R1 matches Springfield (ring1), R2 matches
     # Rivertown (ring2).
@@ -101,8 +108,8 @@ def test_bridge_pull_never_closes_a_place_that_returned_zero_rows(tmp_path):
     that place. A clean-but-empty pull is not evidence, so this now stays active; staleness
     (letter E) is what eventually retires a posting nothing keeps re-confirming."""
     con = store.connect(str(tmp_path / "t2.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     j1 = _bjob("R1")
     store.record_bridge_board(con, "Big Box", "workday", [j1], t1,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
@@ -121,8 +128,8 @@ def test_bridge_pull_closes_a_posting_when_other_matches_confirm_the_place_is_al
     """Contrast case for letter D: the place pull is NOT empty (it matched a DIFFERENT posting),
     so R1's genuine absence from an otherwise-live place still closes it."""
     con = store.connect(str(tmp_path / "t2b.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     j1 = _bjob("R1")
     store.record_bridge_board(con, "Big Box", "workday", [j1], t1,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
@@ -135,8 +142,8 @@ def test_bridge_pull_closes_a_posting_when_other_matches_confirm_the_place_is_al
 
 def test_bridge_pull_does_not_close_when_the_place_failed_or_truncated(tmp_path):
     con = store.connect(str(tmp_path / "t3.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     j1 = _bjob("R1")
     store.record_bridge_board(con, "Big Box", "workday", [j1], t1,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
@@ -149,8 +156,8 @@ def test_bridge_pull_does_not_close_when_the_place_failed_or_truncated(tmp_path)
 
 def test_bridge_posting_matched_by_two_places_stays_open_while_either_returns_it(tmp_path):
     con = store.connect(str(tmp_path / "t4.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     j1 = _bjob("R1", places=["Springfield, XX", "Rivertown, YY"])
     store.record_bridge_board(con, "Big Box", "workday", [j1], t1,
                               attempted_places={"Springfield, XX", "Rivertown, YY"},
@@ -168,8 +175,8 @@ def test_bridge_posting_matched_by_two_places_stays_open_while_either_returns_it
 
 def test_fit_track_whole_board_sweep_does_not_close_bridge_rows_and_vice_versa(tmp_path):
     con = store.connect(str(tmp_path / "t5.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     # Same employer/platform, two rows: a bridge (place-scoped) row and a fit (whole-board) row.
     bj = _bjob("R1")
     store.record_bridge_board(con, "Big Box", "workday", [bj], t1,
@@ -223,7 +230,7 @@ def _seed_fit_and_bridge(con, now):
 def test_bridge_excluded_from_screening(tmp_path):
     from backend.finder import pipeline
     con = store.connect(str(tmp_path / "t6.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit_pid, bridge_pid = _seed_fit_and_bridge(con, now)
     pipeline.screen(con, full=True, log=lambda *a, **k: None)
     screened = {r[0] for r in con.execute("SELECT posting_id FROM screens").fetchall()}
@@ -233,7 +240,7 @@ def test_bridge_excluded_from_screening(tmp_path):
 
 def test_bridge_excluded_from_detail_candidates(tmp_path):
     con = store.connect(str(tmp_path / "t7.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit = job(req_id="F1", title="Process Excellence Manager", url="https://x/fit/F1")  # no description
     store.record_board(con, "Acme Corp", "workday", [fit], now, track="fit")
     store.record_bridge_board(con, "Acme Corp", "workday", [_bjob("B1")], now,
@@ -246,7 +253,7 @@ def test_bridge_excluded_from_detail_candidates(tmp_path):
 
 def test_bridge_excluded_from_hard_negatives(tmp_path):
     con = store.connect(str(tmp_path / "t8.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit_pid, bridge_pid = _seed_fit_and_bridge(con, now)
     for pid in (fit_pid, bridge_pid):
         con.execute("INSERT INTO decisions VALUES (?, 'pass', 'function: wrong lane', 'cli', NULL, ?)",
@@ -258,7 +265,7 @@ def test_bridge_excluded_from_hard_negatives(tmp_path):
 
 def test_bridge_excluded_from_label_set(tmp_path):
     con = store.connect(str(tmp_path / "t9.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit_pid, bridge_pid = _seed_fit_and_bridge(con, now)
     fit_hash = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [fit_pid]).fetchone()[0]
     bridge_hash = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [bridge_pid]).fetchone()[0]
@@ -277,7 +284,7 @@ def test_bridge_excluded_from_lens_fit_even_if_somehow_screened(tmp_path):
     only through the INNER JOIN to vw_screen_latest -- so even a bridge posting that somehow
     picked up a `screens` row (never happens through the normal pipeline) is still excluded."""
     con = store.connect(str(tmp_path / "t10.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit_pid, bridge_pid = _seed_fit_and_bridge(con, now)
     for pid in (fit_pid, bridge_pid):
         con.execute("""INSERT INTO screens (posting_id, rules_version, model_version, screened_at, verdict,
@@ -290,7 +297,7 @@ def test_bridge_excluded_from_lens_fit_even_if_somehow_screened(tmp_path):
 
 def test_vw_bridge_open_shows_only_bridge_postings(tmp_path):
     con = store.connect(str(tmp_path / "t11.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     fit_pid, bridge_pid = _seed_fit_and_bridge(con, now)
     rows = {r[0] for r in con.execute("SELECT posting_id FROM vw_bridge_open").fetchall()}
     assert bridge_pid in rows
@@ -371,7 +378,7 @@ def test_cmd_bridge_sorts_ring_then_voice_low_first_high_last_then_employer_pref
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {"zeta co": 0, "acme co": 1})
 
     con = store.connect(str(tmp_path / "t15.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     high = _bjob("H1", title="Cashier")
     low = _bjob("L1", title="Overnight Stocker")
     none_ = _bjob("N1", title="Assistant Manager")
@@ -400,7 +407,7 @@ def test_cmd_bridge_hide_voice_high_is_off_by_default(tmp_path, monkeypatch, cap
                                             "search_text": "Springfield, XX", "state": "XX", "evergreen": False}])
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t16.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("H1", title="Cashier")], now,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     capsys.readouterr()
@@ -459,7 +466,7 @@ def test_cmd_bridge_max_ring_beyond_two_includes_ring_three(tmp_path, monkeypatc
     monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t17.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     store.record_bridge_board(con, "Acme Co", "workday",
                               [_bjob("H1", title="Greeter", places=["Hilltown, ZZ"])], now,
                               attempted_places={"Hilltown, ZZ"}, place_status={"Hilltown, ZZ": True})
@@ -481,8 +488,8 @@ def test_cmd_bridge_evergreen_place_prints_pool_and_is_never_new(tmp_path, monke
     monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t18.duckdb"))
-    t1 = datetime(2026, 9, 20, 10)
-    t2 = datetime(2026, 9, 21, 10)
+    t1 = DAY0
+    t2 = DAY1
     # A prior (unrelated) bridge run establishes a "previous run" cutoff for the NEW mark.
     store.record_bridge_board(con, "Other Co", "workday", [_bjob("O1")], t1,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
@@ -507,7 +514,7 @@ def test_cmd_bridge_non_evergreen_place_still_shows_days_and_new(tmp_path, monke
     monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t19.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("H1", title="Cashier")], now,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     capsys.readouterr()
@@ -574,7 +581,7 @@ def test_record_bridge_board_refuses_an_untagged_job(tmp_path):
     never be written as a bridge row -- it can't be told apart from a genuinely place-scoped
     posting by the close pass."""
     con = store.connect(str(tmp_path / "t21.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     untagged = job(req_id="U1", title="Cashier", url="https://x/U1", location_primary="Springfield, XX")
     try:
         store.record_bridge_board(con, "Big Box", "workday", [untagged], now,
@@ -696,7 +703,7 @@ def test_pseudo_negatives_never_includes_a_bridge_posting_with_description_text(
     from backend.finder import labels
 
     con = store.connect(str(tmp_path / "t22.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     br = _bjob("B1", title="Overnight Stocker")
     br["description_text"] = _LONG_DESC
     store.record_bridge_board(con, "Acme Corp", "workday", [br], now,
@@ -710,7 +717,7 @@ def test_posting_index_never_matches_a_bridge_row(tmp_path):
     from backend.finder.labels import PostingIndex
 
     con = store.connect(str(tmp_path / "t23.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     store.record_bridge_board(con, "Acme Corp", "workday", [_bjob("B1", title="Cashier")], now,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     idx = PostingIndex(con)
@@ -736,8 +743,8 @@ def test_cmd_bridge_new_cutoff_uses_the_previous_sweeps_run_id_not_per_board_ran
     con = store.connect(str(tmp_path / "t24.duckdb"))
 
     # Sweep 1 ("run-a"): two boards, interleaved microsecond ran_at.
-    t_a1 = datetime(2026, 9, 20, 10, 0, 0, 100000)
-    t_a2 = datetime(2026, 9, 20, 10, 0, 0, 300000)
+    t_a1 = DAY0 + timedelta(microseconds=100000)
+    t_a2 = DAY0 + timedelta(microseconds=300000)
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("OLD1")], t_a1,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     store.log_board(con, "run-a", "Acme Co", "workday", True, 1.0, t_a1, track="bridge")
@@ -747,8 +754,8 @@ def test_cmd_bridge_new_cutoff_uses_the_previous_sweeps_run_id_not_per_board_ran
     # run-a's t_a2, so a naive DISTINCT-ran_at-ordered cutoff could pick a run-a timestamp as if
     # it were run-b's own start, or vice versa. The correct cutoff is min(ran_at) of run-a, since
     # run-a is the sweep before run-b (the most recent).
-    t_b1 = datetime(2026, 9, 20, 10, 0, 0, 200000)
-    t_b2 = datetime(2026, 9, 21, 10, 0, 0, 0)
+    t_b1 = DAY0 + timedelta(microseconds=200000)
+    t_b2 = DAY1
     new_job = _bjob("NEW1")
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("OLD1"), new_job], t_b2,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
@@ -779,13 +786,13 @@ def test_cmd_bridge_does_not_mark_the_previous_sweeps_later_boards_new(tmp_path,
     con = store.connect(str(tmp_path / "t26.duckdb"))
     kw = dict(attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
 
-    a1, a2 = datetime(2026, 9, 20, 10, 0, 0), datetime(2026, 9, 20, 10, 0, 30)
+    a1, a2 = DAY0, DAY0 + timedelta(seconds=30)
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("A1", title="Clerk Alpha")], a1, **kw)
     store.log_board(con, "run-a", "Acme Co", "workday", True, 1.0, a1, track="bridge")
     store.record_bridge_board(con, "Zeta Co", "workday", [_bjob("Z1", title="Clerk Zulu")], a2, **kw)
     store.log_board(con, "run-a", "Zeta Co", "workday", True, 1.0, a2, track="bridge")
 
-    b1, b2 = datetime(2026, 9, 21, 10, 0, 0), datetime(2026, 9, 21, 10, 0, 30)
+    b1, b2 = DAY1, DAY1 + timedelta(seconds=30)
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("A1", title="Clerk Alpha"), _bjob("A2", title="Clerk Bravo")], b1, **kw)
     store.log_board(con, "run-b", "Acme Co", "workday", True, 1.0, b1, track="bridge")
     store.record_bridge_board(con, "Zeta Co", "workday", [_bjob("Z1", title="Clerk Zulu")], b2, **kw)
@@ -809,7 +816,7 @@ def test_cmd_bridge_marks_nothing_new_on_the_very_first_sweep(tmp_path, monkeypa
     monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t25.duckdb"))
-    now = datetime(2026, 9, 21, 10)
+    now = DAY1
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("F1")], now,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     store.log_board(con, "run-only", "Acme Co", "workday", True, 1.0, now, track="bridge")
@@ -831,7 +838,7 @@ def test_vw_bridge_open_hides_stale_rows_include_stale_shows_them(tmp_path, monk
     monkeypatch.setattr(R, "load_bridge_places", lambda max_ring=1, log=None: places)
     monkeypatch.setattr(R, "load_bridge_employer_order", lambda: {})
     con = store.connect(str(tmp_path / "t26.duckdb"))
-    old = datetime(2026, 9, 1, 10)   # well over BRIDGE_STALE_DAYS before "now"
+    old = DAY1 - timedelta(days=20)   # well over BRIDGE_STALE_DAYS before "now"
     store.record_bridge_board(con, "Acme Co", "workday", [_bjob("S1", title="Cashier")], old,
                               attempted_places={"Springfield, XX"}, place_status={"Springfield, XX": True})
     assert B.BRIDGE_STALE_DAYS == 10
@@ -876,7 +883,7 @@ def test_sweep_run_limit_applies_after_track_filter(tmp_path, monkeypatch):
 
     def fake_sweep_bridge(con, rows, max_ring=1, workers=8, max_pages=None, log=print):
         seen_bridge_rows.extend(rows)
-        return dict(run_id="r", started=datetime(2026, 9, 21, 10), elapsed=0.0, attempted=len(rows),
+        return dict(run_id="r", started=DAY1, elapsed=0.0, attempted=len(rows),
                     succeeded=0, failed=len(rows), seen=0, new=0, reopened=0, closed=0)
 
     monkeypatch.setattr(ats_sweep, "sweep_bridge", fake_sweep_bridge)

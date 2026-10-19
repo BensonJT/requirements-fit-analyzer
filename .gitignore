@@ -186,3 +186,8 @@ db/jev_sentinel_ids.txt
 
 # launch.sh per-preset timings (local machine history)
 logs/launch_timings.jsonl
+
+# Ad hoc run output: chain/run scripts, nohup output, launcher answers, ID lists, gold-ruling snapshots.
+# These carry screening judgments about named employers, so none of it belongs in the public repo.
+logs/*
+db/*.txt

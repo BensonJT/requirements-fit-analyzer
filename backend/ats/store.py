@@ -1543,6 +1543,10 @@ def _add_missing_columns(con):
                                 ("judge2_reviews", "resp_unmet", "INTEGER"),
                                 ("postings", "track", "VARCHAR DEFAULT 'fit'"),
                                 ("postings", "bridge_place", "VARCHAR"),
+                                # the ATS's own work-site and required-travel text, as stated, when it
+                                # has them (Eightfold custom fields; Microsoft since 2026-10-19)
+                                ("postings", "work_site", "VARCHAR"),
+                                ("postings", "travel", "VARCHAR"),
                                 ("board_runs", "track", "VARCHAR DEFAULT 'fit'")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")

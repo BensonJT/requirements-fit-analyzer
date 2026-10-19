@@ -210,7 +210,7 @@ def test_eightfold_pcsx_position_maps_thin_list():
     assert p["title"] == "Cloud & AI Solution Engineer"
     assert p["url"] == "https://apply.careers.microsoft.com/careers/job/1970393556997347"
     assert p["location_primary"] == "Nigeria, Multiple Locations, Multiple Locations"
-    assert p["workplace_type"] == "onsite"
+    assert p["workplace_type"] is None            # Microsoft's list "onsite" is untrusted; the detail decides
     assert p["posted_at"] == date(2026, 9, 15)
     assert p["description_text"] is None          # list never supplies the JD
     assert p["_ef_id"] == 1970393556997347
@@ -235,6 +235,59 @@ def test_eightfold_detail_fields_fill_description_and_pay():
     assert (f["pay_min"], f["pay_max"], f["pay_interval"], f["pay_source"]) == (85000, 105000, "year", "text")
     assert f["workplace_type"] == "remote"         # falls back to the list's flag
     assert f["location_primary"] == "Butte, Montana, United States"
+
+
+def test_eightfold_list_flag_trusted_elsewhere_and_when_microsoft_says_remote():
+    assert A._eightfold_position("https://apply.omnicell.com", _PCSX_POS)["workplace_type"] == "onsite"
+    remote = dict(_PCSX_POS, workLocationOption="remote")
+    assert A._eightfold_position("https://apply.careers.microsoft.com", remote)["workplace_type"] == "remote"
+
+
+def test_work_site_type_reads_days_in_office():
+    assert A._work_site_type("0 days / week in-office \u2013 remote") == "remote"
+    assert A._work_site_type("3 days / week in-office") == "hybrid"
+    assert A._work_site_type("Fully on-site") == "onsite"
+    assert A._work_site_type("On-site") == "onsite"
+    assert A._work_site_type(None) is None
+
+
+def test_eightfold_pcsx_detail_takes_work_site_and_travel():
+    d = {"id": 1970393557026746, "location": "United States, Multiple Locations, Multiple Locations",
+         "locations": ["United States, Multiple Locations, Multiple Locations"], "workLocationOption": "onsite",
+         "department": "Business Program Management", "postedTs": 1791984773,
+         "jobDescription": "<p>Lead culture programs.</p>",
+         "efcustomTextWorkSite": ["0 days / week in-office \u2013 remote"],
+         "efcustomTextRequiredTravel": ["Less than 25%"]}
+    posting = {"workplace_type": "onsite", "location_primary": None, "locations": None}  # a row stored before the fix
+    f = A._eightfold_pcsx_detail_fields(d, posting)
+    assert f["description_text"] == "Lead culture programs."
+    assert f["workplace_type"] == "remote"        # the work site overrides the stale stored flag
+    assert f["work_site"] == "0 days / week in-office \u2013 remote"
+    assert f["travel"] == "Less than 25%"
+    hybrid = dict(d, efcustomTextWorkSite=["3 days / week in-office"], efcustomTextRequiredTravel=[])
+    f = A._eightfold_pcsx_detail_fields(hybrid, posting)
+    assert (f["workplace_type"], f["travel"]) == ("hybrid", None)
+
+
+def test_eightfold_detail_uses_position_details_for_microsoft(monkeypatch):
+    seen = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    def fake_request(c, method, url, **kw):
+        seen.append(url)
+        return Resp({"data": {"id": 7, "jobDescription": "JD", "efcustomTextWorkSite": ["Fully on-site"]}})
+
+    monkeypatch.setattr(A, "_request", fake_request)
+    row = {"employer": "Microsoft", "identifier_1": "https://apply.careers.microsoft.com", "identifier_2": "microsoft.com"}
+    f = A.eightfold_detail(row, {"_ef_id": 7})
+    assert "/api/pcsx/position_details?position_id=7&domain=microsoft.com" in seen[0]
+    assert (f["workplace_type"], f["work_site"]) == ("onsite", "Fully on-site")
 
 
 def test_eightfold_registered():

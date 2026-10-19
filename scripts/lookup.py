@@ -86,7 +86,7 @@ def summary(con, pid, with_jd):
     p = one(con, "SELECT * FROM postings WHERE posting_id = ?", pid)
     print(f"{p['employer']} | {p['title']}  [{p['status']}]")
     print(f"  posting_id         {pid}")
-    show("identity", p, ["url", "location_primary", "workplace_type", "employment_type", "pay_min", "pay_max",
+    show("identity", p, ["url", "location_primary", "workplace_type", "work_site", "travel", "employment_type", "pay_min", "pay_max",
                          "pay_interval", "posted_at", "first_seen_at", "closed_at"])
     show("screen (vw_lens_fit)", one(con, "SELECT * FROM vw_lens_fit WHERE posting_id = ?", pid),
          ["final_score", "band", "verdict", "tier", "fit_process", "fit_technical", "fit_ai", "fit_required",

@@ -1061,7 +1061,18 @@ def adp_detail(row, posting):
 # truncated preview on apply/v2 and absent on pcsx, so the detail call
 # (apply/v2/jobs/<id>, which works even where the apply/v2 list is refused) always
 # supplies the JD. Registry: identifier_1 = host URL, identifier_2 = domain.
+#
+# Microsoft is the exception on both counts. Its pcsx list sends workLocationOption "onsite"
+# for nearly every posting (2,454 of 2,455 active on 2026-10-19), remote and hybrid roles
+# included, so the list flag is trusted only when it says remote. Its detail comes from
+# pcsx/position_details instead, which carries the same JD text (identical hash) plus the
+# work site the careers page shows ("0 days / week in-office – remote", "3 days / week
+# in-office", "Fully on-site") and the required travel, as custom fields.
 EIGHTFOLD_PAGE = 10
+_EIGHTFOLD_PCSX_DETAIL_HOSTS = frozenset({"https://apply.careers.microsoft.com"})
+_EIGHTFOLD_WORK_SITE_KEYS = ("efcustomTextWorkSite", "efcustomTextOnsiteremote")
+_EIGHTFOLD_TRAVEL_KEYS = ("efcustomTextRequiredTravel",)
+_DAYS_IN_OFFICE = re.compile(r"(\d+)\s*days?\s*/\s*week\s*in[- ]?office", re.I)
 
 
 def _eightfold_base(row):
@@ -1077,6 +1088,38 @@ def _eightfold_workplace(value, *locs):
     if v.startswith("remote"):
         return "remote"
     return N.workplace_type(v or None, *locs)
+
+
+def _eightfold_list_flag(host, p):
+    """The list record's workplace flag, or None where the tenant's flag is known to be wrong
+    unless it says remote (see the section comment). A None leaves the stored value alone on
+    upsert, so the detail stage's work site survives every later list pull."""
+    v = p.get("work_location_option") or p.get("workLocationOption")
+    if host in _EIGHTFOLD_PCSX_DETAIL_HOSTS and not (v or "").lower().startswith("remote"):
+        return None
+    return v
+
+
+def _eightfold_custom(d, keys):
+    """First non-empty custom field among `keys`; Eightfold wraps each in a one-item list."""
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, list):
+            v = next((x for x in v if isinstance(x, str) and x.strip()), None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _work_site_type(text):
+    """'0 days / week in-office – remote' -> remote; 'N days / week in-office' -> hybrid;
+    anything else ('Fully on-site', 'On-site', 'Remote') through the shared mapper."""
+    if not text:
+        return None
+    m = _DAYS_IN_OFFICE.search(text)
+    if m:
+        return "remote" if int(m.group(1)) == 0 else "hybrid"
+    return N.workplace_type(text)
 
 
 def _eightfold_position(host, p):
@@ -1097,7 +1140,7 @@ def _eightfold_position(host, p):
         url=url,
         location_primary=locs[0] if locs else None,
         locations=N.locations_json(locs),
-        workplace_type=_eightfold_workplace(p.get("work_location_option") or p.get("workLocationOption"), *locs),
+        workplace_type=_eightfold_workplace(_eightfold_list_flag(host, p), *locs),
         job_family=p.get("department") or None,
         posted_at=N.parse_date(posted),
         raw_json=N.raw({k: v for k, v in p.items() if k != "job_description"}),
@@ -1255,10 +1298,30 @@ def eightfold_detail(row, posting):
             raise ValueError("posting has no Eightfold id to fetch detail with")
         ef_id = m.group(1)
     with client() as c:
+        if host in _EIGHTFOLD_PCSX_DETAIL_HOSTS:
+            d = (_request(c, "GET", f"{host}/api/pcsx/position_details?position_id={ef_id}"
+                                    f"&domain={domain}&hl=en").json().get("data") or {})
+            if not d.get("id"):
+                raise Gone(f"empty detail for {ef_id}")
+            return _eightfold_pcsx_detail_fields(d, posting)
         d = _request(c, "GET", f"{host}/api/apply/v2/jobs/{ef_id}?domain={domain}").json()
     if not d.get("id"):
         raise Gone(f"empty detail for {ef_id}")
     return _eightfold_detail_fields(d, posting)
+
+
+def _eightfold_pcsx_detail_fields(d, posting):
+    """A pcsx/position_details payload -> the same fields as the apply/v2 detail, with
+    workplace_type taken from the work-site custom field when the tenant sends one, and the
+    work-site and travel text kept as stated."""
+    f = _eightfold_detail_fields({"job_description": d.get("jobDescription"), "location": d.get("location"),
+                                  "locations": d.get("locations"), "department": d.get("department"),
+                                  "t_update": d.get("postedTs"), "t_create": d.get("creationTs")}, posting)
+    site = _eightfold_custom(d, _EIGHTFOLD_WORK_SITE_KEYS)
+    f["workplace_type"] = _work_site_type(site) or f["workplace_type"]
+    f["work_site"] = site
+    f["travel"] = _eightfold_custom(d, _EIGHTFOLD_TRAVEL_KEYS)
+    return f
 
 
 # ================================================================ Paylocity

@@ -654,7 +654,7 @@ def cmd_feedback(con, a):
         sys.exit(0 if result["ok"] else 1)
     if action == "sheet":
         from backend.finder import blind_sheet
-        blind_sheet.generate_sheet(con, n=a.n, seed=a.seed, out_path=a.out)
+        blind_sheet.generate_sheet(con, n=a.n, seed=a.seed, out_path=a.out, jev_n=a.jev)
         return
     if action == "sheet-import":
         from backend.finder import blind_sheet
@@ -929,6 +929,7 @@ def main():
     fs.add_argument("--n", type=int, default=20)
     fs.add_argument("--seed", type=int, help="seeds the sample/shuffle for a reproducible sheet")
     fs.add_argument("--out", help="CSV output path (default db/blind_sheets/blind_sheet_<date>.csv)")
+    fs.add_argument("--jev", type=int, default=6, help="Jev-demoted decoys added on top of --n (default 6; 0 = none)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet")
 
     fs = fsub.add_parser("sheet-import", parents=[common_inner], help="import a graded blind sheet (basis='blind')")

@@ -234,15 +234,20 @@ def _spread(by_grade: dict) -> list:
 
 
 def interleave(pool: dict, limit: Optional[int] = None) -> list:
-    """One flat queue mixing the pools per WAVE, so any stopping point spans the range."""
+    """One flat queue mixing the pools per WAVE, so any stopping point spans the range. A posting in two pools
+    is queued once, under the first pool to reach it (2026-10-20: Wells Fargo 776cc941 sat in `high` and
+    `ai_title` and was graded twice)."""
     queues = {k: list(v) for k, v in pool.items() if v}
     order = [k for k in WAVE if k in queues] + [k for k in queues if k not in WAVE]
-    out = []
+    out, queued = [], set()
     while any(queues.values()) and (limit is None or len(out) < limit):
         took = False
         for key in order:
             for _ in range(WAVE.get(key, 25)):
+                while queues.get(key) and queues[key][0] in queued:
+                    queues[key].pop(0)
                 if queues.get(key):
+                    queued.add(queues[key][0])
                     out.append((queues[key].pop(0), key))
                     took = True
                     if limit is not None and len(out) >= limit:

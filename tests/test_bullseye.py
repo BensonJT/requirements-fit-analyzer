@@ -215,6 +215,15 @@ def test_rank_feed_uses_fit_bullseye_only_for_fully_unjudged_strong_rows(tmp_pat
     con.close()
 
 
+def test_rank_lens_best_bullseye_weight_is_0_75(tmp_path):
+    """2026-10-19: (lens_best + 0.25 + 0.75 * fit_bullseye) / 2 for an unjudged strong row (was 0.75 + 0.25 *)."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _screened_posting(con, "w1" * 10, fit_process=0.9, fit_bullseye=0.2)
+    got = con.execute("SELECT rank_lens_best FROM vw_lens_fit WHERE posting_id = ?", ["w1" * 10]).fetchone()[0]
+    assert got == pytest.approx((0.9 + 0.25 + 0.75 * 0.2) / 2)
+    con.close()
+
+
 def test_rank_why_mentions_bullseye_only_for_the_same_population(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     _screened_posting(con, "b1" * 10, fit_process=0.9, fit_bullseye=0.81)     # unjudged, strong, >= 0.5 -> mentioned

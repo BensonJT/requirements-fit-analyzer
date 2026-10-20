@@ -491,3 +491,17 @@ def splitter_fingerprint() -> str:
     payload = "|".join([SPLITTER_VERSION, RESPONSIBILITY_HEADINGS, PERSON_HEADINGS, DROP_HEADINGS,
                         P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def current_units_sql(where: str = "TRUE") -> str:
+    """SELECT over `requirement_units u` at each posting's CURRENT JD hash, from ONE splitter per posting: the
+    current fingerprint where it has rows, else the newest one stored. The table keeps every splitter a JD was
+    ever split with, so a reader that filtered on the hash alone read old and new splits together (2026-10-20:
+    645 active postings, every line twice, so the top-18 cut held ~9 distinct lines). `where` filters `u`
+    (and `p`, the postings row) before the splitter is chosen; `?` placeholders in it bind in order."""
+    return f"""SELECT u.* FROM requirement_units u
+        JOIN postings p ON p.posting_id = u.posting_id AND coalesce(p.description_hash, '') = u.description_hash
+        WHERE {where}
+        QUALIFY u.splitter = first_value(u.splitter) OVER (
+            PARTITION BY u.posting_id ORDER BY (u.splitter = '{splitter_fingerprint()}') DESC, u.embedded_at DESC,
+                                               u.splitter)"""

@@ -233,6 +233,10 @@ def _spread(by_grade: dict) -> list:
     return [pid for _, _, pid in sorted(keyed)]
 
 
+# Work units of the postings in a JSON id list (the one `?`), for requirements.current_units_sql.
+_WORK_UNITS_IN_IDS = """u.klass = 'work' AND u.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))"""
+
+
 def interleave(pool: dict, limit: Optional[int] = None) -> list:
     """One flat queue mixing the pools per WAVE, so any stopping point spans the range. A posting in two pools
     is queued once, under the first pool to reach it (2026-10-20: Wells Fargo 776cc941 sat in `high` and
@@ -271,11 +275,10 @@ def duplicate_map(con, ids: list) -> dict:
             SELECT posting_id, employer, coalesce(description_hash, ''), coalesce(title, '') FROM postings
             WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]):
         meta[pid] = (employer, dhash, _title_key(title))
-    # Current text only: requirement_units keeps every hash a posting ever had (2026-10-20).
-    cur = con.execute("""SELECT u.posting_id, u.weight, u.spec, u.vector FROM requirement_units u
-        JOIN postings p ON p.posting_id = u.posting_id AND p.description_hash = u.description_hash
-        WHERE u.klass = 'work' AND u.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
-        ORDER BY u.posting_id, u.ord""", [ids_json]).fetchnumpy()
+    # Current text and one splitter only: requirement_units keeps every hash and split a posting ever had.
+    from .requirements import current_units_sql
+    cur = con.execute(f"""SELECT posting_id, weight, spec, vector FROM ({current_units_sql(_WORK_UNITS_IN_IDS)})
+        ORDER BY posting_id, ord""", [ids_json]).fetchnumpy()
     if not len(cur["posting_id"]):
         return {}
     pids = np.asarray(cur["posting_id"]).astype(str)
@@ -350,13 +353,12 @@ def fetch_postings(con, ids: list, tiers: dict) -> list:
         FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
         WHERE p.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]))
     units = {}
-    # Current text only: requirement_units keeps every hash a posting ever had, so an unfiltered read mixed a
-    # re-fetched JD's old and new lines in one export (2026-10-20).
-    for pid, text, grp in _rows(con, """
-        SELECT u.posting_id, u.text, u.grp FROM requirement_units u
-        JOIN postings p ON p.posting_id = u.posting_id AND p.description_hash = u.description_hash
-        WHERE u.klass = 'work' AND u.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
-        ORDER BY u.posting_id, u.weight * coalesce(u.spec, 1.0) DESC, u.ord""", [ids_json]):
+    # Current text and one splitter only: requirement_units keeps every hash a posting ever had (an unfiltered
+    # read mixed a re-fetched JD's old and new lines) and every splitter (each line came twice), 2026-10-20.
+    from .requirements import current_units_sql
+    for pid, text, grp in _rows(con, f"""
+        SELECT posting_id, text, grp FROM ({current_units_sql(_WORK_UNITS_IN_IDS)})
+        ORDER BY posting_id, weight * coalesce(spec, 1.0) DESC, ord""", [ids_json]):
         rows = units.setdefault(pid, [])
         if len(rows) < UNITS_PER_POSTING:
             rows.append(f"[{grp}] {text[:UNIT_CHARS]}")

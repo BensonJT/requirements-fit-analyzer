@@ -118,10 +118,12 @@ def _reject_pool(con) -> list:
 
 
 def _jev_demoted_ids(con) -> set:
-    """The rows the Jev demotion pass demotes right now: `jev_gate.demotions` over the rows Top Jobs would show.
-    "Check the Required block" rows (`check=True`) are not demoted, so they are not decoys."""
+    """The rows the Top Jobs "Jev demoted" section lists right now: `jev_gate.demotions` over every Apply / Review
+    row, uncapped, as `report.write_top_jobs` checks them (the caps only bound what Jev reviews). "Check the
+    Required block" rows (`check=True`) are not demoted, so they are not decoys."""
     from . import jev_gate
-    return {pid for pid, d in jev_gate.demotions(con, jev_gate.top_subset_ids(con)).items() if not d.check}
+    shown = jev_gate.top_subset_ids(con, apply_cap=None, review_cap=None)
+    return {pid for pid, d in jev_gate.demotions(con, shown).items() if not d.check}
 
 
 def _jev_pool(con) -> list:

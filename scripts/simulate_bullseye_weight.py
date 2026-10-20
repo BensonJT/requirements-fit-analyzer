@@ -1,9 +1,9 @@
 """Read-only: how would the ONE rank move if the `bullseye` model weighed more inside rank_lens_best?
 
 `vw_lens_fit.rank_lens_best` (backend/ats/store.py) maps fit_bullseye onto the 0.75-1.0 lens_value scale for a
-row nobody has judged:  (lens_best + 0.75 + 0.25 * fit_bullseye) / 2.  Generalised to a weight w:
+row nobody has judged:  (lens_best + 0.25 + 0.75 * fit_bullseye) / 2.  Generalised to a weight w:
 
-    (lens_best + (1 - w) + w * fit_bullseye) / 2        w = 0.25 reproduces today's view exactly
+    (lens_best + (1 - w) + w * fit_bullseye) / 2        w = 0.75 reproduces today's view exactly (0.25 before 2026-10-19)
 
 Everything else in rank_score is recomputed from the view's own columns and macros (effective_required_value,
 level_value, the reject / lens_strong_p gate), so only the bullseye term changes. Nothing is written.
@@ -17,9 +17,9 @@ Two readings:
 
 Context: 2026-10-19 deep review. The process lens is binary (bullseye + adjacent are its positives), so
 coordinator roles score level with process-excellence roles, and the bullseye model is the term that can
-separate them. It was too weak that day to raise w safely: re-run after the next retrain on the user's blind
-lens sheet (vault Tools/Blind_Lens_Review_20261019.csv) and change the view only if a higher w agrees with
-him more often.
+separate them. Same evening, measured on the user's blind lens sheet (vault Tools/Blind_Lens_Review_20261019.csv)
+BEFORE the bullseye model trained on it: every higher w agreed with him more often, so the view moved to 0.75.
+A run after a retrain is in-sample for every graded posting; only a newer blind sheet tests the next change.
 
     .venv/bin/python scripts/simulate_bullseye_weight.py
     .venv/bin/python scripts/simulate_bullseye_weight.py --weights 0.25,0.5,0.75 --top 25 --watch 35def563,686c8360
@@ -35,6 +35,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from backend.finder.feedback import USER_SCORER  # noqa: E402  (the scorer `mark --grade` writes)
 
+CURRENT_W = 0.75   # the weight vw_lens_fit uses today (0.25 until 2026-10-19)
 GRADE_ORDER = {"bullseye": 3, "adjacent": 2, "stretch": 1, "wrong": 0}
 
 ROWS_SQL = """
@@ -76,7 +77,7 @@ def agreement(rows, w):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default="db/jobsearch.duckdb")
-    ap.add_argument("--weights", default="0.25,0.5,0.75", help="comma list; 0.25 is today's view")
+    ap.add_argument("--weights", default="0.25,0.5,0.75,1.0", help="comma list; CURRENT_W is today's view")
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--watch", default="", help="comma list of posting_id prefixes to locate under each weight")
     a = ap.parse_args()
@@ -85,8 +86,8 @@ def main():
     con = duckdb.connect(a.db, read_only=True)
     con.execute("SET enable_progress_bar = false")
     rows = con.execute(ROWS_SQL, [USER_SCORER]).fetchall()
-    drift = sum(1 for r in rows if abs(rank_at(r, 0.25) - (r[3] or 0)) > 0.11)
-    print(f"{len(rows)} active ranked rows; formula check at w=0.25: {drift} rows differ from the view's rank_score")
+    drift = sum(1 for r in rows if abs(rank_at(r, CURRENT_W) - (r[3] or 0)) > 0.11)
+    print(f"{len(rows)} active ranked rows; formula check at w={CURRENT_W}: {drift} rows differ from the view's rank_score")
 
     for w in weights:
         score, n = agreement(rows, w)

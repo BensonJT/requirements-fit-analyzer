@@ -1141,13 +1141,18 @@ CREATE OR REPLACE VIEW vw_lens_fit AS
            -- strong (lens_best >= lens_strong_p()) and the model has an opinion (fit_bullseye IS NOT NULL). A
            -- judged lens is worth 0.75 (adjacent) to 1.0 (bullseye) on the lens_value scale; an unjudged strong
            -- lens was worth only its raw probability, which cannot tell bullseye from adjacent (see the
-           -- lens_standout_p comment above). This maps fit_bullseye onto that same 0.75-1.0 scale and averages
-           -- it with the lens probability, so a model-confident bullseye nudges the rank the way a judged
-           -- adjacent-to-bullseye grade would, without ever touching lens_value, lens_best, lens_breadth or the
-           -- lens_best < lens_strong_p() zero gate itself. PROVISIONAL, like the rest of the rank.
+           -- lens_standout_p comment above). This maps fit_bullseye onto a 0.25-1.0 scale and averages it
+           -- with the lens probability, so a model-confident bullseye lifts the rank and a model-confident
+           -- adjacent (a coordinator seat the lens model calls strong) pulls it down, without ever touching
+           -- lens_value, lens_best, lens_breadth or the lens_best < lens_strong_p() zero gate itself.
+           -- 2026-10-19: weight 0.25 -> 0.75 (scale 0.75-1.0 -> 0.25-1.0) after the user's blind lens sheet:
+           -- pairwise agreement with his process grades rose at every step 0.25/0.5/0.75/1.0 (pairs with a blind
+           -- posting 71.8 / 72.6 / 73.5 / 75.6 %), measured BEFORE the bullseye model saw those grades
+           -- (scripts/simulate_bullseye_weight.py). 0.75, not 1.0, so a weak model alone cannot sink a posting.
+           -- PROVISIONAL, like the rest of the rank.
            CASE WHEN grade_process IS NULL AND grade_technical IS NULL AND grade_ai IS NULL
                      AND fit_bullseye IS NOT NULL AND lens_best >= lens_strong_p()
-                THEN (lens_best + 0.75 + 0.25 * fit_bullseye) / 2.0
+                THEN (lens_best + 0.25 + 0.75 * fit_bullseye) / 2.0
                 ELSE lens_best END AS rank_lens_best,
            -- THE rank: the one number a list is ordered by (0-100). Every component stays visible beside it;
            -- this is only their combination. Best lens carries it (0.8), breadth beyond the best lens adds to
@@ -1401,19 +1406,39 @@ CREATE OR REPLACE VIEW vw_label_set_required AS
 -- whose best grade is `stretch`/`wrong`/NULL never appear here at all. weight 1.0 for every row (no invented
 -- weighting, same rule as vw_label_set_required). `grade` carries the winning grade itself (bullseye/adjacent)
 -- so features.grade_report's by-grade breakdown still prints something meaningful for this vocabulary.
+-- A human per-lens grade (human_lens_grades, the F4 sheet) replaces the judge's grade for that lens, exactly as
+-- in vw_label_set_process/technical/ai, and a posting with human lens grades but no llm_labels row still appears
+-- (2026-10-19: before this the view read llm_labels only, so the user's lens sheets never reached this model,
+-- and a `mark --grade` bridge row -- lens columns NULL by design -- silently dropped the posting from it).
 CREATE OR REPLACE VIEW vw_label_set_bullseye AS
-    WITH best AS (
-        SELECT l.posting_id, p.employer AS company, p.title, p.description_text AS text,
-               lens_label_source(l.scorer, l.lens_grade_source) AS source,
-               -- best across the three lenses: bullseye > adjacent > stretch > wrong
-               CASE WHEN 'bullseye' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'bullseye'
-                    WHEN 'adjacent' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'adjacent'
-                    WHEN 'stretch' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'stretch'
-                    WHEN 'wrong' IN (l.grade_process, l.grade_technical, l.grade_ai) THEN 'wrong'
-                    ELSE NULL END AS best_grade
-        FROM vw_llm_labels_latest l JOIN postings p USING (posting_id)
+    WITH h AS (
+        SELECT posting_id,
+               max(CASE WHEN lens = 'process' THEN grade END) AS grade_process,
+               max(CASE WHEN lens = 'technical' THEN grade END) AS grade_technical,
+               max(CASE WHEN lens = 'ai' THEN grade END) AS grade_ai
+        FROM vw_human_lens_grades_current GROUP BY posting_id
+    ), lanes AS (
+        SELECT p.posting_id, p.employer AS company, p.title, p.description_text AS text,
+               CASE WHEN h.posting_id IS NOT NULL THEN 'user_adjudicated'
+                    ELSE lens_label_source(l.scorer, l.lens_grade_source) END AS source,
+               coalesce(h.grade_process, l.grade_process) AS gp,
+               coalesce(h.grade_technical, l.grade_technical) AS gt,
+               coalesce(h.grade_ai, l.grade_ai) AS ga
+        FROM postings p
+        LEFT JOIN vw_llm_labels_latest l ON l.posting_id = p.posting_id
+        LEFT JOIN h ON h.posting_id = p.posting_id
         WHERE length(p.description_text) >= 800 AND p.track = 'fit'
-          AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL
+          AND (h.posting_id IS NOT NULL
+               OR (l.posting_id IS NOT NULL AND lens_label_source(l.scorer, l.lens_grade_source) IS NOT NULL))
+    ), best AS (
+        SELECT posting_id, company, title, text, source,
+               -- best across the three lenses: bullseye > adjacent > stretch > wrong
+               CASE WHEN 'bullseye' IN (gp, gt, ga) THEN 'bullseye'
+                    WHEN 'adjacent' IN (gp, gt, ga) THEN 'adjacent'
+                    WHEN 'stretch' IN (gp, gt, ga) THEN 'stretch'
+                    WHEN 'wrong' IN (gp, gt, ga) THEN 'wrong'
+                    ELSE NULL END AS best_grade
+        FROM lanes
     )
     SELECT 'llm:' || posting_id AS label_id, source, posting_id, company, title, text,
            CASE WHEN best_grade = 'bullseye' THEN 1 ELSE 0 END AS label,

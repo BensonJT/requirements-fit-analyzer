@@ -207,3 +207,55 @@ def test_f4_ingest_leaves_llm_labels_row_count_and_contents_unchanged(tmp_path):
     assert before == after
     assert con.execute("SELECT count(*) FROM human_lens_grades WHERE posting_id = ?", [pid]).fetchone()[0] == 1
     con.close()
+
+
+# ---------------------------------------------------------------- vw_label_set_bullseye override (2026-10-19)
+
+def test_human_lens_grade_replaces_judge_grade_in_bullseye_set(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="bullseye", grade_process="bullseye", grade_technical="wrong", grade_ai="wrong")
+    _human_lens(con, pid, dh, "process", "adjacent")   # the user calls the judge's bullseye a coordinator role
+    rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
+                       [pid]).fetchall()
+    assert rows == [("user_adjudicated", 0, "adjacent")]
+    con.close()
+
+
+def test_human_only_posting_appears_in_bullseye_set(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _human_lens(con, pid, dh, "process", "bullseye")
+    _human_lens(con, pid, dh, "ai", "wrong")
+    rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
+                       [pid]).fetchall()
+    assert rows == [("user_adjudicated", 1, "bullseye")]
+    con.close()
+
+
+def test_mark_grade_bridge_row_keeps_posting_in_bullseye_set_via_lens_grades(tmp_path):
+    """A `mark --grade` bridge row (scorer user-adjudicated, lens columns NULL) outranks the judge in
+    vw_llm_labels_latest; the user's lens grades must still carry the posting into the bullseye set."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="adjacent", grade_process="adjacent")
+    con.execute("""INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade,
+                   required_fit, lens_grade_source, judged_at)
+                   VALUES (?, ?, 'user', 'user-adjudicated', 'bullseye', 'fails', 'human', ?)""",
+               [pid, dh, datetime(2026, 10, 19, 12, 0)])
+    assert con.execute("SELECT count(*) FROM vw_label_set_bullseye WHERE posting_id = ?", [pid]).fetchone()[0] == 0
+    _human_lens(con, pid, dh, "process", "bullseye")
+    rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
+                       [pid]).fetchall()
+    assert rows == [("user_adjudicated", 1, "bullseye")]
+    con.close()
+
+
+def test_judge_only_posting_unchanged_in_bullseye_set(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="adjacent", grade_process="adjacent", grade_technical="stretch")
+    rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
+                       [pid]).fetchall()
+    assert rows == [("llm_judge", 0, "adjacent")]
+    con.close()

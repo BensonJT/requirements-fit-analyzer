@@ -3001,6 +3001,9 @@ def test_judge_queue_interleaves_and_dedupes_only_matched_pairs(tmp_path):
     assert sorted(mixed) == sorted([("a", "high"), ("b", "high"), ("c", "high"), ("x", "low"), ("y", "low"),
                                     ("r", "reject")])
     assert [t for _, t in mixed][:3] == ["high", "high", "high"]      # the confusable band leads each wave
+    both = judge.interleave({"high": ["a", "b"], "ai_title": ["b", "c"]})
+    assert both == [("a", "high"), ("b", "high"), ("c", "ai_title")]  # a posting in two pools is queued once
+    assert judge.interleave({"high": ["a", "b"], "ai_title": ["b", "c"]}, limit=3) == both
     ids = list(by_req.values())
     dup = judge.duplicate_map(con, ids)
     assert dup == {by_req["A3"]: by_req["A1"]} or dup == {by_req["A1"]: by_req["A3"]}   # the repost only

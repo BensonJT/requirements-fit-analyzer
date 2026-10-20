@@ -336,6 +336,59 @@ def test_import_computes_the_three_numbers_on_a_constructed_example(tmp_path):
     con.close()
 
 
+def test_sheet_adds_jev_demoted_decoys_on_top_of_n(tmp_path, monkeypatch):
+    """User decision 2026-10-20: 5-6 Jev-demoted postings on every sheet, on top of the 8/6/6 mix. A demoted
+    row that also ranks in the top 50 is a decoy, not a top50 row; a decided row is never drawn."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_universe(con)
+    demoted = {"t00" + "0" * 18, "t01" + "0" * 18, "t02" + "0" * 18}
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'nuance: x', 'cli', NULL, ?)",
+               ["t02" + "0" * 18, datetime(2026, 9, 2)])
+    monkeypatch.setattr(blind_sheet, "_jev_demoted_ids", lambda _con: demoted)
+    out = blind_sheet.generate_sheet(con, n=20, seed=1, out_path=str(tmp_path / "sheet.csv"),
+                                     top_n=11, mid_start=12, mid_end=21, jev_n=6, log=_quiet)
+    sidecar = json.loads(out["sidecar"].read_text())
+    decoys = {pid for pid, info in sidecar.items() if info["stratum"] == "jev_demoted"}
+    assert decoys == {"t00" + "0" * 18, "t01" + "0" * 18}       # the pool is short: 2 of 6, t02 is decided
+    assert out["counts"]["top50"] == 8 and sum(out["counts"].values()) == 22
+    assert len(_read_rows(out["csv"])) == 22
+    con.close()
+
+
+def test_sheet_with_jev_zero_draws_no_decoys(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_universe(con)
+    monkeypatch.setattr(blind_sheet, "_jev_demoted_ids", lambda _con: pytest.fail("pool must not be read"))
+    out = blind_sheet.generate_sheet(con, n=20, seed=1, out_path=str(tmp_path / "sheet.csv"),
+                                     top_n=11, mid_start=12, mid_end=21, jev_n=0, log=_quiet)
+    assert "jev_demoted" not in out["counts"] and sum(out["counts"].values()) == 20
+    con.close()
+
+
+def test_import_scores_jev_demotion_precision(tmp_path):
+    """A decoy the user grades as a top-list row (bullseye/adjacent, Required not `fails`) is a wrong
+    demotion; anything else is a right one. 4 decoys: bullseye+meets (wrong), adjacent+fails (right),
+    stretch (right), wrong (right) -> 75%."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    ids = {}
+    for i, (grade, req) in enumerate([("bullseye", "meets"), ("adjacent", "fails"), ("stretch", ""),
+                                      ("wrong", "")]):
+        pid = f"jev{i}" + "0" * 17
+        ids[pid] = (grade, req)
+        _posting(con, pid, employer=f"J{i}", title=f"J{i}")
+    csv_path = tmp_path / "graded.csv"
+    _write_sheet(csv_path, [{"posting_id": pid, "employer": pid, "title": pid, "location": "Remote",
+                             "url": f"https://x/{pid}", "human_grade": grade, "required_fit": req,
+                             "required_unmet": "a line" if req == "fails" else "", "level_fit": "", "note": ""}
+                            for pid, (grade, req) in ids.items()])
+    _write_sidecar(blind_sheet.sidecar_path_for(csv_path),
+                   {pid: {"stratum": "jev_demoted", "rank_score": 0.0, "verdict": "candidate"} for pid in ids})
+    entry = blind_sheet.import_sheet(con, csv_path, history_path=str(tmp_path / "hist.jsonl"), log=_quiet)
+    assert entry["n_jev"] == 4 and entry["demotion_precision"] == pytest.approx(0.75)
+    assert entry["n_top"] == 0 and entry["precision_top"] is None    # decoys feed no other number
+    con.close()
+
+
 def test_import_rejects_an_invalid_grade_before_writing_anything(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     _posting(con, "p9" + "0" * 18, employer="Acme", title="Role")

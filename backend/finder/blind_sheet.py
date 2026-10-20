@@ -38,6 +38,11 @@ _BUCKET_PATTERNS = {
 
 REQUIRED_FIT_VALUES = ("meets", "fails")
 
+# User decision 2026-10-20: every sheet carries 5-6 postings the Jev demotion pass currently demotes, graded
+# blind like the rest, so demotion precision is measured. They are added on top of the `n` rows, so the
+# 8/6/6 mix and its three numbers are unchanged.
+JEV_DEMOTED_N = 6
+
 DEFAULT_DIR = os.path.join(os.path.dirname(store.DEFAULT_DB_PATH), "blind_sheets")
 DEFAULT_HISTORY_PATH = os.path.join(os.path.dirname(store.DEFAULT_DB_PATH), "blind_sheet_history.jsonl")
 
@@ -112,6 +117,28 @@ def _reject_pool(con) -> list:
     return _rows(cur)
 
 
+def _jev_demoted_ids(con) -> set:
+    """The rows the Jev demotion pass demotes right now: `jev_gate.demotions` over the rows Top Jobs would show.
+    "Check the Required block" rows (`check=True`) are not demoted, so they are not decoys."""
+    from . import jev_gate
+    return {pid for pid, d in jev_gate.demotions(con, jev_gate.top_subset_ids(con)).items() if not d.check}
+
+
+def _jev_pool(con) -> list:
+    """Jev-demoted postings, not already graded/decided (an adjudicated row is never demoted anyway)."""
+    ids = sorted(_jev_demoted_ids(con))
+    if not ids:
+        return []
+    cur = con.execute(f"""
+        WITH excluded AS ({_EXCLUDED_SQL})
+        SELECT posting_id, employer, title, location_primary, url, rank_score, verdict
+        FROM vw_lens_fit
+        WHERE posting_id IN (SELECT unnest(?::VARCHAR[])) AND posting_id NOT IN (SELECT posting_id FROM excluded)
+        ORDER BY posting_id
+    """, [ids])
+    return _rows(cur)
+
+
 def _reasons_text(reasons) -> str:
     if reasons is None:
         return ""
@@ -180,10 +207,10 @@ def _write_sidecar(path: Path, rows: list) -> None:
 
 
 def generate_sheet(con, n: int = 20, seed: Optional[int] = None, out_path=None, *, top_n: int = 50,
-                    mid_start: int = 200, mid_end: int = 600, log=print) -> dict:
+                    mid_start: int = 200, mid_end: int = 600, jev_n: int = JEV_DEMOTED_N, log=print) -> dict:
     """Writes the blind sheet CSV (no scores/ranks/verdicts) plus its sidecar (posting_id -> stratum +
-    the rank/verdict at generation time, which the CSV itself must never carry). Returns
-    {"csv": path, "sidecar": path, "counts": {stratum: n}}.
+    the rank/verdict at generation time, which the CSV itself must never carry). `n` rows in the 8/6/6 mix,
+    plus up to `jev_n` Jev-demoted decoys. Returns {"csv": path, "sidecar": path, "counts": {stratum: n}}.
     """
     rng = random.Random(seed)
     used_keys, used_pids = set(), set()
@@ -192,6 +219,10 @@ def generate_sheet(con, n: int = 20, seed: Optional[int] = None, out_path=None, 
     top_k, mid_k, reject_k = quota(n)
     loc_k, clr_k, ttl_k = _split_counts(reject_k, 3)
 
+    # First, so a demoted row that also ranks in the top 50 is scored as a decoy: Top Jobs no longer shows it
+    # in Apply / Review.
+    if jev_n > 0:
+        rows += _pick(_jev_pool(con), jev_n, "jev_demoted", rng, used_keys, used_pids)
     rows += _pick(_rank_pool(con, 1, top_n), top_k, "top50", rng, used_keys, used_pids)
     rows += _pick(_rank_pool(con, mid_start, mid_end), mid_k, "mid200_600", rng, used_keys, used_pids)
 
@@ -226,7 +257,7 @@ def generate_sheet(con, n: int = 20, seed: Optional[int] = None, out_path=None, 
     counts = {}
     for r in rows:
         counts[r["stratum"]] = counts.get(r["stratum"], 0) + 1
-    log(f"blind sheet: {len(rows)}/{n} rows -> {out_path} (sidecar {sidecar.name}) -- "
+    log(f"blind sheet: {len(rows)}/{n + max(jev_n, 0)} rows -> {out_path} (sidecar {sidecar.name}) -- "
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return {"csv": out_path, "sidecar": sidecar, "counts": counts}
 
@@ -315,6 +346,7 @@ def import_sheet(con, path, *, history_path=None, log=print, now=None) -> dict:
     for bucket in REJECT_BUCKETS:
         log(f"  false-reject rate ({bucket}): {_pct(stats['false_reject_by_bucket'][bucket])} "
             f"(n={stats['n_by_bucket'][bucket]})")
+    log(f"  Jev demotion precision: {_pct(stats['demotion_precision'])} (n={stats['n_jev']})")
 
     history_path = history_path or DEFAULT_HISTORY_PATH
     entry = {"imported_at": now.isoformat(), "csv": str(path), "n_graded": len(graded),
@@ -330,10 +362,13 @@ def _pct(x) -> str:
 
 
 def _score_against_sidecar(graded_by_pid: dict, sidecar: dict) -> dict:
-    """The three §26 numbers, read off the sidecar's per-row stratum against the CSV's per-row grade.
-    A row missing from the sidecar (a hand-added row, or a sheet graded without one) simply cannot be
-    scored and is left out of every denominator -- never guessed into a bucket."""
+    """The three §26 numbers, plus Jev's demotion precision (the share of `jev_demoted` decoys the user did
+    NOT grade as a top-list row: not bullseye/adjacent, or Required `fails`), read off the sidecar's per-row
+    stratum against the CSV's per-row grade. A row missing from the sidecar (a hand-added row, or a sheet
+    graded without one) simply cannot be scored and is left out of every denominator -- never guessed into a
+    bucket."""
     top_total = top_hit = 0
+    jev_total = jev_right = 0
     mid_total = mid_bullseye = 0
     bucket_totals = {b: 0 for b in REJECT_BUCKETS}
     bucket_hits = {b: 0 for b in REJECT_BUCKETS}
@@ -348,6 +383,10 @@ def _score_against_sidecar(graded_by_pid: dict, sidecar: dict) -> dict:
             top_total += 1
             if good and g["required_fit"] != "fails":
                 top_hit += 1
+        elif stratum == "jev_demoted":
+            jev_total += 1
+            if not (good and g["required_fit"] != "fails"):
+                jev_right += 1
         elif stratum == "mid200_600":
             mid_total += 1
             if g["human_grade"] == "bullseye":
@@ -365,4 +404,5 @@ def _score_against_sidecar(graded_by_pid: dict, sidecar: dict) -> dict:
         "false_reject_by_bucket": {b: (bucket_hits[b] / bucket_totals[b] if bucket_totals[b] else None)
                                    for b in REJECT_BUCKETS},
         "n_by_bucket": bucket_totals,
+        "demotion_precision": (jev_right / jev_total) if jev_total else None, "n_jev": jev_total,
     }

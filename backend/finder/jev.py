@@ -137,6 +137,8 @@ def prompt_version(facts: list, endpoint: str) -> str:
         json.dumps(Q.verdict_question(0, "required", "<line text>"), sort_keys=True),
         json.dumps(Q.verdict_question(0, "responsibility", "<line text>"), sort_keys=True),
         json.dumps(Q.evidence_question(0, ["f01"], "<line text>"), sort_keys=True),
+        json.dumps(Q.grey_question(0, "<line text>"), sort_keys=True),
+        str(Q.GREY_AT),
         model_for(endpoint),
         endpoint,
         requirements.splitter_fingerprint(),
@@ -193,6 +195,8 @@ def _lines_body(chunk: list, facts: list, model: str) -> dict:
         questions[kid] = Q.kind_question(i, text)
         questions[vid] = Q.verdict_question(i, section, text)
         questions[eid] = Q.evidence_question(i, fact_ids, text)
+        if section == "required":
+            questions[Q.grey_question_id(i)] = Q.grey_question(i, text)
     return {
         "state": {
             "reading_rules": list(Q.READING_RULES),
@@ -336,6 +340,7 @@ def parse_lines_response(resps: list, chunks: list, facts: list) -> list:
             kind = _choice(resp, kid, Q.KIND_CRITERIA)
             verdict = _choice(resp, vid, Q.VERDICT_CRITERIA)
             evidence = _choice(resp, eid, evidence_options)
+            grey_p = _noul(resp, Q.grey_question_id(i)) if section == "required" else None
             fact_id = None if evidence["choice"] == "none" else evidence["choice"]
             raw = verdict["choice"]
             final, downgraded = raw, False
@@ -350,7 +355,7 @@ def parse_lines_response(resps: list, chunks: list, facts: list) -> list:
                 verdict_conf=verdict["confidence"],
                 evidence_fact_id=fact_id, evidence_p=evidence["probabilities"].get(evidence["choice"]),
                 evidence_text=by_id[fact_id].text if fact_id else None,
-                evidence_downgraded=downgraded))
+                evidence_downgraded=downgraded, grey_p=grey_p))
     return records
 
 

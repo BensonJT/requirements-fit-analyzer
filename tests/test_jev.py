@@ -84,9 +84,11 @@ def role_response(*, scores=None, canary=0.02, model=Q.PINNED_MODEL, tokens=500)
     return {"model": model, "answers": answers, "usage": {"input_tokens": tokens, "output_tokens": 40}}
 
 
-def lines_response(body, verdicts=None, *, model=Q.PINNED_MODEL, tokens=900):
-    """Answers every line in a lines-request `body`. `verdicts` maps line index -> (kind, verdict, evidence)."""
+def lines_response(body, verdicts=None, *, model=Q.PINNED_MODEL, tokens=900, grey=None):
+    """Answers every line in a lines-request `body`. `verdicts` maps line index -> (kind, verdict, evidence);
+    `grey` maps line index -> the grey Noul (default 0.1, clear-cut) for required lines."""
     verdicts = verdicts or {}
+    grey = grey or {}
     fact_ids = [f["id"] for f in body["state"]["facts"]]
     answers = {}
     for i, _line in enumerate(body["state"]["lines"]):
@@ -95,6 +97,8 @@ def lines_response(body, verdicts=None, *, model=Q.PINNED_MODEL, tokens=900):
         answers[kid] = _choice_ans(kind, list(Q.KIND_CRITERIA))
         answers[vid] = _choice_ans(verdict, list(Q.VERDICT_CRITERIA))
         answers[eid] = _choice_ans(evidence, fact_ids + ["none"], p=0.7)
+        if _line["section"] == "required":
+            answers[Q.grey_question_id(i)] = {"type": "noul", "noul": grey.get(i, 0.1)}
     return {"model": model, "answers": answers, "usage": {"input_tokens": tokens, "output_tokens": 60}}
 
 
@@ -283,7 +287,11 @@ def test_lines_request_shape():
     assert state["facts"] == [{"id": f.id, "heading": f.heading, "text": f.text} for f in facts]
     assert [l["id"] for l in state["lines"]] == ["L00", "L01", "L02", "L03", "L04"]
     assert state["lines"][3]["section"] == "responsibility"
-    assert len(body["questions"]) == 3 * 5
+    n_required = sum(1 for l in state["lines"] if l["section"] == "required")
+    assert len(body["questions"]) == 3 * 5 + n_required
+    # 2026-10-20: required lines, and only they, carry the grey question
+    for i, line in enumerate(state["lines"]):
+        assert (Q.grey_question_id(i) in body["questions"]) == (line["section"] == "required")
     kid, vid, eid = Q.line_question_ids(3)
     text3 = state["lines"][3]["text"]
     assert body["questions"][kid] == Q.kind_question(3, text3)
@@ -315,8 +323,10 @@ def test_lines_request_chunks_when_too_large(monkeypatch):
         assert body["state"]["facts"] == one["state"]["facts"]
         assert body["state"]["reading_rules"] == one["state"]["reading_rules"]
         assert body["state"]["lines"][0]["id"] == "L00"
-        assert set(body["questions"]) == {qid for i in range(len(body["state"]["lines"]))
-                                          for qid in Q.line_question_ids(i)}
+        assert set(body["questions"]) == ({qid for i in range(len(body["state"]["lines"]))
+                                           for qid in Q.line_question_ids(i)} |
+                                          {Q.grey_question_id(i) for i, l in enumerate(body["state"]["lines"])
+                                           if l["section"] == "required"})
     flat = [item for chunk in jev.chunks_of(bodies) for item in chunk]
     assert flat == jev.select_lines(_posting(), log=lambda *a: None)
 
@@ -678,3 +688,40 @@ def test_line_record_properties_feed_judge2():
                      evidence_downgraded=False)
     assert judge2._get(rec, "line") == "SQL" and judge2._get(rec, "evidence") == "Built SQL reports."
     assert judge2._get(rec, "years") is None
+
+
+# ---------------------------------------------------------------- 2026-10-20: the grey-line Noul
+def test_grey_noul_parsed_for_required_lines_only():
+    facts = _facts()
+    bodies = jev.build_lines_requests(_posting(), facts, Q.PINNED_MODEL, log=lambda *a: None)
+    sections = [l["section"] for l in bodies[0]["state"]["lines"]]
+    req = [i for i, s in enumerate(sections) if s == "required"]
+    resps = [lines_response(bodies[0], grey={req[0]: 0.83})]
+    lines = jev.parse_lines_response(resps, jev.chunks_of(bodies), facts)
+    assert lines[req[0]].grey_p == 0.83
+    for i, line in enumerate(lines):
+        if sections[i] != "required":
+            assert line.grey_p is None
+        elif i != req[0]:
+            assert line.grey_p == 0.1
+
+
+def test_missing_grey_answer_is_a_response_error():
+    facts = _facts()
+    bodies = jev.build_lines_requests(_posting(), facts, Q.PINNED_MODEL, log=lambda *a: None)
+    resp = lines_response(bodies[0])
+    req = next(i for i, l in enumerate(bodies[0]["state"]["lines"]) if l["section"] == "required")
+    del resp["answers"][Q.grey_question_id(req)]
+    with pytest.raises(jev.JevResponseError):
+        jev.parse_lines_response([resp], jev.chunks_of(bodies), facts)
+
+
+def test_grey_question_is_in_the_prompt_version():
+    facts = _facts()
+    before = jev.prompt_version(facts, "typesafe")
+    original = Q.GREY_AT
+    try:
+        Q.GREY_AT = 0.6
+        assert jev.prompt_version(facts, "typesafe") != before
+    finally:
+        Q.GREY_AT = original

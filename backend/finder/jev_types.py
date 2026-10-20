@@ -57,6 +57,8 @@ class LineRecord:
     evidence_p: Optional[float]       # probability of the chosen evidence option
     evidence_text: Optional[str]      # the chosen Fact.text (resolved in code, never generated)
     evidence_downgraded: bool         # True when verdict_raw was met/adjacent but evidence was "none"
+    grey_p: Optional[float] = None    # required lines only: Noul that the line is a judgment call (2026-10-20);
+                                      # None on other sections and on reviews stored before the question existed
 
     # judge2's derivation reads these names; `years` is always None (Jev does no arithmetic).
     @property

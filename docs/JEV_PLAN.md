@@ -224,6 +224,8 @@ Gemma "with a narrower question" (§33 step 5) waits until after that ruling.
    - Installing the plugin puts it in every session, and its trigger description is broad ("brainstorming what AI could make possible in an app"). It could load in unrelated projects, and marketplace auto-update could change its content without review.
    - A pinned copy at `.claude/skills/typesafe-ai/SKILL.md`, with its LICENSE, loads only in this repo. Committing it also means builders' worktrees get it, since worktrees contain tracked files only. It can be refreshed on purpose with a diff review.
 
+6. **Grey lines go to "Check the Required block" (ruled 2026-10-20).** Jev demotes only on a clear-cut gap. Each required line also gets a Noul (`jev_questions.grey_question`, stored as `jev_lines.grey_p`): could careful readers reasonably disagree on whether the facts meet it? When `required_fit` is `fails` and every unmet required line has `grey_p >= GREY_AT` (0.50), the row goes to a new report section instead of the demoted list (`jev_gate.grey_only`). The derived `required_fit`, and so the measured required bar, is unchanged; reviews stored before the question have `grey_p` NULL and demote exactly as before; `wrong on every lens` still demotes. Motivation: a blind read of the 77 demotions from 9/30 to 10/20 judged 40 agree, 21 grey, 16 disagree (STATUS 10/20).
+
 ## 8. Progress checklist
 
 - [x] Docs read; plan written; decisions 1-4 ruled (2026-09-28)

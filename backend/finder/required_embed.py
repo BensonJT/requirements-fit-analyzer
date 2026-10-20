@@ -175,9 +175,12 @@ def _seen_units(con, pids: list) -> dict:
     same source of "seen" used by judge.fetch_postings, mirrored by the lab's line_labels.py."""
     if not pids:
         return {}
-    rows = con.execute("""
-        SELECT posting_id, ord, text, grp, weight FROM requirement_units
-        WHERE klass = 'work' AND posting_id IN (SELECT unnest(?::VARCHAR[]))
+    # Current JD hash and one splitter only (2026-10-20): this read took every hash and every split, so 344
+    # active postings mixed old text in and 645 saw each line twice.
+    from .requirements import current_units_sql
+    rows = con.execute(f"""
+        SELECT posting_id, ord, text, grp, weight
+        FROM ({current_units_sql("u.klass = 'work' AND u.posting_id IN (SELECT unnest(?::VARCHAR[]))")})
         ORDER BY posting_id, weight * coalesce(spec, 1.0) DESC, ord
     """, [pids]).fetchall()
     out = defaultdict(list)
@@ -750,6 +753,7 @@ SCORE_POPULATION_SQL = """
       AND (f.lens_best >= 0.5
            OR greatest(coalesce(s.fit_process, 0), coalesce(s.fit_technical, 0), coalesce(s.fit_ai, 0)) >= 0.5)
       AND EXISTS (SELECT 1 FROM requirement_units ru WHERE ru.posting_id = f.posting_id
+                  AND ru.description_hash = coalesce(p.description_hash, '')   -- current text only (2026-10-20)
                   AND ru.klass = 'work' AND ru.grp = 'required')
 """
 

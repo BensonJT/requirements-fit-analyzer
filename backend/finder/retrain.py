@@ -177,6 +177,9 @@ def run(con, *, dry_run: bool = False, log=print) -> list:
     else:
         log("retrain: JOBSEARCH_VAULT_DIR not set -- skipping `labels` (label_docs left as-is)")
 
+    if not dry_run:   # recover labels whose JD was re-fetched unchanged in substance (reanchor.py)
+        from . import reanchor
+        reanchor.reanchor_nightly(con, log=log)
     results = [_train_one(con, model, dry_run=dry_run, log=log) for model in LENS_MODELS]
     results.append(_train_required_embed(con, dry_run=dry_run, log=log))
 

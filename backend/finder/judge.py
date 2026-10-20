@@ -87,9 +87,23 @@ def exported_ids(dirs) -> set:
     return out
 
 
+def exported_pairs(dirs) -> set:
+    """(posting_id, description_hash) for every posting a batch directory exported, at the hash it was exported
+    at. `--expired` excludes on these rather than on exported_ids: a posting exported before its JD changed
+    must be queued again, one already queued at its current text must not."""
+    out = set()
+    for d in dirs or []:
+        path = Path(d) / "manifest.json"
+        if path.exists():
+            m = json.loads(path.read_text(encoding="utf-8"))
+            out |= {(pid, h) for b in m["batches"].values() for pid, h in b["postings"].items()}
+    return out
+
+
 def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_reject_random: int = 50,
           seed: int = 7, exclude: Optional[set] = None, only: Optional[list] = None,
-          platform: Optional[str] = None, relabel: Optional[int] = None, log=print) -> dict:
+          platform: Optional[str] = None, relabel: Optional[int] = None, expired: bool = False,
+          log=print) -> dict:
     """The three source pools: the confusable band, the tail, and a deliberate reject sample.
     `exclude` drops postings already queued elsewhere; `only` keeps just the named pools.
     `relabel` re-grades postings that ALREADY carry a label, for when the rubric changed rather than the JD:
@@ -166,6 +180,19 @@ def pools(con, n_reject_content: int = 100, n_reject_logistics: int = 100, n_rej
                 room -= len(take)
             picked = _spread(chosen)
         result = {"relabel": picked}
+    elif expired:
+        # Postings whose judge grade EXPIRED: graded at an older description_hash, none at the current one.
+        # Open or closed -- a closed posting is still a training sample. Run `finder.py labels --reanchor`
+        # (or let the nightly pass run) first, so only JDs that really changed are paid for. 2026-10-20.
+        result = {"expired": [r[0] for r in _rows(con, """
+            SELECT p.posting_id FROM postings p
+            WHERE p.track = 'fit' AND length(p.description_text) >= 800
+              AND EXISTS (SELECT 1 FROM llm_labels l WHERE l.posting_id = p.posting_id
+                          AND l.scorer != 'user-adjudicated' AND l.description_hash != coalesce(p.description_hash, ''))
+              AND NOT EXISTS (SELECT 1 FROM llm_labels l WHERE l.posting_id = p.posting_id
+                              AND l.scorer != 'user-adjudicated' AND l.description_hash = coalesce(p.description_hash, ''))
+              AND p.posting_id NOT IN (SELECT posting_id FROM training_exclusions)
+            ORDER BY (p.status = 'active') DESC, p.posting_id""")]}
     elif platform:
         # Re-grade a whole platform: used after an ingest fix changes what the JDs actually say.
         result = {"platform": [r[0] for r in _rows(con, """
@@ -239,9 +266,11 @@ def duplicate_map(con, ids: list) -> dict:
             SELECT posting_id, employer, coalesce(description_hash, ''), coalesce(title, '') FROM postings
             WHERE posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]):
         meta[pid] = (employer, dhash, _title_key(title))
-    cur = con.execute("""SELECT posting_id, weight, spec, vector FROM requirement_units
-        WHERE klass = 'work' AND posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
-        ORDER BY posting_id, ord""", [ids_json]).fetchnumpy()
+    # Current text only: requirement_units keeps every hash a posting ever had (2026-10-20).
+    cur = con.execute("""SELECT u.posting_id, u.weight, u.spec, u.vector FROM requirement_units u
+        JOIN postings p ON p.posting_id = u.posting_id AND p.description_hash = u.description_hash
+        WHERE u.klass = 'work' AND u.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
+        ORDER BY u.posting_id, u.ord""", [ids_json]).fetchnumpy()
     if not len(cur["posting_id"]):
         return {}
     pids = np.asarray(cur["posting_id"]).astype(str)
@@ -316,10 +345,13 @@ def fetch_postings(con, ids: list, tiers: dict) -> list:
         FROM postings p LEFT JOIN vw_screen_latest s USING (posting_id)
         WHERE p.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))""", [ids_json]))
     units = {}
+    # Current text only: requirement_units keeps every hash a posting ever had, so an unfiltered read mixed a
+    # re-fetched JD's old and new lines in one export (2026-10-20).
     for pid, text, grp in _rows(con, """
-        SELECT posting_id, text, grp FROM requirement_units
-        WHERE klass = 'work' AND posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
-        ORDER BY posting_id, weight * coalesce(spec, 1.0) DESC, ord""", [ids_json]):
+        SELECT u.posting_id, u.text, u.grp FROM requirement_units u
+        JOIN postings p ON p.posting_id = u.posting_id AND p.description_hash = u.description_hash
+        WHERE u.klass = 'work' AND u.posting_id IN (SELECT unnest(json_transform(?, '["VARCHAR"]')))
+        ORDER BY u.posting_id, u.weight * coalesce(u.spec, 1.0) DESC, u.ord""", [ids_json]):
         rows = units.setdefault(pid, [])
         if len(rows) < UNITS_PER_POSTING:
             rows.append(f"[{grp}] {text[:UNIT_CHARS]}")

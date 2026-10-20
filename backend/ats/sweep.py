@@ -335,6 +335,11 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
 def _run_finder(con, stats, report=True, llm_top=0, full_screen=False, log=print):
     """The finder stage on the sweep's connection; imported lazily so the sweep never needs it."""
     try:
+        from backend.finder import reanchor
+        reanchor.reanchor_nightly(con, log=log)   # before the report, so a re-fetched JD keeps its judge grade
+    except Exception as e:  # noqa: BLE001 — never fail the sweep over label recovery
+        log(f"Reanchor FAILED: {type(e).__name__}: {e}")
+    try:
         from backend.finder import pipeline
         vault_dir = os.getenv("JOBSEARCH_VAULT_DIR") or None
         pipeline.daily(con, since=stats["started"] if stats else None, vault_dir=vault_dir, llm_top=llm_top,

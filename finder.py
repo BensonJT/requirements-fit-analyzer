@@ -607,10 +607,15 @@ def cmd_coverage(con, a):
 def cmd_judge(con, a):
     from backend.finder import judge
     if a.action == "export":
+        if a.expired:   # exclude only what was already queued at the posting's CURRENT text
+            current = dict(con.execute("SELECT posting_id, coalesce(description_hash, '') FROM postings").fetchall())
+            exclude = {pid for pid, h in judge.exported_pairs(a.exclude_dir) if current.get(pid) == h}
+        else:
+            exclude = judge.exported_ids(a.exclude_dir)
         pool = judge.pools(con, n_reject_content=a.reject_content, n_reject_logistics=a.reject_logistics,
-                           n_reject_random=a.reject_random, exclude=judge.exported_ids(a.exclude_dir),
+                           n_reject_random=a.reject_random, exclude=exclude,
                            only=a.pools.split(",") if a.pools else None, platform=a.platform,
-                           relabel=a.relabel)
+                           relabel=a.relabel, expired=a.expired)
         queue = judge.interleave(pool, limit=a.limit)
         print({k: len(v) for k, v in pool.items()}, "-> queued", len(queue))
         judge.write_batches(con, a.dir, queue, batch_size=a.batch_size)
@@ -844,8 +849,8 @@ def main():
     s.add_argument("--pseudo", type=int, default=1500, help="pseudo-negatives to sample (default 1500)")
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--reanchor", action="store_true",
-                   help="recover llm_labels orphaned before the description_hash normalization fix, using the "
-                        "judge batch files under db/batches* as evidence the JD did not materially change")
+                   help="recover llm_labels a re-fetched JD expired, using the judge batch files under db/batches* "
+                        "as evidence the JD did not materially change (also runs after every sweep and retrain)")
     s.add_argument("--dry-run", action="store_true", help="with --reanchor: print counts only, write nothing")
     s.add_argument("--batch-dir", action="append", help="with --reanchor: a batch dir to search (repeatable; "
                                                         "default every db/batches* directory)")
@@ -901,6 +906,9 @@ def main():
                    help="re-grade postings that already carry a label (the rubric changed, not the JD): "
                         "bare = all of them, N = about N drawn evenly across the four grades")
     s.add_argument("--reject-random", type=int, default=50)
+    s.add_argument("--expired", action="store_true",
+                   help="export: re-grade postings whose judge grade expired when the JD changed (open or closed); "
+                        "run `labels --reanchor` first so only real rewrites are queued")
     s.add_argument("--reason", help="exclude: why this posting must never be trained on")
     s.add_argument("--posting", action="append", help="exclude: posting id to retire from training (repeatable)")
     s.add_argument("--exclude-dir", action="append", help="skip postings already queued in this batch dir (repeatable)")

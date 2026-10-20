@@ -1,5 +1,7 @@
-"""Orphan recovery for labels stranded before the description_hash normalization fix (store.normalize_for_hash
-/ the v11 migration): an `llm_labels` row whose stored hash no longer equals its posting's current hash is
+"""Orphan recovery for labels a JD change stranded. Written for the labels stranded before the description_hash
+normalization fix (store.normalize_for_hash / the v11 migration); since 2026-10-20 it also runs after every sweep
+and before every retrain (reanchor_nightly), because a re-fetched JD with one edited line strands the judge's
+grade the same way. An `llm_labels` row whose stored hash no longer equals its posting's current hash is
 invisible to training (vw_llm_labels_latest), and the migration only fixes rows where the OLD raw hash is
 still the posting's current hash. For everything already orphaned, the raw text that produced the old hash is
 gone -- but the judge's batch files under db/batches* preserve exactly which requirement units it read.
@@ -20,6 +22,8 @@ from pathlib import Path
 from typing import Optional
 
 from backend.ats.store import normalize_for_hash
+
+REPO = Path(__file__).resolve().parents[2]
 
 REANCHOR_SIMILARITY = 0.90  # share of judged units still verbatim in the current JD; 0.90 tolerates one
                             # edited line in the usual 18, never two
@@ -144,12 +148,12 @@ def reanchor(con, batch_dirs, *, dry_run: bool = False, log=print) -> dict:
     """Re-anchors orphaned llm_labels (and their report_feedback companions) whose JD did not materially
     change, evidenced by the judge's own batch files. Never touches a row for which no matching batch entry
     is found. `dry_run` computes and logs everything but writes nothing."""
-    manifests = _load_manifests(batch_dirs)
     orphans = con.execute("""
         SELECT l.posting_id, l.description_hash, l.rubric_version, l.scorer, l.judged_at, l.batch, p.description_hash
         FROM llm_labels l JOIN postings p USING (posting_id)
         WHERE p.description_hash IS DISTINCT FROM l.description_hash AND p.description_text IS NOT NULL
     """).fetchall()
+    manifests = _load_manifests(batch_dirs) if orphans else []
     md_cache, text_cache = {}, {}
     buckets = Counter()
     reanchored_keys = []  # (pid, old_hash, new_hash) for the feedback pass
@@ -199,3 +203,21 @@ def reanchor(con, batch_dirs, *, dry_run: bool = False, log=print) -> dict:
     log(f"  feedback rows re-anchored: {feedback_n}")
     return {"examined": len(orphans), "reanchored": n_reanchored, "expired": n_expired,
             "no_match": no_match, "buckets": dict(buckets), "feedback_reanchored": feedback_n}
+
+
+def default_batch_dirs() -> list:
+    """Every judge batch directory under db/ (what `finder.py labels --reanchor` searches by default)."""
+    return sorted(str(p) for p in (REPO / "db").glob("batches*") if p.is_dir())
+
+
+def reanchor_nightly(con, log=print) -> Optional[dict]:
+    """The re-anchor pass run after every sweep and before every retrain (2026-10-20). A re-fetched JD gets a
+    new description_hash, which expires every label stored at the old one -- 333 postings had lost their
+    judge grade this way since mid-September, ~180 of them after 9/28, because this module only ran by hand
+    on 9/18. Same rule as `finder.py labels --reanchor`: a label moves only when the units the judge read are
+    still verbatim in the new text. Never raises: a failure is logged and the caller carries on."""
+    try:
+        return reanchor(con, default_batch_dirs(), log=log)
+    except Exception as e:  # noqa: BLE001 -- recovery is best-effort; the sweep / retrain must still run
+        log(f"Reanchor FAILED: {type(e).__name__}: {e}")
+        return None

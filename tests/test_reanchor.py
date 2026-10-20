@@ -316,3 +316,53 @@ def test_reanchor_no_batch_match_leaves_row_alone(tmp_path):
     assert stats["no_match"] == 1
     assert con.execute("SELECT description_hash FROM llm_labels WHERE posting_id = ?", [pid]).fetchone()[0] == "orphan-hash"
     con.close()
+
+
+# ---------------------------------------------------------------- 2026-10-20: expired grades back into training
+def test_reanchor_nightly_never_raises(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "n.duckdb"))
+    monkeypatch.setattr(reanchor, "reanchor", lambda *a, **k: 1 / 0)
+    lines = []
+    assert reanchor.reanchor_nightly(con, log=lines.append) is None
+    assert lines and "Reanchor FAILED" in lines[0]
+    con.close()
+
+
+def test_expired_pool_queues_changed_jds_open_or_closed(tmp_path):
+    from backend.finder import judge
+    con, batch_dir, ids = _judge_db_and_batch(tmp_path)
+    # the pool keeps the training views' 800-character floor; pad the text without touching the stored hash
+    con.execute("UPDATE postings SET description_text = description_text || repeat(' Filler sentence.', 60)")
+    pool = judge.pools(con, expired=True, log=_quiet)
+    assert set(pool) == {"expired"}
+    # every row with a judge grade at an old hash and none at the current one; p_rep was never judged
+    assert set(pool["expired"]) == {ids["p_same"], ids["p_changed"], ids["p_dup"]}
+    reanchor.reanchor(con, [batch_dir], log=_quiet)
+    con.execute("UPDATE postings SET status = 'closed' WHERE posting_id = ?", [ids["p_changed"]])
+    assert judge.pools(con, expired=True, log=_quiet)["expired"] == [ids["p_changed"]]   # closed still counts
+    con.close()
+
+
+def test_exported_pairs_keeps_the_hash(tmp_path):
+    from backend.finder import judge
+    con, batch_dir, ids = _judge_db_and_batch(tmp_path)
+    pairs = judge.exported_pairs([batch_dir])
+    assert (ids["p_changed"], "old-hash-changed") in pairs
+    assert all(pid != ids["p_dup"] for pid, _ in pairs)      # duplicates carry no hash of their own
+    con.close()
+
+
+def test_fetch_postings_reads_only_current_text_units(tmp_path):
+    from backend.finder import judge
+    con = store.connect(str(tmp_path / "u.duckdb"))
+    pid = _seed_posting(con, "P1", TEXT_A)
+    cur = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?", [pid]).fetchone()[0]
+    for h, text in (("old-hash", "Stale line from the old JD"), (cur, "Current line from the new JD")):
+        con.execute("""INSERT INTO requirement_units (posting_id, description_hash, splitter, ord, unit_hash, text,
+                       section, grp, weight, klass, spec, model, vector, embedded_at)
+                       VALUES (?, ?, 's1', 0, ?, ?, 'requirements', 'required', 1.0, 'work', 1.0, 'm', NULL, ?)""",
+                    [pid, h, h, text, NOW])
+    [posting] = judge.fetch_postings(con, [pid], {pid: "high"})
+    assert any("Current line" in u for u in posting.units)
+    assert not any("Stale line" in u for u in posting.units)
+    con.close()

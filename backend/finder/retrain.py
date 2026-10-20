@@ -34,6 +34,11 @@ LENS_MODELS = ("process", "technical", "ai", "required", "bullseye")
 
 SHUFFLE_LOW, SHUFFLE_HIGH = 0.40, 0.60   # leak-check band for the shuffled-label AUC (§24)
 AUC_DROP_TOLERANCE = 0.02                # a candidate may trail the previous promoted AUC by at most this much
+# A candidate's label count may fall at most this share below the previous promoted run's (2026-10-20). Labels
+# leave the sets every week (a re-fetched JD expires the judge's grade for it), so an exact floor ratcheted: no
+# lens model promoted after 2026-09-30 (process 6092 vs 6215, -2.0%). 5% still stops a broken view that drops a
+# block of labels. The baseline stays the last PROMOTED run, so a failed run can never set the bar.
+LABEL_COUNT_TOLERANCE = 0.05
 STALE_DAYS = 7                           # sweep_ats.py's reminder trigger #1
 STALE_LABEL_COUNT = 25                   # sweep_ats.py's reminder trigger #2
 
@@ -69,8 +74,8 @@ def _gate(con, model: str, n_pos: int, n_neg: int, emp_auc, shuf_auc) -> tuple:
     """(promoted, reason) against the sprint plan §24 gate: employer-grouped AUC no more than
     AUC_DROP_TOLERANCE below the previous PROMOTED run's AUC (no previous promoted run = promote outright),
     shuffled-label AUC inside [SHUFFLE_LOW, SHUFFLE_HIGH] (a leak check -- a real score there means the
-    candidate is reading something it should not), and the label count (n_pos + n_neg) not falling versus
-    that same previous run."""
+    candidate is reading something it should not), and the label count (n_pos + n_neg) not falling more than
+    LABEL_COUNT_TOLERANCE below that same previous run's."""
     if emp_auc is None:
         return False, "employer-grouped AUC unavailable (too few labeled rows carry a posting_id)"
     if shuf_auc is None:
@@ -84,8 +89,9 @@ def _gate(con, model: str, n_pos: int, n_neg: int, emp_auc, shuf_auc) -> tuple:
         return False, (f"employer-grouped AUC {emp_auc:.3f} < previous promoted {prev['auc']:.3f} - "
                        f"{AUC_DROP_TOLERANCE}")
     prev_n = prev["n_pos"] + prev["n_neg"]
-    if (n_pos + n_neg) < prev_n:
-        return False, f"label count {n_pos + n_neg} fell versus previous promoted {prev_n}"
+    if (n_pos + n_neg) < prev_n * (1 - LABEL_COUNT_TOLERANCE):
+        return False, (f"label count {n_pos + n_neg} fell more than {LABEL_COUNT_TOLERANCE:.0%} below previous "
+                       f"promoted {prev_n}")
     return True, f"promoted (AUC {emp_auc:.3f} vs previous promoted {prev['auc']:.3f})"
 
 

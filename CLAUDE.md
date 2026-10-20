@@ -91,7 +91,7 @@ has moved meaningfully, not every run.)
 
 **Weekly retrain (sprint plan §24):** `finder.py retrain [--dry-run]` replaces hand-running `labels` + `train`
 per lens/`required`/`bullseye` + `required-embed train`. Each candidate is gated (employer-grouped held-out
-AUC vs. the previous PROMOTED run, a shuffled-label leak check, label count not falling) before it can
+AUC vs. the previous PROMOTED run, a shuffled-label leak check, label count not falling more than 5%) before it can
 replace the live artifact; a failure keeps the old one and names the failed gate with numbers. Rescreen /
 coverage / `required-embed score` only run if something was promoted. `finder.py retrain --history` reads
 the `model_runs` ledger back, newest first. `sweep_ats.py` prints (never fails on) a one-line reminder when

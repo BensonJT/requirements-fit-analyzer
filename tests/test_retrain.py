@@ -60,8 +60,10 @@ def test_gate_fails_on_label_count_drop(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     _insert_run(con, model="bullseye", trained_at=datetime(2026, 9, 1), n_pos=100, n_neg=100, auc=0.80,
                shuffle_auc=0.50, promoted=True)
-    promoted, reason = retrain._gate(con, "bullseye", 90, 100, 0.80, 0.50)   # 190 < 200
+    promoted, reason = retrain._gate(con, "bullseye", 89, 100, 0.80, 0.50)   # 189 < 200 * 0.95
     assert not promoted and "label count" in reason
+    promoted, reason = retrain._gate(con, "bullseye", 90, 100, 0.80, 0.50)   # 190 == 200 * 0.95, ok
+    assert promoted
     promoted, reason = retrain._gate(con, "bullseye", 100, 100, 0.80, 0.50)  # 200 == 200, ok
     assert promoted
     con.close()

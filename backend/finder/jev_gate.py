@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import report
+from . import jev_questions as Q
 from .jev_types import Posting
 
 DEMOTE_REQUIRED = ("fails",)
@@ -42,6 +43,8 @@ class Demotion:
     gemma_why: Optional[str] = None
     gemma_unmet: Optional[str] = None
     reasons: list = field(default_factory=list)
+    check: bool = False                        # 2026-10-20: `fails` rests only on grey lines -> "Check the
+                                               # Required block", not demoted (jev_questions.GREY_AT)
 
 
 # ---------------------------------------------------------------- the subset
@@ -140,6 +143,11 @@ _DEMOTION_SQL = """
              WHERE l.posting_id = j.posting_id AND l.description_hash = j.description_hash
                AND l.prompt_version = j.prompt_version AND l.run_tag = '' AND l.section = 'required'
                AND l.verdict = 'unmet') AS unmet,
+           (SELECT count(*) FILTER (WHERE l.grey_p IS NULL OR l.grey_p < ?)
+              FROM jev_lines l
+             WHERE l.posting_id = j.posting_id AND l.description_hash = j.description_hash
+               AND l.prompt_version = j.prompt_version AND l.run_tag = '' AND l.section = 'required'
+               AND l.verdict = 'unmet') AS clear_unmet,
            f.judge2_required, f.judge2_derive_why, f.judge2_unmet_first
     FROM vw_jev_latest j
     LEFT JOIN vw_jev_bar b ON b.prompt_version = j.prompt_version
@@ -160,22 +168,34 @@ def decide(required_fit: Optional[str], grades: tuple, *, required_passed: bool,
     return reasons
 
 
+def grey_only(required_fit: Optional[str], unmet: list, clear_unmet: int) -> bool:
+    """True when a `fails` rests only on grey lines: there are unmet required lines and none of them is
+    clear-cut. A review stored before the grey question existed has grey_p NULL, which counts as clear-cut, so
+    old reviews demote exactly as before. Pure, so the rule is testable without a database."""
+    return required_fit in DEMOTE_REQUIRED and bool(unmet) and clear_unmet == 0
+
+
 def demotions(con, shown: dict) -> dict:
-    """{posting_id: Demotion} for the rows in `shown` ({pid: 'apply'|'review'}) Jev demotes. Rows with no
-    canonical review, adjudicated rows and reviews under a prompt_version without a passed required bar are
-    never demoted."""
+    """{posting_id: Demotion} for the rows in `shown` ({pid: 'apply'|'review'}) Jev demotes, plus the rows it
+    sends to "Check the Required block" (`check=True`: a `fails` that rests only on grey lines and nothing else
+    demotes them). Rows with no canonical review, adjudicated rows and reviews under a prompt_version without a
+    passed required bar are never demoted or checked."""
     if not shown:
         return {}
     exempt = adjudicated_ids(con, list(shown))
     out = {}
-    for (pid, req, gp, gt, ga, why, pv, passed, unmet, g_req, g_why, g_unmet) in con.execute(
-            _DEMOTION_SQL, [UNMET_LINE_CHARS, list(shown)]).fetchall():
+    for (pid, req, gp, gt, ga, why, pv, passed, unmet, clear_unmet, g_req, g_why, g_unmet) in con.execute(
+            _DEMOTION_SQL, [UNMET_LINE_CHARS, Q.GREY_AT, list(shown)]).fetchall():
         grades = (gp, gt, ga)
-        reasons = decide(req, grades if all(grades) else (), required_passed=bool(passed), adjudicated=pid in exempt)
-        if reasons:
+        grey = grey_only(req, unmet or [], clear_unmet or 0)
+        reasons = decide(None if grey else req, grades if all(grades) else (), required_passed=bool(passed),
+                         adjudicated=pid in exempt)
+        check = grey and not reasons and bool(passed) and pid not in exempt
+        if reasons or check:
             out[pid] = Demotion(posting_id=pid, was=shown[pid], required_fit=req, grades=grades, derive_why=why,
                                 unmet=list(unmet or [])[:UNMET_LINES_SHOWN], prompt_version=pv,
-                                gemma_required=g_req, gemma_why=g_why, gemma_unmet=g_unmet, reasons=reasons)
+                                gemma_required=g_req, gemma_why=g_why, gemma_unmet=g_unmet,
+                                reasons=reasons or ["required fails on judgment-call lines only"], check=check)
     return out
 
 

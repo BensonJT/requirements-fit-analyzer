@@ -35,11 +35,11 @@ def _posting(con, pid, *, grades=("bullseye", "adjacent", "wrong"), required_fit
         "'bullseye', ?, ?, ?, ?, ?, ?)", [pid, scorer, *grades, required_fit, lens_grade_source, NOW])
 
 
-def _line(n, verdict, text, section="required"):
+def _line(n, verdict, text, section="required", grey_p=None):
     return LineRecord(line_no=n, section=section, line_text=text, kind="skill", kind_conf=0.9, verdict=verdict,
                       verdict_raw=verdict, verdict_probs={"met": 0.1, "adjacent": 0.1, "unmet": 0.7, "unclear": 0.1},
                       verdict_conf=0.7, evidence_fact_id=None, evidence_p=None, evidence_text=None,
-                      evidence_downgraded=False)
+                      evidence_downgraded=False, grey_p=grey_p)
 
 
 def _review(pid, *, pv=PV, required_fit="meets", grades=("adjacent", "adjacent", "adjacent"), why="all required met",
@@ -249,3 +249,64 @@ def test_ensure_required_bar_measures_only_an_unmeasured_current_pv_and_only_liv
     # and the row under pv-new now demotes
     assert "keep-unevaluated-pv" in jev_gate.demotions(con, jev_gate.top_subset_ids(con))
     con.close()
+
+
+# ---------------------------------------------------------------- 2026-10-20: grey lines go to "check", not demoted
+@pytest.mark.parametrize("req, unmet, clear, expect", [
+    ("fails", ["or-list line"], 0, True),          # every unmet line grey
+    ("fails", ["a", "b"], 1, False),               # one clear-cut unmet line: demote
+    ("fails", [], 0, False),                       # fails with no unmet line (shape): demote as before
+    ("meets", ["a"], 0, False),                    # not a fails at all
+])
+def test_grey_only(req, unmet, clear, expect):
+    assert jev_gate.grey_only(req, unmet, clear) is expect
+
+
+def _grey_fixture(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    for pid in ("grey-only", "one-clear", "legacy-null", "grey-but-all-wrong"):
+        _posting(con, pid)
+    store.insert_jev_review(con, _review("grey-only", required_fit="fails", lines=[
+        _line(0, "unmet", "5 years in strategic operations, consulting or HR strategy.", grey_p=0.8),
+        _line(1, "unmet", "Familiarity with workforce analytics.", grey_p=0.6),
+        _line(2, "met", "Bachelor's degree.", grey_p=0.05)]))
+    store.insert_jev_review(con, _review("one-clear", required_fit="fails", lines=[
+        _line(0, "unmet", "Active TS/SCI clearance.", grey_p=0.02),
+        _line(1, "unmet", "Familiarity with workforce analytics.", grey_p=0.7)]))
+    store.insert_jev_review(con, _review("legacy-null", required_fit="fails", lines=[
+        _line(0, "unmet", "CPA licence required.")]))
+    store.insert_jev_review(con, _review("grey-but-all-wrong", required_fit="fails", grades=("wrong", "wrong", "wrong"),
+                                         lines=[_line(0, "unmet", "An or-list line.", grey_p=0.9)]))
+    _pass_required(con)
+    return con
+
+
+def test_grey_only_fails_go_to_check_and_clear_gaps_still_demote(tmp_path):
+    con = _grey_fixture(tmp_path)
+    shown = {pid: "apply" for pid in ("grey-only", "one-clear", "legacy-null", "grey-but-all-wrong")}
+    out = jev_gate.demotions(con, shown)
+    assert out["grey-only"].check is True and out["grey-only"].reasons == ["required fails on judgment-call lines only"]
+    assert out["one-clear"].check is False and out["one-clear"].reasons == ["required fails"]
+    assert out["legacy-null"].check is False                     # reviews from before the question: unchanged
+    assert out["grey-but-all-wrong"].check is False              # every lens wrong still demotes
+    assert out["grey-but-all-wrong"].reasons == ["wrong on every lens"]
+    con.close()
+
+
+def test_grey_check_respects_bar_and_human_exemption(tmp_path):
+    con = _grey_fixture(tmp_path)
+    con.execute("DELETE FROM jev_evals")                         # no passed bar: neither demoted nor checked
+    assert jev_gate.demotions(con, {"grey-only": "apply"}) == {}
+    con.close()
+
+
+def test_report_shows_check_section(tmp_path):
+    con = _grey_fixture(tmp_path)
+    text = report.write_top_jobs(con, None, out_path=str(tmp_path / "out")).read_text(encoding="utf-8")
+    rows = _section(text, "## Check the Required block")
+    assert len(rows) == 1 and "5 years in strategic operations" in rows[0]
+    demoted = _section(text, "## Jev demoted")
+    assert len(demoted) == 3 and not any("x/grey-only" in r for r in demoted)
+    assert "1 sent to Check the Required block" in text
+    con.close()
+

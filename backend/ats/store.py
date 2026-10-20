@@ -425,6 +425,7 @@ CREATE TABLE IF NOT EXISTS jev_lines (
     evidence_p        DOUBLE,
     evidence_text     VARCHAR,                   -- the chosen fact's text, resolved in code
     evidence_downgraded BOOLEAN NOT NULL DEFAULT FALSE,
+    grey_p            DOUBLE,                    -- required lines: Noul that the line is a judgment call (2026-10-20)
     PRIMARY KEY (posting_id, description_hash, prompt_version, run_tag, line_no)
 );
 
@@ -1593,7 +1594,9 @@ def _add_missing_columns(con):
                                 # has them (Eightfold custom fields; Microsoft since 2026-10-19)
                                 ("postings", "work_site", "VARCHAR"),
                                 ("postings", "travel", "VARCHAR"),
-                                ("board_runs", "track", "VARCHAR DEFAULT 'fit'")):
+                                ("board_runs", "track", "VARCHAR DEFAULT 'fit'"),
+                                # Jev's grey-line Noul (jev_questions.grey_question, 2026-10-20)
+                                ("jev_lines", "grey_p", "DOUBLE")):
         if column not in _columns(con, table):
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             if table == "postings" and column == "detail_attempts":
@@ -2125,7 +2128,7 @@ _JEV_REVIEW_JSON = frozenset({"lens_process_probs", "lens_technical_probs", "len
                               "raw_response"})
 _JEV_LINE_COLUMNS = (
     "line_no", "section", "line_text", "kind", "kind_conf", "verdict", "verdict_raw", "verdict_probs",
-    "verdict_conf", "evidence_fact_id", "evidence_p", "evidence_text", "evidence_downgraded",
+    "verdict_conf", "evidence_fact_id", "evidence_p", "evidence_text", "evidence_downgraded", "grey_p",
 )
 
 

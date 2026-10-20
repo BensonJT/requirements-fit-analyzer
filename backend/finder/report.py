@@ -727,20 +727,24 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
     unclear = [r for r in unclear if not non_us_primary(r[7])]
     # The Jev demotion pass, last of all (jev_gate.py): reads stored reviews only, never calls anything.
     from . import jev_gate
-    demoted, jev_status = {}, "off"
+    demoted, checks, jev_status = {}, {}, "off"
+    check_rows = []
     if jev_gate_on:
         candidates = {}
         for r in apply_rows:
             candidates.setdefault(r[0], "apply")
         for r in review_rows:
             candidates.setdefault(r[0], "review")
-        demoted = jev_gate.demotions(con, candidates)
+        flagged = jev_gate.demotions(con, candidates)
+        checks = {pid: d for pid, d in flagged.items() if d.check}
+        demoted = {pid: d for pid, d in flagged.items() if not d.check}
         jev_status = jev_gate.gate_status(con, list(candidates))
         demoted_rows = [r for r in apply_rows + review_rows if r[0] in demoted]
-        apply_rows = [r for r in apply_rows if r[0] not in demoted]
-        review_rows = [r for r in review_rows if r[0] not in demoted]
+        check_rows = [r for r in apply_rows + review_rows if r[0] in checks]
+        apply_rows = [r for r in apply_rows if r[0] not in flagged]
+        review_rows = [r for r in review_rows if r[0] not in flagged]
     shown_ids = [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]] + \
-                [r[0] for r in unclear[:unclear_cap]] + list(demoted)
+                [r[0] for r in unclear[:unclear_cap]] + list(demoted) + list(checks)
     far = _long_commute_sites(con, shown_ids)
     held = _held_ids(con, shown_ids)
     apply_gates = _gate_counts(con, "apply", levels)
@@ -757,7 +761,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
          f"({n_non_us} with a non-US primary location left out). "
          f"**Levels shown:** {', '.join(levels)}. **Decided/in-tracker rows:** "
          f"{'included' if include_decided else 'hidden'}. **Jev demotion pass:** {jev_status}; "
-         f"{len(demoted)} row(s) demoted out of Apply / Review (see the Jev demoted section).\n",
+         f"{len(demoted)} row(s) demoted out of Apply / Review (see the Jev demoted section), "
+         f"{len(checks)} sent to Check the Required block.\n",
          "_Rows marked `model` in the Required column were graded by the lens models, not the judge: the grade "
          "column shows each lens model's probability, and the Required cell shows the required-fit model's "
          "probability (Apply at 0.60 or above, Review from 0.40). **J3** is Jev's call: required m/p/f, then "
@@ -807,6 +812,26 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         w.extend(row_line(r) for r in review_rows[:review_cap])
     w.append("")
     if jev_gate_on:
+        w.append(f"## Check the Required block — {len(checks)}\n")
+        w.append("_Jev's Required call is `fails`, but every line it rests on is a judgment call (an or-list, "
+                 "years close to the bar, a domain that may be the setting, a soft line), so these are not demoted. "
+                 "Read the unmet lines below, then `mark` the row. Nothing else here differs from Apply / Review._\n")
+        if not checks:
+            w.append("_Nothing to check this run._\n")
+        else:
+            w.append("| Was | Company | Title | Judge P / T / AI · req | Jev P / T / AI | Grey unmet lines |\n"
+                     "|---|---|---|---|---|---|")
+            for r in check_rows:
+                d = checks[r[0]]
+                (pid, employer, title, url, gp, gt, ga, _n_good, _bull, req_fit, _unmet, *_rest) = r[:22]
+                if pid in model_ids:
+                    judge = f"{_prob(gp)} / {_prob(gt)} / {_prob(ga)} · model"
+                else:
+                    judge = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)} · {req_fit or '—'}"
+                jev = " / ".join(_grade_compact(g) for g in d.grades)
+                lines = " ; ".join(_cell(u) for u in d.unmet) or "—"
+                w.append(f"| {d.was} | {_cell(employer)} | {_link(title, url)} | {judge} | {jev} | {lines} |")
+        w.append("")
         w.append(f"## Jev demoted — {len(demoted)}\n")
         w.append("_Rows Jev's own review took out of Apply / Review: required fit `fails`, or `wrong` on every lens, "
                  "under a prompt_version whose required bar passed. Your adjudicated rows are exempt (human > Jev). "

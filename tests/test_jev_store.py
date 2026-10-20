@@ -443,3 +443,14 @@ def test_rank_expressions_never_name_a_jev_column():
     after_base = definition[definition.index("), placed AS ("):]
     assert "j3" not in after_base.lower()
     assert "jev" not in after_base.lower()
+
+
+def test_grey_p_round_trips_and_defaults_to_none(tmp_path):
+    con = _connect(tmp_path)
+    a, b = _line(0), _line(1, verdict="unmet")
+    b.grey_p = 0.72
+    store.insert_jev_review(con, _review("p1", lines=[a, b]))
+    loaded = store.load_jev_review(con, "p1", "h", "pv1")
+    assert [l.grey_p for l in loaded.lines] == [None, 0.72]
+    con.close()
+

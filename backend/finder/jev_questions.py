@@ -14,7 +14,7 @@ Design rules applied (vendor jaggedness notes for jev-1.13):
 - instructions and criteria never contradict each other; a high Noul always means "yes"
 """
 
-QUESTION_SET_VERSION = "2026-09-29.2"   # bump on ANY wording change below
+QUESTION_SET_VERSION = "2026-10-20.1"   # bump on ANY wording change below (10-20.1: the grey question)
 
 # ---------------------------------------------------------------- endpoints and model
 PINNED_MODEL = "jev-1.13.0"             # never an alias: aliases move (docs /models)
@@ -35,6 +35,8 @@ STAGE_ENABLED_ENV = "JEV_STAGE_ENABLED"  # pipeline.jev_stage runs only when "1"
 # ---------------------------------------------------------------- thresholds and caps
 GATE_LENS_MIN = 0.70            # user ruling 2026-09-28: send when ANY lens model fit >= this (plus gold rows)
 CANARY_FLAG_AT = 0.50           # injection canary Noul at or above this flags the posting
+GREY_AT = 0.50                  # grey-line Noul at or above this: the line is a judgment call, so a `fails` resting
+                                # only on such lines goes to "Check the Required block" instead of being demoted
 DEFAULT_MAX_CALLS_PER_RUN = 400
 DEFAULT_DAILY_TOKEN_CAP = 5_000_000   # ~ $0.21 at $0.042 / M input tokens
 PRICE_PER_M_INPUT = 0.042       # USD per million input tokens; output tokens are free
@@ -291,6 +293,35 @@ def evidence_question(i: int, fact_ids: list, text: str) -> dict:
                          f"done {line_ref(i, text)}?"),
         "criteria": criteria,
     }
+
+
+# 2026-10-20 (user ruling): Jev demotes only on a clear-cut gap. Each REQUIRED line also gets this Noul; when
+# every unmet required line behind a `fails` is grey (>= GREY_AT), the row goes to "Check the Required block"
+# instead of the Jev demoted section. The derived required_fit, and so the measured required bar, is unchanged.
+# Measured motivation: a blind read of Jev's 77 demotions (9/30-10/20) found 21 genuinely grey.
+GREY_CRITERIA = {
+    "true": ("Careful readers could reasonably disagree: the line is an or-list where one option may be shown in "
+             "`facts`; the years asked are close to what `facts` show; the domain could be the setting for the "
+             "candidate's kind of work rather than the work itself; `facts` partly show it; or the line is soft "
+             "('familiarity with', 'understanding of', 'strong skills in')."),
+    "false": ("The answer is clear-cut either way: `facts` plainly show it, or plainly lack it (a clearance, licence, "
+              "credential or named issuer not shown; years inside a domain listed under 'Domains never worked in'; "
+              "a named system or tool the facts never show; a specialism that is itself the work)."),
+}
+
+
+def grey_question(i: int, text: str) -> dict:
+    return {
+        "type": "noul",
+        "instructions": (f"Whether the entries in `facts` meet the qualification in {line_ref(i, text)} is a "
+                         f"judgment call on which careful readers could reasonably disagree."),
+        "criteria": dict(GREY_CRITERIA),
+    }
+
+
+def grey_question_id(i: int) -> str:
+    """Asked of required lines only (the only lines a `fails` rests on)."""
+    return f"grey_L{i:02d}"
 
 
 def line_question_ids(i: int) -> tuple:

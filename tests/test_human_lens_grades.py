@@ -243,7 +243,9 @@ def test_mark_grade_bridge_row_keeps_posting_in_bullseye_set_via_lens_grades(tmp
                    required_fit, lens_grade_source, judged_at)
                    VALUES (?, ?, 'user', 'user-adjudicated', 'bullseye', 'fails', 'human', ?)""",
                [pid, dh, datetime(2026, 10, 19, 12, 0)])
-    assert con.execute("SELECT count(*) FROM vw_label_set_bullseye WHERE posting_id = ?", [pid]).fetchone()[0] == 0
+    # 2026-10-20: the bridge row carries no lens grade, so the judge's own lane grade stands in
+    assert con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
+                       [pid]).fetchall() == [("llm_judge", 0, "adjacent")]
     _human_lens(con, pid, dh, "process", "bullseye")
     rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
                        [pid]).fetchall()
@@ -258,4 +260,60 @@ def test_judge_only_posting_unchanged_in_bullseye_set(tmp_path):
     rows = con.execute("SELECT source, label, grade FROM vw_label_set_bullseye WHERE posting_id = ?",
                        [pid]).fetchall()
     assert rows == [("llm_judge", 0, "adjacent")]
+    con.close()
+
+
+def _user_row(con, pid, dh, *, lens_grade_source, grade_process=None, grade_technical=None, required_fit="fails"):
+    con.execute("""INSERT INTO llm_labels (posting_id, description_hash, rubric_version, scorer, grade,
+                   grade_process, grade_technical, required_fit, lens_grade_source, judged_at)
+                   VALUES (?, ?, 'user', 'user-adjudicated', 'bullseye', ?, ?, ?, ?, ?)""",
+               [pid, dh, grade_process, grade_technical, required_fit, lens_grade_source,
+                datetime(2026, 10, 19, 12, 0)])
+
+
+def test_bridge_row_without_lens_grades_keeps_judge_grade_in_lens_sets(tmp_path):
+    """2026-10-20: a `mark --grade` row (required_fit only) outranks the judge in vw_llm_labels_latest; the
+    lens training sets fall back to the judge's own lane grades instead of dropping the posting."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="adjacent", grade_process="adjacent", grade_technical="wrong")
+    _user_row(con, pid, dh, lens_grade_source="human")
+    for view, want in (("vw_label_set_process", ("llm_judge", 1, "adjacent")),
+                       ("vw_label_set_technical", ("llm_judge", 0, "wrong"))):
+        assert con.execute(f"SELECT source, label, grade FROM {view} WHERE posting_id = ?",
+                           [pid]).fetchall() == [want], view
+    assert con.execute("SELECT count(*) FROM vw_label_set_ai WHERE posting_id = ?", [pid]).fetchone()[0] == 0
+    con.close()
+
+
+def test_placeholder_row_falls_back_to_judge_grade(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="stretch", grade_process="stretch")
+    _user_row(con, pid, dh, lens_grade_source="placeholder", grade_process="adjacent")
+    assert con.execute("SELECT source, grade FROM vw_label_set_process WHERE posting_id = ?",
+                       [pid]).fetchall() == [("llm_judge", "stretch")]
+    con.close()
+
+
+def test_real_user_lens_grade_still_wins_per_lane(tmp_path):
+    """A human lane grade on the user row wins for that lane; a lane it leaves NULL takes the judge's."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="adjacent", grade_process="adjacent", grade_technical="stretch")
+    _user_row(con, pid, dh, lens_grade_source="human", grade_process="wrong")
+    assert con.execute("SELECT source, grade FROM vw_label_set_process WHERE posting_id = ?",
+                       [pid]).fetchall() == [("user_adjudicated", "wrong")]
+    assert con.execute("SELECT source, grade FROM vw_label_set_technical WHERE posting_id = ?",
+                       [pid]).fetchall() == [("llm_judge", "stretch")]
+    con.close()
+
+
+def test_carried_row_keeps_judge_source(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, dh = _posting(con, "R1", text=FIT_JD)
+    _judge(con, pid, dh, grade="adjacent", grade_process="adjacent")
+    _user_row(con, pid, dh, lens_grade_source="carried", grade_process="adjacent")
+    assert con.execute("SELECT source, grade FROM vw_label_set_process WHERE posting_id = ?",
+                       [pid]).fetchall() == [("llm_judge", "adjacent")]
     con.close()

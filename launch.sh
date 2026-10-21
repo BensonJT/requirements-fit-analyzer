@@ -286,6 +286,7 @@ preflight() {
 echo
 echo "───────────────────────────────────────────────────────────────────────"
 for s in "${STEPS[@]}"; do echo "  step    : $(step_cmd "$s")"; done
+echo "  step    : $PY -u scripts/pg_snapshot.py   (always last, non-fatal)"
 [ "$USES_JUDGE" = true ] && echo "  judge   : Gemma second judge ON, fact sheet $(basename "$JUDGE_BG")"
 [ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); jevtop = the demotion pass over Apply / Review"
 if [ "$WAIT_SECS" -gt 0 ]; then
@@ -384,6 +385,12 @@ for s in "${STEPS[@]}"; do
     [ "$s" = "top" ] || [ "$s" = "jevtop" ] || echo "launch: step failed -- continuing so the report is still written"
   fi
 done
+
+# Last step, non-fatal: snapshot the fit population into Postgres (jobs.fit_snapshot, DESIGN_tracker_db.md s7).
+# A failure only warns; STATUS (and so the run's exit code and timings line) is left as the steps set it.
+echo
+echo "════ $(date '+%H:%M:%S')  $PY -u scripts/pg_snapshot.py"
+"$PY" -u scripts/pg_snapshot.py || echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
 
 SECS=$(( $(date +%s) - RUN_STARTED ))
 echo

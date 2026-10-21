@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from backend.screen import company_keys, company_matches, norm_company, similar_title
+from backend.screen import company_keys, company_matches, norm_company, norm_title, similar_title
 
 TRACKER_FILE = "Application_Tracker.md"
 VAULT_SUBDIR = os.path.join("Professional", "Areas", "Job_Search")
@@ -33,6 +33,8 @@ class TrackerRow:
     role: str
     status: Optional[str] = None
     posting_id: Optional[str] = None
+    job_id: Optional[str] = None       # the employer's own job / req id, from the Posting ID column
+    no_posting: bool = False           # Posting ID cell `none`: no posting in our DB, never guess one
 
 
 # Tracker status text -> decision (user ruling 2026-10-20). Anything else (Applied, Rejected, Interviewing,
@@ -63,6 +65,14 @@ def job_search_dir(vault_dir: str) -> Path:
     return base if (base / TRACKER_FILE).exists() else base / VAULT_SUBDIR
 
 
+# A cell may hold an escaped pipe ("Grant Dawson (SVP IT) \\| Austin ..."); only a bare pipe splits cells.
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+
+def split_cells(line: str) -> list:
+    return [c.strip() for c in _CELL_SPLIT.split(line.strip().strip("|"))]
+
+
 def _is_separator(line: str) -> bool:
     return bool(re.match(r"^\|\s*-+\s*\|", line)) or set(line) <= set("|- :")
 
@@ -70,9 +80,10 @@ def _is_separator(line: str) -> bool:
 def parse_tracker(path) -> list:
     """Company/Role rows from every tracker table except Consultant Networks (header cell 2 = Platform).
 
-    Cells 0..2 are positional (date, company, role); status is cell 3 when present. The posting id
-    is the cell under a `Posting ID` header when the table has one, else the first 20-hex token
-    anywhere in the row.
+    Cells 0..2 are positional (date, company, role); status is cell 3 when present. The `Posting ID` column
+    (2026-10-20, user decision) holds our 20-hex posting id, or else the employer's job id (`job_id`), or `none`
+    (no posting in our DB: never fuzzy-matched); a table without the column, or a blank cell, falls back to the
+    first 20-hex token anywhere in the row.
     """
     rows, section, header, skip = [], "", None, False
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -85,7 +96,7 @@ def parse_tracker(path) -> list:
             continue
         if _is_separator(stripped):
             continue
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        cells = split_cells(stripped)
         if header is None and len(cells) >= 2 and cells[1] in ("Company", "Platform"):
             header, skip = cells, cells[1] == "Platform"
             continue
@@ -94,15 +105,18 @@ def parse_tracker(path) -> list:
         date, company, role = cells[0], cells[1], cells[2]
         if company in ("Company", "Platform", "") or role in ("Role", "Status", ""):
             continue
+        cell = ""
         if header and "Posting ID" in header:
             idx = header.index("Posting ID")
             cell = cells[idx] if idx < len(cells) else ""
-            pid = cell if _POSTING_ID.fullmatch(cell) else None
-        else:
+        pid = cell if _POSTING_ID.fullmatch(cell) else None
+        no_posting = cell.lower() == "none"
+        job_id = cell if cell and pid is None and not no_posting and cell not in ("—", "-") else None
+        if pid is None and job_id is None:
             m = _POSTING_ID.search(stripped)
             pid = m.group(0) if m else None
         status = cells[3] if len(cells) > 3 and cells[3] else None
-        rows.append(TrackerRow(section, date, company, role, status, pid))
+        rows.append(TrackerRow(section, date, company, role, status, pid, job_id, no_posting))
     return rows
 
 
@@ -124,9 +138,21 @@ def _req_named(role: str):
     return m.group(1).lower() if m else None
 
 
+# Level words must agree for a FUZZY tracker match (2026-10-20): similar_title ignores them, so "Senior TPM"
+# matched "Principal TPM" and "Sr Director, Business Analysis" matched "Sr Associate, Business Analysis".
+# Tracker-only: similar_title also drives the screen's tracker dedup, which stays as it was.
+_LEVEL_WORD = re.compile(r"\b(senior|sr|principal|lead|director|associate|vp|vice president|head|chief|junior|jr"
+                         r"|entry|ii|iii|iv)\b", re.I)
+_LEVEL_ALIAS = {"sr": "senior", "jr": "junior", "vice president": "vp"}
+
+
+def _levels(title: str) -> set:
+    return {_LEVEL_ALIAS.get(w.lower(), w.lower()) for w in _LEVEL_WORD.findall(norm_title(title))}
+
+
 def match_rows(rows: list, postings: list) -> list:
     """(row, matched_posting_id, match_kind) per tracker row. `postings` = (posting_id, employer, title,
-    first_seen_at[, req_id]).
+    first_seen_at[, req_id[, url]]).
 
     2026-10-15: when the Role cell names a req ("req 31756") and the postings carry req_id, ONLY a posting of
     that employer with that req matches -- a same-titled sibling req never does (NFCU's new Senior BI Analyst
@@ -142,37 +168,47 @@ def match_rows(rows: list, postings: list) -> list:
     """
     known = {p[0] for p in postings}
     by_employer = defaultdict(list)
-    req_of = {}
+    req_of, url_of = {}, {}
     for pid, employer, title, first_seen, *rest in postings:
         by_employer[employer].append((pid, title or "", first_seen))
         if rest and rest[0]:
             req_of[pid] = str(rest[0]).strip().lower()
+        if len(rest) > 1 and rest[1]:
+            url_of[pid] = str(rest[1]).lower()
     employer_keys = {e: norm_company(e) for e in by_employer}
     out = []
     for r in rows:
         if r.posting_id and r.posting_id in known:
             out.append((r, r.posting_id, "exact"))
             continue
+        if r.no_posting:
+            out.append((r, None, "none"))
+            continue
         keys = company_keys(r.company)
         applied_date = _parse_row_date(r.date_applied)
-        named = _req_named(r.role) if req_of else None
+        job_id = (r.job_id or "").strip().lower() or None
+        named = (job_id or _req_named(r.role)) if req_of else None
         cands = []
         for employer, key in employer_keys.items():
             if not company_matches(key, keys):
                 continue
             for pid, title, first_seen in by_employer[employer]:
                 if named is not None:
-                    if req_of.get(pid) == named:
+                    # A job id from the Posting ID column may be the employer's display number, not our req_id
+                    # (Microsoft shows 200058580; we store its apply id): it also matches inside the URL.
+                    if req_of.get(pid) == named or (job_id and re.search(rf"(?<![0-9a-z]){re.escape(job_id)}(?![0-9a-z])",
+                                                                        url_of.get(pid, ""))):
                         cands.append((first_seen, pid))
                     continue
-                if not similar_title(r.role, title):
+                if not similar_title(r.role, title) or _levels(r.role) != _levels(title):
                     continue
                 if applied_date is not None and first_seen is not None:
                     fs_date = first_seen.date() if hasattr(first_seen, "date") else first_seen
                     if abs((fs_date - applied_date).days) > FUZZY_MATCH_WINDOW_DAYS:
                         continue
                 cands.append((first_seen, pid))
-        out.append((r, max(cands)[1], "fuzzy") if cands else (r, None, "none"))
+        kind = "exact" if job_id is not None else "fuzzy"   # the row's own job id is as precise as ours
+        out.append((r, max(cands)[1], kind) if cands else (r, None, "none"))
     return out
 
 
@@ -183,7 +219,7 @@ def sync(con, vault_dir: str, verbose: bool = False, log=print) -> dict:
         log(f"Tracker sync: {path} not found; skipped.")
         return {"rows": 0, "exact": 0, "fuzzy": 0, "none": 0}
     rows = parse_tracker(path)
-    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id FROM postings").fetchall()
+    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id, url FROM postings").fetchall()
     matches = match_rows(rows, postings)
     now = _now()
     counts = {"rows": len(rows), "exact": 0, "fuzzy": 0, "none": 0, "decisions_added": 0}

@@ -476,6 +476,51 @@ def test_tracker_sync_hold_becomes_build_once_applied_and_never_undoes_a_later_r
     con.close()
 
 
+def test_parse_tracker_posting_id_column_takes_our_id_or_the_employer_job_id(tmp_path):
+    """2026-10-20: a Posting ID column holds our 20-hex id or the employer's job id; an escaped pipe in a cell
+    does not split it."""
+    path = tmp_path / "Application_Tracker.md"
+    path.write_text("## Active\n\n| Date Applied | Company | Role | Status | Recruiter | Posting ID |\n"
+                    "| --- | --- | --- | --- | --- | --- |\n"
+                    f"| — | Acme | Analyst | Applied | A \\| B | {'b' * 20} |\n"
+                    "| — | Acme | Lead | Applied | | 200058580 |\n"
+                    "| — | Acme | Other | Applied | | |\n"
+                    "| — | Acme | Analyst | Applied | | none |\n")
+    rows = tracker_sync.parse_tracker(path)
+    assert rows[3].no_posting and rows[3].job_id is None
+    postings = [("c" * 20, "Acme", "Analyst", datetime(2026, 10, 1), None)]
+    assert tracker_sync.match_rows([rows[3]], postings)[0][1:] == (None, "none")   # never guessed
+    assert (rows[0].posting_id, rows[0].job_id) == ("b" * 20, None)
+    assert (rows[1].posting_id, rows[1].job_id) == (None, "200058580")
+    assert (rows[2].posting_id, rows[2].job_id) == (None, None)
+
+
+def test_match_rows_job_id_matches_req_or_url_exactly_and_never_a_sibling():
+    seen = datetime(2026, 10, 1)
+    postings = [("p" * 20, "Microsoft", "Senior Technical Program Manager", seen, "1970393557016438",
+                 "https://apply.careers.microsoft.com/careers/job/1970393557016438?jid=200058580"),
+                ("q" * 20, "Microsoft", "Senior Technical Program Manager", seen, "1970393557999999",
+                 "https://apply.careers.microsoft.com/careers/job/1970393557999999")]
+    by_url = tracker_sync.TrackerRow("Active", "—", "Microsoft", "Senior Technical Program Manager", job_id="200058580")
+    by_req = tracker_sync.TrackerRow("Active", "—", "Microsoft", "Senior Technical Program Manager",
+                                     job_id="1970393557999999")
+    missing = tracker_sync.TrackerRow("Active", "—", "Microsoft", "Senior Technical Program Manager", job_id="2000")
+    got = tracker_sync.match_rows([by_url, by_req, missing], postings)
+    assert [(m, k) for _, m, k in got] == [("p" * 20, "exact"), ("q" * 20, "exact"), (None, "none")]
+
+
+@pytest.mark.parametrize("role,title,matches", [
+    ("Senior Technical Program Manager (Specialized Clouds)", "Principal Technical Program Manager", False),
+    ("Senior Director, Business Analysis", "Senior Associate, Business Analysis", False),
+    ("Sr. Business Process Analyst", "Senior Business Process Analyst", True),
+    ("Process Excellence Lead (Remote)", "Process Excellence Lead", True),
+])
+def test_fuzzy_tracker_match_needs_the_same_level_words(role, title, matches):
+    postings = [("p" * 20, "Acme Corp", title, datetime(2026, 9, 1), None)]
+    row = tracker_sync.TrackerRow("Active", "2026-09-01", "Acme Corp", role)
+    assert (tracker_sync.match_rows([row], postings)[0][1] is not None) == matches
+
+
 def test_match_rows_fuzzy_prefers_a_posting_near_the_application_date():
     """A 2025 application must not fuzzy-match a same-titled 2026 req at the same employer --
     only a posting first seen within FUZZY_MATCH_WINDOW_DAYS of the tracker's date applied

@@ -6,7 +6,7 @@ Actor for the event log: $TRK_ACTOR, default 'user'.
 import argparse
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 from backend.tracker import db, folders, render, store
 from backend.tracker.store import TrackerError
@@ -267,6 +267,28 @@ def cmd_check(conn, a):
     return 1 if problems else 0
 
 
+def cmd_sweep(conn, a):
+    """Quarterly housekeeping (user ruling 2026-10-20): `applied` rows with no status change for
+    --days (default 90) become `assumed-rejected`. A dry run unless --apply; real news later
+    (`trk set <id> rejected` or `screen`) overrides it."""
+    cutoff = date.today() - timedelta(days=a.days)
+    rows = conn.execute("""SELECT * FROM tracker.vw_applications
+                            WHERE status = 'applied' AND status_date <= %s
+                            ORDER BY status_date, app_id""", [cutoff]).fetchall()
+    list_table(rows, False)
+    if not a.apply:
+        print(f"dry run: {len(rows)} applied row(s) unchanged since {cutoff} or earlier; "
+              "rerun with --apply to mark them assumed-rejected")
+        return 0
+    note = f"quarterly sweep: no response in {a.days}+ days"
+    for r in rows:
+        store.set_status(conn, r["app_id"], "assumed-rejected", actor(), note=note)
+    print(f"marked {len(rows)} row(s) assumed-rejected")
+    if rows:
+        rerender(conn, a)
+    return 0
+
+
 class UsageError(Exception):
     pass
 
@@ -335,6 +357,11 @@ def build_parser():
     p.add_argument("--preview", action="store_true", help="write the PREVIEW file")
     p.add_argument("--force", action="store_true", help="overwrite even if the file was edited by hand")
     p.set_defaults(fn=cmd_render)
+
+    p = sub.add_parser("sweep", parents=[nr], help="applied rows silent for --days (90) -> assumed-rejected")
+    p.add_argument("--days", type=int, default=90)
+    p.add_argument("--apply", action="store_true", help="make the change (default: dry run)")
+    p.set_defaults(fn=cmd_sweep)
 
     p = sub.add_parser("check", help="validate folders, posting ids, duplicates, follow-ups")
     p.set_defaults(fn=cmd_check)

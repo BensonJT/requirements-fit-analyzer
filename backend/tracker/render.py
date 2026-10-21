@@ -18,7 +18,6 @@ LIVE_NAME = "Application_Tracker.md"
 PREVIEW_NAME = "Application_Tracker_PREVIEW.md"
 ACTIVE_COLS = ["ID", "Applied", "Company", "Role", "Req", "Status", "Since", "Next action",
                "Follow-up", "Contact", "Folder"]
-CLOSED_COLS = ["ID", "Applied", "Company", "Role", "Req", "Status", "Since", "Reason", "Folder"]
 NETWORK_COLS = ["Platform", "Accepted", "Status", "Profile", "Notes"]
 
 
@@ -68,26 +67,19 @@ def _active_row(r):
             _folder_cell(r["folder"])]
 
 
-def _closed_row(r):
-    return [str(r["app_id"]), _cell(r["date_applied"]), _cell(r["company"]), _cell(r["role"]),
-            _cell(r["employer_job_id"]), _cell(r["status"]), _cell(r["status_date"]),
-            _cell(r["close_reason"]), _folder_cell(r["folder"])]
-
-
 def render_text(conn, *, preview=False, today=None, now=None):
     today = today or date.today()
     now = now or datetime.now(timezone.utc)
     rows = conn.execute("SELECT * FROM tracker.vw_applications "
                         "ORDER BY sort_order, status_date DESC, app_id DESC").fetchall()
     active = [r for r in rows if r["is_active"]]
-    closed = sorted((r for r in rows if not r["is_active"]),
-                    key=lambda r: (r["status_date"], r["app_id"]), reverse=True)
     order = [r["status"] for r in conn.execute("SELECT status FROM tracker.status ORDER BY sort_order")]
-    counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
+    counts = {s: sum(1 for r in active if r["status"] == s) for s in order}
+    closed_counts = {s: sum(1 for r in rows if not r["is_active"] and r["status"] == s) for s in order}
     horizon = today + timedelta(days=7)
     due = [r for r in active if r["follow_up_due"] and today <= r["follow_up_due"] <= horizon]
     overdue = [r for r in active if r["follow_up_due"] and r["follow_up_due"] < today]
-    summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n) or "no applications"
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n) or "no open applications"
     summary += f". Follow-ups due within 7 days: {len(due)}"
     if overdue:
         summary += f" (+{len(overdue)} overdue)"
@@ -102,8 +94,11 @@ def render_text(conn, *, preview=False, today=None, now=None):
          "Edit with `trk` (see `trk --help`), never by hand; hand edits are refused on the next render.",
          "", summary, "", f"## Active ({len(active)})", ""]
     L += _table(ACTIVE_COLS, [_active_row(r) for r in active])
-    L += ["", f"## Closed ({len(closed)})", ""]
-    L += _table(CLOSED_COLS, [_closed_row(r) for r in closed])
+    # Closed rows stay in the database only (user ruling 2026-10-20): the view is for open items.
+    n_closed = sum(closed_counts.values())
+    detail = ", ".join(f"{n} {s}" for s, n in closed_counts.items() if n)
+    L += ["", f"Closed: {n_closed}" + (f" ({detail})" if detail else "")
+          + ". They live in the database only; list them with `trk ls --closed`."]
     L += ["", f"## Consultant networks ({len(networks)})", ""]
     L += _table(NETWORK_COLS, [[_cell(n["platform"]), _cell(n["date_accepted"]), _cell(n["status"]),
                                 _cell(n["profile_url"]), _cell(n["notes"])] for n in networks])

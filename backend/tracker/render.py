@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-CUTOVER = False          # flipped by the user at cutover; while False the live file is never written
+CUTOVER = True           # flipped by the user at cutover; while False the live file is never written
 LIVE_NAME = "Application_Tracker.md"
 PREVIEW_NAME = "Application_Tracker_PREVIEW.md"
 ACTIVE_COLS = ["ID", "Applied", "Company", "Role", "Req", "Status", "Since", "Next action",

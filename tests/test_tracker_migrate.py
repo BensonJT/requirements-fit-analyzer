@@ -143,6 +143,7 @@ def app(conn, company, role=None):
     ("Pass — Poor Fit", "Closed", False, "passed"),
     ("Closed before submission", "Closed", False, "closed-unsent"),
     ("No Longer Posted", "Closed", False, "closed-unsent"),
+    ("On Hold", "Closed", False, "passed"),               # user ruling: status text On Hold = decided not to apply
     ("Evaluating", "Closed", False, "closed-unsent"),     # section tiebreaker: built text in Closed
     ("Applied", "Closed", True, "assumed-rejected"),
     ("Recruiter Screening", "Closed", True, "rejected"),

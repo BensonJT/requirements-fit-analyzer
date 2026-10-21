@@ -43,6 +43,7 @@ STATUS_RULES = [
     (r"interview|panel|final round|onsite", "interview", True),
     (r"passed .*screen|screen(ing)? (complete|passed)|hr screen|recruiter (call|screen)|hm review"
      r"|hiring manager", "screen", True),
+    (r"\bon hold\b", "passed", True),     # user ruling: status text "On Hold" = decided not to apply
     (r"follow-?up q|inbound recruiter", "screen", False),
     (r"not applied|recruiter inquiry", "closed-unsent", False),
     (r"not pursu|\bskip|\bpass(ed)?\b|not interested|not built", "passed", True),

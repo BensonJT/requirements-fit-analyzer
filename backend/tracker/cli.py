@@ -318,8 +318,49 @@ class UsageError(Exception):
     pass
 
 
+GUIDE = """\
+statuses:
+  active   built -> applied -> screen -> interview -> offer
+  closed   accepted, declined, rejected, assumed-rejected, withdrawn, passed, closed-unsent
+  An official rejection is 'rejected'; 'assumed-rejected' means never heard back (see sweep).
+  If a closed employer gets back in touch, trk set <id> screen moves the row back to active.
+
+everyday use:
+  trk ls                               open applications (--closed, --all, --status S)
+  trk find capital one                 search; every term must match (company, role, req, posting, id)
+  trk show 330                         one application: fields, contacts, full history
+  trk add --company Acme --role "Sr BI Analyst" --req R123 --posting <20-hex id>
+                                       new row; status built makes Applications/Company_RoleSlug_Req/
+  trk add --company Acme --role X --status passed --folder none
+                                       record a pass without a folder
+  trk set 330 applied                  change status (--date YYYY-MM-DD, --note "...")
+  trk set 330 rejected --note "email from recruiter"
+  trk note 330 "phone screen booked for Friday"
+  trk contact 330 "Pat Lee" --role recruiter --email pat@acme.com
+                                       roles: recruiter, hiring_manager, panelist, referral, staffing, other
+  trk edit 330 --follow-up 2026-11-03 --next-action "email recruiter"
+                                       fields: --next-action --follow-up --closes --role --company --req
+                                       --posting --location --pay --close-reason --applied --source
+                                       --folder --notes   ('' clears a field; --posting none unlinks)
+
+views and upkeep:
+  trk render [--preview] [--force]     rewrite the markdown view (writes re-render it automatically;
+                                       --no-render skips that). A hand-edited view is refused unless --force.
+  trk closed-report [--status S] [--since YYYY-MM-DD]
+                                       write Application_Tracker_Closed.md, a one-time snapshot
+  trk check                            folders, posting ids, duplicates, overdue follow-ups
+  trk sweep [--days 90]                list applied rows silent that long; --apply moves them to assumed-rejected
+
+environment:
+  JOBSEARCH_VAULT_DIR (from the repo .env) locates the Job_Search folder; TRK_ACTOR names who made
+  each change (default 'user'). Every write is logged as an event, shown by trk show.
+  Help for one command: trk <command> --help
+"""
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="trk", description="Application tracker (PostgreSQL).")
+    ap = argparse.ArgumentParser(prog="trk", description="Application tracker (PostgreSQL).", epilog=GUIDE,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", metavar="command")
     nr = argparse.ArgumentParser(add_help=False)
     nr.add_argument("--no-render", action="store_true", help="do not re-render the markdown view")

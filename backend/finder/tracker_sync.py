@@ -63,7 +63,7 @@ def decision_for(row) -> tuple:
 
 def decision_for_pg(row) -> tuple:
     """(decision, reason) for a Postgres tracker row (design section 8). `built` is an unsent package: hold;
-    `passed` / `closed-unsent` never went out: pass; `withdrawn` before applying (no date_applied): pass;
+    `passed` / `closed-unsent` never went out: pass; `withdrawn` or `declined` before applying (no date_applied): pass;
     anything that was applied (date_applied set) is a build. A remaining status without a date (an interview or
     rejection logged without the apply date) was still an application: build."""
     status = (row.status or "").strip().lower()
@@ -72,7 +72,7 @@ def decision_for_pg(row) -> tuple:
     if status in ("passed", "closed-unsent"):
         return "pass", f"other: tracker status {status}"
     if not _has_date(row.date_applied):
-        if status == "withdrawn":
+        if status in ("withdrawn", "declined"):
             return "pass", f"other: tracker status {status}"
     return "build", None
 

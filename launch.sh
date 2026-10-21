@@ -391,6 +391,9 @@ done
 echo
 echo "════ $(date '+%H:%M:%S')  $PY -u scripts/pg_snapshot.py"
 timeout 900 "$PY" -u scripts/pg_snapshot.py || echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
+# The tracker's Google Sheet view (posting links come from the snapshot just written). Skipped when
+# TRACKER_SHEET_ID is unset; never fatal.
+timeout 300 "$PY" -u -m backend.tracker.gsheet || echo "launch: WARNING tracker sheet refresh failed (non-fatal)"
 
 SECS=$(( $(date +%s) - RUN_STARTED ))
 echo

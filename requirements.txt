@@ -2,6 +2,7 @@
 python-dotenv
 httpx
 duckdb
+psycopg[binary]   # PostgreSQL tracker (backend/tracker); the job store stays DuckDB
 beautifulsoup4
 lxml
 

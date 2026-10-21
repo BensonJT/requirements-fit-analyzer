@@ -153,3 +153,69 @@ def test_duckdb_lock_falls_back_to_snapshot(env, tmp_path):
         assert "snapshot taken at" in text and PID in text
     finally:
         holder.close()
+
+
+def test_jobs_query_estring_bypass_and_multi_statement(env, monkeypatch):
+    payload = "SELECT E'\\'' ; COMMIT; START TRANSACTION READ WRITE; DELETE FROM tracker.application; SELECT 1"
+    text, err = call("jobs_query", sql=payload)
+    assert err
+    assert call("jobs_query", sql="SELECT e'x'")[1] is True
+    assert call("jobs_query", sql="SELECT 'a\\b'")[1] is True
+    # even if the heuristic is bypassed, the extended protocol refuses several statements
+    monkeypatch.setattr(srv, "check_select", lambda sql: None)
+    call("tracker_add", company="Acme", role="Analyst", status="built", folder="none")
+    for sql in ("SELECT 1; SELECT 2", payload, "SELECT 1; DELETE FROM tracker.application"):
+        text, err = call("jobs_query", sql=sql)
+        assert err and "query failed" in text, sql
+    assert env.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"] == 1
+
+
+def test_jobs_query_like_still_works(env):
+    call("tracker_add", company="Acme", role="Analyst", status="built", folder="none")
+    text, err = call("jobs_query", sql="SELECT company FROM tracker.application WHERE company LIKE '%cm%'")
+    assert not err and "Acme" in text
+
+
+def test_jobs_query_connection_timeouts(env):
+    conn = srv.pg_connect_ro()
+    row = conn.execute("SELECT current_setting('lock_timeout') AS l, "
+                       "current_setting('idle_in_transaction_session_timeout') AS i").fetchone()
+    conn.close()
+    assert row["l"] == "5s" and row["i"] == "5s"
+
+
+def test_trk_argv_options_first_then_positionals():
+    argv = srv.trk_argv("tracker_note", {"app_id": 3, "text": "-starts with dash"})
+    assert argv == ["note", "--", "3", "-starts with dash"]
+    argv = srv.trk_argv("tracker_set_status", {"app_id": 3, "status": "applied", "note": "-x"})
+    assert argv == ["set", "--note=-x", "--", "3", "applied"]
+    argv = srv.trk_argv("tracker_contact", {"app_id": 3, "name": "-Pat", "email": "-a@example.com"})
+    assert argv == ["contact", "--email=-a@example.com", "--", "3", "-Pat"]
+
+
+def test_dash_values_round_trip(env):
+    assert not call("tracker_add", company="-Acme", role="-Analyst", folder="none")[1]
+    text, err = call("tracker_note", app_id=1, text="-starts with dash")
+    assert not err, text
+    text, err = call("tracker_set_status", app_id=1, status="applied", note="-x")
+    assert not err, text
+    text, err = call("tracker_contact", app_id=1, name="-Pat", email="-p@example.com")
+    assert not err, text
+    text, err = call("tracker_edit", app_id=1, next_action="-call", notes="-n")
+    assert not err, text
+    notes = [r["note"] for r in env.execute("SELECT note FROM tracker.event WHERE note IS NOT NULL")]
+    assert "-starts with dash" in notes and "-x" in notes
+
+
+def test_tracker_add_folder_only_auto_or_none(env):
+    text, err = call("tracker_add", company="Acme", role="A", folder="Applications/Evil")
+    assert err and "auto" in text
+    assert call("tracker_add", company="Acme", role="A", folder="none")[1] is False
+
+
+def test_tracker_edit_bad_source_changes_nothing(env):
+    call("tracker_add", company="Acme", role="Keep", folder="none")
+    text, err = call("tracker_edit", app_id=1, source="bogus", role="Changed")
+    assert err
+    assert env.execute("SELECT role FROM tracker.application").fetchone()["role"] == "Keep"
+    assert call("tracker_edit", app_id=1, folder="../x")[1] is True

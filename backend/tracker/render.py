@@ -18,6 +18,8 @@ LIVE_NAME = "Application_Tracker.md"
 PREVIEW_NAME = "Application_Tracker_PREVIEW.md"
 ACTIVE_COLS = ["ID", "Applied", "Company", "Role", "Req", "Status", "Since", "Next action",
                "Follow-up", "Contact", "Folder"]
+CLOSED_NAME = "Application_Tracker_Closed.md"
+CLOSED_COLS = ["ID", "Applied", "Company", "Role", "Req", "Status", "Since", "Reason", "Folder"]
 NETWORK_COLS = ["Platform", "Accepted", "Status", "Profile", "Notes"]
 
 
@@ -103,6 +105,45 @@ def render_text(conn, *, preview=False, today=None, now=None):
     L += _table(NETWORK_COLS, [[_cell(n["platform"]), _cell(n["date_accepted"]), _cell(n["status"]),
                                 _cell(n["profile_url"]), _cell(n["notes"])] for n in networks])
     return "\n".join(L) + "\n"
+
+
+def render_closed_text(conn, *, status=None, since=None, now=None):
+    """The on-demand closed-applications snapshot: every closed row (optionally one status and/or
+    status date >= `since`), newest status date first, with a count per closed status."""
+    now = now or datetime.now(timezone.utc)
+    since = date.fromisoformat(since) if isinstance(since, str) else since
+    rows = conn.execute("SELECT * FROM tracker.vw_applications WHERE NOT is_active "
+                        "ORDER BY status_date DESC, app_id DESC").fetchall()
+    order = [r["status"] for r in conn.execute("SELECT status FROM tracker.status ORDER BY sort_order")]
+    if status and status not in order:
+        from backend.tracker.store import TrackerError
+        raise TrackerError(f"unknown status {status!r}; allowed: {', '.join(order)}")
+    rows = [r for r in rows if (not status or r["status"] == status) and (not since or r["status_date"] >= since)]
+    counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
+    detail = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
+    summary = f"Closed: {len(rows)}" + (f" ({detail})" if detail else "")
+    if status or since:
+        summary += " [filter:" + (f" status {status}" if status else "") + (f" since {since}" if since else "") + "]"
+    L = ["---", "node_id: PRO:job-application-tracker-closed", "node_type: area",
+         "tags: [#professional #job-search #tracker]", "ai_edit_policy: read-only",
+         f"rendered: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}", "---", "# Application Tracker: Closed", "",
+         "> AI_USAGE: on-demand snapshot from `trk closed-report`; not kept current; the database is the record.",
+         "", summary + ".", ""]
+    L += _table(CLOSED_COLS, [[str(r["app_id"]), _cell(r["date_applied"]), _cell(r["company"]), _cell(r["role"]),
+                               _cell(r["employer_job_id"]), _cell(r["status"]), _cell(r["status_date"]),
+                               _cell(r["close_reason"]), _folder_cell(r["folder"])] for r in rows])
+    return "\n".join(L) + "\n"
+
+
+def write_closed_report(conn, job_dir, *, status=None, since=None, now=None):
+    """Write `Application_Tracker_Closed.md` (always overwritten, via tmp + replace). Returns (path, row count)."""
+    text = render_closed_text(conn, status=status, since=since, now=now)
+    path = Path(job_dir) / CLOSED_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(text.encode("utf-8"))
+    os.replace(tmp, path)
+    return path, text.count("\n| ") - 1
 
 
 def target_path(job_dir, preview=False):

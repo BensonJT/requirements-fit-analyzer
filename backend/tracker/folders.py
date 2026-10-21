@@ -7,7 +7,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from backend.tracker.store import TrackerError
+from backend.tracker.store import TrackerError, normalize_folder
 
 APPLICATIONS_DIR = "Applications"
 COMPANY_MAX = 30
@@ -64,11 +64,12 @@ def index_text(name, app_id, company, role, employer_job_id, posting_id):
     )
 
 
-def create_folder(job_dir, *, app_id, company, role, employer_job_id=None, posting_id=None):
+def create_folder(job_dir, *, app_id, company, role, employer_job_id=None, posting_id=None, taken=None):
     """Create `<job_dir>/Applications/<name>[_2...]` with a minimal index.md.
 
     Never touches an existing folder: a taken name gets `_2`, `_3`, ... Returns the path relative
-    to `job_dir` (forward slashes).
+    to `job_dir` (forward slashes). `taken(rel)` may veto a name already recorded in the database
+    (a folder value whose directory is gone from disk).
     """
     apps = Path(job_dir) / APPLICATIONS_DIR
     apps.mkdir(parents=True, exist_ok=True)
@@ -76,6 +77,9 @@ def create_folder(job_dir, *, app_id, company, role, employer_job_id=None, posti
     n = 1
     while True:
         name = base if n == 1 else f"{base}_{n}"
+        if taken and taken(f"{APPLICATIONS_DIR}/{name}"):
+            n += 1
+            continue
         try:
             (apps / name).mkdir()
             break
@@ -90,9 +94,10 @@ def create_folder(job_dir, *, app_id, company, role, employer_job_id=None, posti
 def use_folder(job_dir, rel, *, app_id, company, role, employer_job_id=None, posting_id=None):
     """An explicit `--folder <path>` (relative to the Job_Search dir): keep an existing folder as is,
     or create it with an index.md. Returns the normalised relative path."""
-    p = Path(str(rel).replace("\\", "/"))
-    if p.is_absolute() or ".." in p.parts or not p.parts:
+    norm = normalize_folder(rel)
+    if norm is None:
         raise TrackerError(f"--folder must be a relative path inside the Job_Search directory, got {rel!r}")
+    p = Path(norm)
     target = Path(job_dir) / p
     if not target.exists():
         target.mkdir(parents=True)

@@ -7,6 +7,7 @@ history can never disagree with the data. `actor` is passed by the caller ('user
 """
 import re
 from datetime import date
+from pathlib import PurePosixPath
 
 _POSTING_ID = re.compile(r"^[0-9a-f]{20}$")
 
@@ -191,14 +192,34 @@ def add_contact(conn, app_id, name, actor, role="recruiter", **fields):
     return {**c, "role": role, "created": created}
 
 
-def edit_field(conn, app_id, field, value, actor):
-    """Set one whitelisted field (see EDITABLE_FIELDS), recording old and new values.
-    Empty / None clears it (company and role cannot be cleared). Returns the updated row."""
+def normalize_folder(value):
+    """A folder value for `application.folder`: a relative path inside the Job_Search directory
+    (forward slashes, no `..`, not absolute). 'none' / empty -> None (clears it)."""
+    if value is None or str(value).strip().lower() in ("", "none"):
+        return None
+    raw = str(value).strip().replace("\\", "/")
+    p = PurePosixPath(raw)
+    if p.is_absolute() or re.match(r"^[A-Za-z]:", raw) or ".." in p.parts or not p.parts or p.parts == (".",):
+        raise TrackerError(f"folder must be a relative path inside the Job_Search directory, got {value!r}")
+    return p.as_posix()
+
+
+def folder_in_use(conn, folder, exclude_app_id=None):
+    """The app_id of another application already using `folder` (None when free)."""
+    row = conn.execute("SELECT app_id FROM tracker.application WHERE folder = %s AND app_id IS DISTINCT FROM %s "
+                       "ORDER BY app_id LIMIT 1", [folder, exclude_app_id]).fetchone()
+    return row["app_id"] if row else None
+
+
+def _normalize_field(field, value):
+    """Validate one field edit without touching the database; returns the value to store."""
     kind = EDITABLE_FIELDS.get(field)
     if kind is None:
         raise TrackerError(f"field {field!r} is not editable; allowed: {', '.join(sorted(EDITABLE_FIELDS))}"
                            + ("  (use set_status for status)" if field.startswith("status") else ""))
-    if kind == "date":
+    if field == "folder":
+        new = normalize_folder(value)
+    elif kind == "date":
         new = _date(value, field)
     elif kind == "posting":
         new = _posting_id(value)
@@ -208,14 +229,40 @@ def edit_field(conn, app_id, field, value, actor):
         raise TrackerError(f"{field} cannot be empty")
     if field == "source" and new not in SOURCES:
         raise TrackerError(f"unknown source {new!r}; allowed: {', '.join(SOURCES)}")
+    return new
+
+
+def edit_fields(conn, app_id, changes, actor):
+    """Set several whitelisted fields at once: every field is validated first, then all are applied in
+    ONE transaction with one 'field' event per changed field (an unchanged value records nothing).
+    Empty / None clears a field (company and role cannot be cleared). Returns the updated row."""
+    if not changes:
+        raise TrackerError("no fields to change")
+    new = {f: _normalize_field(f, v) for f, v in changes.items()}
     with conn.transaction():
         cur = _require_app(conn, app_id, lock=True)
-        row = conn.execute(f"UPDATE tracker.application SET {field} = %s, updated_at = now() "
-                           "WHERE app_id = %s RETURNING *", [new, app_id]).fetchone()
-        old = cur[field]
-        _event(conn, app_id, "field", actor, field=field,
-               old_value=None if old is None else str(old), new_value=None if new is None else str(new))
+        if new.get("folder") is not None:
+            other = folder_in_use(conn, new["folder"], app_id)
+            if other is not None:
+                raise TrackerError(f"folder {new['folder']!r} is already used by application #{other}")
+        diff = {f: v for f, v in new.items()
+                if (None if cur[f] is None else str(cur[f])) != (None if v is None else str(v))}
+        if not diff:
+            return cur
+        row = conn.execute("UPDATE tracker.application SET "
+                           + ", ".join(f"{f} = %s" for f in diff) + ", updated_at = now() "
+                           "WHERE app_id = %s RETURNING *", [*diff.values(), app_id]).fetchone()
+        for f, v in diff.items():
+            old = cur[f]
+            _event(conn, app_id, "field", actor, field=f,
+                   old_value=None if old is None else str(old), new_value=None if v is None else str(v))
     return row
+
+
+def edit_field(conn, app_id, field, value, actor):
+    """Set one whitelisted field (see EDITABLE_FIELDS), recording old and new values.
+    Empty / None clears it (company and role cannot be cleared). Returns the updated row."""
+    return edit_fields(conn, app_id, {field: value}, actor)
 
 
 def get(conn, app_id):

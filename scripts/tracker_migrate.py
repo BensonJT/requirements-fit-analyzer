@@ -45,9 +45,8 @@ STATUS_RULES = [
      r"|hiring manager", "screen", True),
     (r"\bon hold\b", "passed", True),     # user ruling: status text "On Hold" = decided not to apply
     (r"follow-?up q|inbound recruiter", "screen", False),
-    (r"not applied|recruiter inquiry", "closed-unsent", False),
-    (r"not pursu|\bskip|\bpass(ed)?\b|not interested|not built", "passed", True),
-    (r"\brtr\b", "applied", False),
+    (r"not pursu|\bskip|\bpass(ed)?\b|not interested|not built|not applied", "passed", True),
+    (r"\brtr\b", "applied", True),       # user ruling: RTR unsigned stays applied
     (r"package|materials ready|unsent|evaluating|on hold|hold|ready to apply|site error|pending", "built", True),
     (r"appl(y|ied|ication)|submitted|\bsent\b|under review|awaiting", "applied", True),
 ]
@@ -70,7 +69,7 @@ def map_status(text, section, has_date_applied):
     for rx, status, confident in _RULES:
         if rx.search(t):
             if sect == "closed" and status in SECTION_CLOSED_FALLBACK:
-                return SECTION_CLOSED_FALLBACK[status], False, f"section Closed; text reads as {status}"
+                return SECTION_CLOSED_FALLBACK[status], True, ""      # user-confirmed section tiebreaker
             return status, confident, "" if confident else "weak text rule"
     if sect == "closed":
         return "rejected", False, "unmatched; Closed default"
@@ -198,6 +197,8 @@ class Row:
     follow_up_raw: str
     posting_cell: str
     ragged: bool = False
+    extra_raws: list = field(default_factory=list)
+    merged: list = field(default_factory=list)   # raw rows of same-job duplicates folded into this one
     # derived
     role: dict = field(default_factory=dict)
     date_applied: object = None
@@ -390,7 +391,7 @@ def match_folders(rows, apps_dir):
 
     cand = {}                                                    # row idx -> (rank, [folders])
     for r in rows:
-        explicit = [n for n in re.findall(r"Folder:\s*([A-Za-z0-9_.\-]+)", r.raw) if n in meta]
+        explicit = [n for n in re.findall(r"Folder:\s*([A-Za-z0-9_.\-]+)", " ".join([r.raw, *r.extra_raws])) if n in meta]
         if explicit:
             cand[r.idx] = (0, explicit[:1])
             continue
@@ -420,10 +421,10 @@ def match_folders(rows, apps_dir):
             if by_idx:
                 cand[r.idx] = (3, by_idx)
 
-    claims = {}
-    order = sorted(cand, key=lambda i: (cand[i][0], -(rows[i].date_applied or rows[i].status_date or dt.date.min).toordinal(), i))
+    claims, byi = {}, {r.idx: r for r in rows}
+    order = sorted(cand, key=lambda i: (cand[i][0], -(byi[i].date_applied or rows[i].status_date or dt.date.min).toordinal(), i))
     for i in order:
-        r, (rank, fl) = rows[i], cand[i]
+        r, (rank, fl) = byi[i], cand[i]
         if len(fl) != 1:
             problems.append((r, "ambiguous", ", ".join(fl[:6])))
             continue
@@ -449,6 +450,65 @@ def derive(rows):
         r.status_date = parse_date(r.status_date_raw)
         r.status, r.confident, r.status_note = map_status(r.status_raw, r.section, r.date_applied is not None)
         r.contacts, r.recruiter_residual = parse_recruiters(r.recruiter_raw)
+
+
+_PROGRESS = {"built": 1, "closed-unsent": 1, "passed": 1, "applied": 2, "assumed-rejected": 3, "screen": 3,
+             "rejected": 4, "interview": 4, "declined": 4, "withdrawn": 4, "offer": 5, "accepted": 6}
+
+
+def merge_duplicates(rows):
+    """Fold rows that are the SAME JOB into one: same normalized company and cleaned role, and the same employer
+    req id, or (neither has one) a date applied within 3 days of each other. Different req ids never merge.
+    Keeps the row with the latest status date (ties: most advanced status). -> (survivors, [(kept, [merged], why)])."""
+    groups = collections.defaultdict(list)
+    for r in rows:
+        groups[(norm_company(r.company), re.sub(r"\s+", " ", r.role["title"].lower()).strip())].append(r)
+    parent = {r.idx: r.idx for r in rows}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for g in groups.values():
+        for i, a in enumerate(g):
+            for b in g[i + 1:]:
+                ra, rb = (a.employer_job_id or "").lower(), (b.employer_job_id or "").lower()
+                if ra or rb:
+                    same = ra == rb
+                else:
+                    da, db_ = a.date_applied, b.date_applied
+                    same = (da is None and db_ is None) or (da is not None and db_ is not None and abs((da - db_).days) <= 3)
+                if same:
+                    parent[find(b.idx)] = find(a.idx)
+    clusters = collections.defaultdict(list)
+    for r in rows:
+        clusters[find(r.idx)].append(r)
+    survivors, merges = [], []
+    for cl in clusters.values():
+        if len(cl) == 1:
+            survivors.append(cl[0])
+            continue
+        cl.sort(key=lambda r: (r.status_date or dt.date.min, _PROGRESS.get(r.status, 0), -r.idx), reverse=True)
+        keep, others = cl[0], cl[1:]
+        for o in others:
+            keep.merged.append(f"[{o.section}] " + re.sub(r"\s{2,}", " ", o.raw))
+            if keep.posting_id is None and o.posting_id:
+                keep.posting_id, keep.posting_how = o.posting_id, o.posting_how
+            keep.employer_job_id = keep.employer_job_id or o.employer_job_id
+            keep.date_applied = keep.date_applied or o.date_applied
+            keep.note_cell = keep.note_cell or o.note_cell
+            keep.follow_up_raw = keep.follow_up_raw or o.follow_up_raw
+            have = {c["name"].lower() for c in keep.contacts}
+            keep.contacts += [c for c in o.contacts if c["name"].lower() not in have]
+            if o.recruiter_residual and o.recruiter_residual not in keep.recruiter_residual:
+                keep.recruiter_residual = "\n".join(x for x in (keep.recruiter_residual, o.recruiter_residual) if x)
+            keep.extra_raws.append(o.raw)
+        why = ("same req id " + keep.employer_job_id) if keep.employer_job_id else "no req id; date applied within 3 days"
+        merges.append((keep, others, why))
+        survivors.append(keep)
+    survivors.sort(key=lambda r: r.idx)
+    return survivors, merges
 
 
 def dedupe_postings(rows):
@@ -501,6 +561,9 @@ def load_db(conn, ordered, networks, force):
             app_id = row["app_id"]
             conn.execute("INSERT INTO tracker.event (app_id, kind, actor, note) VALUES (%s,'migrated',%s,%s)",
                          [app_id, ACTOR, "[%s] %s" % (r.section, re.sub(r"\s{2,}", " ", r.raw))])
+            for m in r.merged:
+                conn.execute("INSERT INTO tracker.event (app_id, kind, actor, note) VALUES (%s,'migrated',%s,%s)",
+                             [app_id, ACTOR, "[merged duplicate] " + m])
             conn.execute("INSERT INTO tracker.event (app_id, kind, status, status_date, new_value, actor) "
                          "VALUES (%s,'status',%s,%s,%s,%s)", [app_id, r.status, sdate, r.status, ACTOR])
             for c in r.contacts:
@@ -533,7 +596,7 @@ def table(head, body):
     return "\n".join(out) + "\n"
 
 
-def write_report(path, rows, networks, dropped, lost, folder_problems, dry_run, ordered, contacts_n):
+def write_report(path, rows, networks, dropped, lost, folder_problems, dry_run, ordered, contacts_n, merges=(), parsed=None):
     by_sec = collections.Counter(r.section for r in rows)
     by_status = collections.Counter(r.status for r in rows)
     how = collections.Counter(r.posting_how for r in rows)
@@ -546,7 +609,7 @@ def write_report(path, rows, networks, dropped, lost, folder_problems, dry_run, 
          "# Tracker migration review", "",
          f"AI_USAGE: Generated by scripts/tracker_migrate.py on {dt.date.today()} ({'dry run, no database touched' if dry_run else 'loaded'}); review the tables below and tell Claude which rows to fix before the real cutover.",
          "", "## Counts", "",
-         f"{len(rows)} application rows, {len(networks)} network rows, {len(dropped)} dropped, {contacts_n} contacts created.", "",
+         f"{parsed or len(rows)} rows parsed, {sum(len(m[1]) for m in merges)} merged away as same-job duplicates, so {len(rows)} applications; {len(networks)} network rows, {len(dropped)} dropped, {contacts_n} contacts created.", "",
          table(["Section", "Rows"], sorted(by_section_items(by_sec))), "",
          table(["Mapped status", "Rows"], by_status.most_common()), "",
          table(["Posting id", "Rows"], [("filled from the Posting ID cell", how["cell"]),
@@ -572,6 +635,9 @@ def write_report(path, rows, networks, dropped, lost, folder_problems, dry_run, 
           table(["Row", "Problem", "Detail"], [(rid(r), p, d) for r, p, d in folder_problems if p != "missing"]), "",
           f"### Missing folders ({prob['missing']})", "",
           table(["Row", "Section", "Status"], [(rid(r), r.section, r.status) for r, p, _d in folder_problems if p == "missing"]), "",
+          "## Merged duplicates", "",
+          "Same company, same cleaned role, and the same req id (or no req id on either and date applied within 3 days). Different req ids are never merged. Each merged raw row is kept as a `migrated` event on the kept application.", "",
+          table(["Kept row", "Merged rows", "Why"], [(rid(k) + f" [{k.status}]", " ;; ".join(f"{o.date_raw or '—'} {o.status_raw}" for o in oth), why) for k, oth, why in merges]), "",
           "## Dropped and duplicate rows", "",
           table(["Row", "Why"], [(f"[{s}] {t}", why) for s, t, why in dropped]
                 + [(rid(l), f"posting_id also on app {k.app_no} ({rid(k)}); kept on the more recent row") for l, k in lost]), "",
@@ -608,6 +674,8 @@ def main(argv=None):
     rows, networks, dropped = parse_tracker_file(tracker)
     derive(rows)
     resolve_postings(rows, a.duckdb)
+    parsed = len(rows)
+    rows, merges = merge_duplicates(rows)
     lost = dedupe_postings(rows)
     ordered = insertion_order(rows)
     for n, r in enumerate(ordered, 1):
@@ -620,7 +688,7 @@ def main(argv=None):
             contacts_n = load_db(conn, ordered, networks, a.force)
     else:
         contacts_n = len({(c["name"].lower(), r.company.lower()) for r in rows for c in r.contacts})
-    write_report(a.report, rows, networks, dropped, lost, folder_problems, a.dry_run, ordered, contacts_n)
+    write_report(a.report, rows, networks, dropped, lost, folder_problems, a.dry_run, ordered, contacts_n, merges, parsed)
     print(f"{'dry run: ' if a.dry_run else ''}{len(rows)} applications, {len(networks)} networks, {contacts_n} contacts; report {a.report}")
     return 0
 

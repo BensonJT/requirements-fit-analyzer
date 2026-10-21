@@ -1,0 +1,372 @@
+"""`trk`: the application tracker command line (design section 5).
+
+Exit codes: 0 ok, 1 error (TrackerError, database or file problem, `check` found problems), 2 usage.
+Actor for the event log: $TRK_ACTOR, default 'user'.
+"""
+import argparse
+import os
+import sys
+from datetime import date
+
+from backend.tracker import db, folders, render, store
+from backend.tracker.store import TrackerError
+
+EDIT_OPTIONS = {   # argparse dest -> (flag, store field)
+    "next_action": ("--next-action", "next_action"), "follow_up": ("--follow-up", "follow_up_due"),
+    "closes": ("--closes", "closes_on"), "role": ("--role", "role"), "company": ("--company", "company"),
+    "req": ("--req", "employer_job_id"), "posting": ("--posting", "posting_id"),
+    "location": ("--location", "location"), "pay": ("--pay", "pay_text"),
+    "close_reason": ("--close-reason", "close_reason"), "applied": ("--applied", "date_applied"),
+    "source": ("--source", "source"), "folder": ("--folder", "folder"), "notes": ("--notes", "notes"),
+}
+
+
+def actor():
+    return os.environ.get("TRK_ACTOR") or "user"
+
+
+def trunc(s, n):
+    s = "" if s is None else " ".join(str(s).split())
+    return s if len(s) <= n else s[:n - 1] + "~"
+
+
+def print_table(headers, rows):
+    rows = [[("" if c is None else str(c)) for c in r] for r in rows]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    for r in [headers, *rows]:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def list_table(rows, closed):
+    today = date.today()
+    out = []
+    for r in rows:
+        base = [r["app_id"], trunc(r["company"], 24), trunc(r["role"], 38), trunc(r["employer_job_id"], 14),
+                r["status"], r["status_date"]]
+        if closed:
+            out.append(base + [trunc(r["close_reason"], 30)])
+        else:
+            fu = r["follow_up_due"]
+            flag = "!" if fu and fu < today and r["is_active"] else ""
+            out.append(base + [trunc(r["next_action"], 30), f"{fu}{flag}" if fu else ""])
+    hdr = ["ID", "Company", "Role", "Req", "Status", "Since"]
+    print_table(hdr + (["Reason"] if closed else ["Next action", "Follow-up"]), out)
+    print(f"({len(rows)} row{'s' if len(rows) != 1 else ''})")
+
+
+def get_job_dir():
+    return render.job_dir_from_env()
+
+
+def rerender(conn, args):
+    """Re-render after a write. Never raises: a refusal or file error only warns, the write stays."""
+    if getattr(args, "no_render", False):
+        return
+    try:
+        jd = get_job_dir()
+        if jd is None:
+            print("warning: JOBSEARCH_VAULT_DIR not set; tracker view not re-rendered", file=sys.stderr)
+            return
+        res = render.render(conn, jd)
+        if res.status == "refused":
+            print(f"warning: {res.path.name} was edited by hand ({res.notes[0]}); the database change "
+                  "is saved but the view was NOT updated.\nApply your edit with trk, then run "
+                  "`trk render --force` to overwrite the file.", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 - the DB write already succeeded
+        print(f"warning: could not render the tracker view: {e}", file=sys.stderr)
+
+
+def cmd_ls(conn, a):
+    if a.status:
+        rows = store.list_apps(conn, active=None, status=a.status)
+        active_rows = [r for r in rows if r["is_active"]]
+        closed_rows = [r for r in rows if not r["is_active"]]
+        if active_rows:
+            list_table(active_rows, False)
+        if closed_rows:
+            list_table(closed_rows, True)
+        if not rows:
+            print("(0 rows)")
+    elif a.all:
+        list_table(store.list_apps(conn, active=True), False)
+        print()
+        list_table(store.list_apps(conn, active=False), True)
+    else:
+        list_table(store.list_apps(conn, active=not a.closed), a.closed)
+
+
+def cmd_find(conn, a):
+    rows = store.find(conn, a.terms)
+    print_table(["ID", "Company", "Role", "Req", "Status", "Since", "Folder"],
+                [[r["app_id"], trunc(r["company"], 24), trunc(r["role"], 38), trunc(r["employer_job_id"], 14),
+                  r["status"], r["status_date"], r["folder"] or ""] for r in rows])
+    print(f"({len(rows)} match{'es' if len(rows) != 1 else ''})")
+
+
+def cmd_show(conn, a):
+    row = store.get(conn, a.app_id)
+    if row is None:
+        raise TrackerError(f"no application with app_id {a.app_id}")
+    skip = {"contacts", "events", "is_active", "sort_order"}
+    w = max(len(k) for k in row if k not in skip)
+    for k, v in row.items():
+        if k not in skip:
+            print(f"{k.ljust(w)}  {'' if v is None else v}")
+    print("\nContacts")
+    for c in row["contacts"] or []:
+        bits = [c["name"], f"({c['role']})"] + [str(c[k]) for k in ("title", "company", "email", "phone", "linkedin") if c[k]]
+        print("  " + "  ".join(bits))
+    if not row["contacts"]:
+        print("  (none)")
+    print("\nHistory")
+    for e in row["events"]:
+        detail = e["note"] or ""
+        if e["kind"] == "status":
+            detail = f"{e['old_value'] or ''} -> {e['new_value']} ({e['status_date']}) {detail}".strip()
+        elif e["kind"] == "field":
+            detail = f"{e['field']}: {e['old_value'] or ''} -> {e['new_value'] or ''}"
+        elif e["kind"] == "created":
+            detail = f"status {e['status']} ({e['status_date']})"
+        print(f"  {e['at']:%Y-%m-%d %H:%M}  {e['kind']:<8} {e['actor']:<14} {detail}")
+
+
+def cmd_set(conn, a):
+    r = store.set_status(conn, a.app_id, a.status, actor(), status_date=a.date, note=a.note)
+    print(f"#{r['app_id']} {r['company']}: {r['status']} ({r['status_date']})")
+    rerender(conn, a)
+
+
+def cmd_note(conn, a):
+    store.add_note(conn, a.app_id, a.text, actor())
+    print(f"note added to #{a.app_id}")
+    rerender(conn, a)
+
+
+def cmd_contact(conn, a):
+    extra = {k: getattr(a, k) for k in ("title", "email", "phone", "linkedin") if getattr(a, k)}
+    if a.company:
+        extra["company"] = a.company
+    c = store.add_contact(conn, a.app_id, a.name, actor(), role=a.role, **extra)
+    print(f"{'added' if c['created'] else 'linked existing'} contact {c['name']} ({c['role']}) on #{a.app_id}")
+    rerender(conn, a)
+
+
+def cmd_edit(conn, a):
+    changes = [(field, getattr(a, dest)) for dest, (_, field) in EDIT_OPTIONS.items()
+               if getattr(a, dest) is not None]
+    if not changes:
+        raise UsageError("edit needs at least one option (see trk edit --help)")
+    for field, value in changes:
+        store.edit_field(conn, a.app_id, field, value, actor())
+        print(f"#{a.app_id} {field} = {value!r}")
+    rerender(conn, a)
+
+
+def _fmt_pay(lo, hi, interval):
+    if lo is None and hi is None:
+        return None
+    txt = f"${lo:,}-${hi:,}" if lo is not None and hi is not None else f"${(lo if lo is not None else hi):,}"
+    if interval and str(interval).lower() not in ("year", "yearly", "annual", "annually"):
+        txt += f" per {interval}"
+    return txt
+
+
+def snapshot_row(conn, posting_id):
+    return conn.execute("SELECT employer, title, req_id, location_primary, pay_min, pay_max, pay_interval "
+                        "FROM jobs.fit_snapshot WHERE posting_id = %s", [posting_id]).fetchone()
+
+
+def cmd_add(conn, a):
+    company, role, req, loc, pay = a.company, a.role, a.req, a.location, a.pay
+    pid = store._posting_id(a.posting)
+    if pid:
+        snap = snapshot_row(conn, pid)
+        if snap:
+            company = company or snap["employer"]
+            role = role or snap["title"]
+            req = req or snap["req_id"]
+            loc = loc or snap["location_primary"]
+            pay = pay or _fmt_pay(snap["pay_min"], snap["pay_max"], snap["pay_interval"])
+    if not company or not role:
+        raise TrackerError("add needs --company and --role"
+                           + (f" (posting {pid} is not in jobs.fit_snapshot)" if pid else ""))
+    mode = a.folder or ("auto" if a.status == "built" else "none")
+    jd = None
+    if mode != "none":
+        jd = get_job_dir()
+        if jd is None:
+            raise TrackerError("JOBSEARCH_VAULT_DIR is not set; cannot create the folder (use --folder none)")
+    row = store.add_application(
+        conn, company=company, role=role, actor=actor(), employer_job_id=req, posting_id=pid,
+        location=loc, pay_text=pay, source=a.source or ("pipeline" if pid else "manual"),
+        status=a.status, status_date=a.date)
+    app_id = row["app_id"]
+    print(f"added #{app_id} {row['company']}: {row['role']} [{row['status']}]")
+    if mode != "none":
+        try:
+            kw = dict(app_id=app_id, company=row["company"], role=row["role"],
+                      employer_job_id=row["employer_job_id"], posting_id=row["posting_id"])
+            rel = folders.create_folder(jd, **kw) if mode == "auto" else folders.use_folder(jd, mode, **kw)
+            store.edit_field(conn, app_id, "folder", rel, actor())
+            print(f"folder {rel}")
+        except (TrackerError, OSError) as e:
+            print(f"warning: #{app_id} was added but the folder step failed: {e}", file=sys.stderr)
+    rerender(conn, a)
+
+
+def cmd_render(conn, a):
+    jd = get_job_dir()
+    if jd is None:
+        raise TrackerError("JOBSEARCH_VAULT_DIR is not set")
+    res = render.render(conn, jd, preview=a.preview, force=a.force)
+    if res.status == "refused":
+        print(f"refused: {res.path} {res.notes[0]}; not overwritten.", file=sys.stderr)
+        lines = res.diff.splitlines()
+        print("\n".join(lines[:200]), file=sys.stderr)
+        if len(lines) > 200:
+            print(f"... ({len(lines) - 200} more diff lines)", file=sys.stderr)
+        print("Apply the change with trk, or rerun with --force to overwrite.", file=sys.stderr)
+        return 1
+    print(f"wrote {res.path}")
+    return 0
+
+
+def cmd_check(conn, a):
+    problems, notes = [], []
+    rows = conn.execute("SELECT * FROM tracker.vw_applications ORDER BY app_id").fetchall()
+    jd = get_job_dir()
+    if jd is None:
+        notes.append("folder check skipped: JOBSEARCH_VAULT_DIR not set")
+    else:
+        for r in rows:
+            if r["folder"] and not (jd / r["folder"]).is_dir():
+                problems.append(f"#{r['app_id']} {r['company']}: folder missing on disk: {r['folder']}")
+    if conn.execute("SELECT count(*) AS n FROM jobs.fit_snapshot").fetchone()["n"] == 0:
+        notes.append("posting check skipped: jobs.fit_snapshot is empty")
+    else:
+        for r in conn.execute(
+                """SELECT a.app_id, a.company, a.posting_id FROM tracker.application a
+                    WHERE a.posting_id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM jobs.fit_snapshot f WHERE f.posting_id = a.posting_id)
+                    ORDER BY a.app_id"""):
+            problems.append(f"#{r['app_id']} {r['company']}: posting {r['posting_id']} not in jobs.fit_snapshot")
+    for r in conn.execute(
+            """SELECT lower(company) AS c, lower(employer_job_id) AS j, array_agg(app_id ORDER BY app_id) AS ids
+                 FROM tracker.application WHERE employer_job_id IS NOT NULL
+                GROUP BY 1, 2 HAVING count(*) > 1"""):
+        problems.append(f"duplicate (company, req) {r['c']} / {r['j']}: apps {', '.join(map(str, r['ids']))}")
+    today = date.today()
+    for r in rows:
+        if r["is_active"] and r["follow_up_due"] and r["follow_up_due"] < today:
+            problems.append(f"#{r['app_id']} {r['company']}: follow-up overdue since {r['follow_up_due']}")
+    for n in notes:
+        print(f"note: {n}")
+    for p in problems:
+        print(f"problem: {p}")
+    print(f"{len(rows)} applications checked, {len(problems)} problem{'s' if len(problems) != 1 else ''}")
+    return 1 if problems else 0
+
+
+class UsageError(Exception):
+    pass
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog="trk", description="Application tracker (PostgreSQL).")
+    sub = ap.add_subparsers(dest="cmd", metavar="command")
+    nr = argparse.ArgumentParser(add_help=False)
+    nr.add_argument("--no-render", action="store_true", help="do not re-render the markdown view")
+
+    p = sub.add_parser("ls", help="list applications (default: active)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--closed", action="store_true")
+    g.add_argument("--all", action="store_true")
+    g.add_argument("--status", metavar="STATUS")
+    p.set_defaults(fn=cmd_ls)
+
+    p = sub.add_parser("find", help="search company / role / req / posting id / app id (AND-ed)")
+    p.add_argument("terms", nargs="+")
+    p.set_defaults(fn=cmd_find)
+
+    p = sub.add_parser("show", help="one application: fields, contacts, history")
+    p.add_argument("app_id", type=int)
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("set", parents=[nr], help="change status")
+    p.add_argument("app_id", type=int)
+    p.add_argument("status")
+    p.add_argument("--date", help="status date YYYY-MM-DD (default today)")
+    p.add_argument("--note")
+    p.set_defaults(fn=cmd_set)
+
+    p = sub.add_parser("note", parents=[nr], help="add a note")
+    p.add_argument("app_id", type=int)
+    p.add_argument("text")
+    p.set_defaults(fn=cmd_note)
+
+    p = sub.add_parser("contact", parents=[nr], help="link a contact")
+    p.add_argument("app_id", type=int)
+    p.add_argument("name")
+    p.add_argument("--role", default="recruiter", choices=store.CONTACT_ROLES)
+    for k in ("email", "phone", "linkedin", "title", "company"):
+        p.add_argument(f"--{k}")
+    p.set_defaults(fn=cmd_contact)
+
+    p = sub.add_parser("edit", parents=[nr], help="edit fields (empty string clears; --posting none)")
+    p.add_argument("app_id", type=int)
+    for dest, (flag, _) in EDIT_OPTIONS.items():
+        p.add_argument(flag, dest=dest, default=None)
+    p.set_defaults(fn=cmd_edit)
+
+    p = sub.add_parser("add", parents=[nr], help="add an application (and its folder)")
+    p.add_argument("--company")
+    p.add_argument("--role")
+    p.add_argument("--req")
+    p.add_argument("--posting", help="20-hex posting id or 'none'; fills blanks from jobs.fit_snapshot")
+    p.add_argument("--source", choices=store.SOURCES)
+    p.add_argument("--status", default="built")
+    p.add_argument("--date", help="status date YYYY-MM-DD (default today)")
+    p.add_argument("--folder", help="auto (default when status is built) | none | <path under Job_Search>")
+    p.add_argument("--location")
+    p.add_argument("--pay")
+    p.set_defaults(fn=cmd_add)
+
+    p = sub.add_parser("render", help="write the markdown view")
+    p.add_argument("--preview", action="store_true", help="write the PREVIEW file")
+    p.add_argument("--force", action="store_true", help="overwrite even if the file was edited by hand")
+    p.set_defaults(fn=cmd_render)
+
+    p = sub.add_parser("check", help="validate folders, posting ids, duplicates, follow-ups")
+    p.set_defaults(fn=cmd_check)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        argv = ["ls"]
+    ap = build_parser()
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else 2
+    if not getattr(args, "fn", None):
+        ap.print_usage(sys.stderr)
+        return 2
+    try:
+        with db.connect() as conn:
+            rc = args.fn(conn, args)
+        return rc or 0
+    except UsageError as e:
+        print(f"trk: usage: {e}", file=sys.stderr)
+        return 2
+    except TrackerError as e:
+        print(f"trk: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001 - database / file problems: message, no traceback
+        print(f"trk: error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -206,3 +206,36 @@ def test_find_and_list(conn):
         store.list_apps(conn, status="bogus")
     rows = store.list_apps(conn, True)                         # ordered by status sort order
     assert [r["sort_order"] for r in rows] == sorted(r["sort_order"] for r in rows)
+
+
+# ---- review fixes: edit_fields, folder validation ----
+
+def test_edit_fields_atomic_and_one_event_per_field(conn):
+    a = _new(conn, role="Old Role")
+    before = len(_events(conn, a["app_id"]))
+    with pytest.raises(store.TrackerError):
+        store.edit_fields(conn, a["app_id"], {"role": "New Role", "source": "bogus"}, "t")
+    assert store.get(conn, a["app_id"])["role"] == "Old Role"
+    assert len(_events(conn, a["app_id"])) == before
+    row = store.edit_fields(conn, a["app_id"], {"role": "New Role", "location": "Remote", "notes": ""}, "t")
+    assert (row["role"], row["location"]) == ("New Role", "Remote")
+    evs = [e for e in _events(conn, a["app_id"]) if e["kind"] == "field"]
+    assert sorted(e["field"] for e in evs) == ["location", "role"]       # notes was already empty: no event
+
+
+def test_edit_fields_unknown_field_changes_nothing(conn):
+    a = _new(conn, role="Keep")
+    with pytest.raises(store.TrackerError):
+        store.edit_fields(conn, a["app_id"], {"role": "Changed", "status": "applied"}, "t")
+    assert store.get(conn, a["app_id"])["role"] == "Keep"
+
+
+def test_folder_validation_and_uniqueness(conn):
+    a, b = _new(conn), _new(conn)
+    for bad in ("../x", "/abs", "a/../../b", "C:/x"):
+        with pytest.raises(store.TrackerError):
+            store.edit_field(conn, a["app_id"], "folder", bad, "t")
+    assert store.edit_field(conn, a["app_id"], "folder", "Applications\\Fix_F1", "t")["folder"] == "Applications/Fix_F1"
+    with pytest.raises(store.TrackerError, match="already used"):
+        store.edit_field(conn, b["app_id"], "folder", "Applications/Fix_F1", "t")
+    assert store.edit_field(conn, a["app_id"], "folder", "none", "t")["folder"] is None

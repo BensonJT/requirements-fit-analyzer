@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 from backend.tracker import db, folders, render, store
 from backend.tracker.store import TrackerError
@@ -156,8 +157,8 @@ def cmd_edit(conn, a):
                if getattr(a, dest) is not None]
     if not changes:
         raise UsageError("edit needs at least one option (see trk edit --help)")
+    store.edit_fields(conn, a.app_id, dict(changes), actor())   # all or nothing
     for field, value in changes:
-        store.edit_field(conn, a.app_id, field, value, actor())
         print(f"#{a.app_id} {field} = {value!r}")
     rerender(conn, a)
 
@@ -190,12 +191,19 @@ def cmd_add(conn, a):
     if not company or not role:
         raise TrackerError("add needs --company and --role"
                            + (f" (posting {pid} is not in jobs.fit_snapshot)" if pid else ""))
-    mode = a.folder or ("auto" if a.status == "built" else "none")
+    mode = (a.folder or ("auto" if a.status == "built" else "none")).strip()
+    if mode.lower() in ("none", ""):
+        mode = "none"
     jd = None
     if mode != "none":
         jd = get_job_dir()
         if jd is None:
             raise TrackerError("JOBSEARCH_VAULT_DIR is not set; cannot create the folder (use --folder none)")
+        if mode != "auto":   # an explicit folder another application already uses: refuse before inserting
+            want = store.normalize_folder(mode)
+            other = store.folder_in_use(conn, want) if want else None
+            if other is not None:
+                raise TrackerError(f"folder {want!r} is already used by application #{other}; nothing was added")
     row = store.add_application(
         conn, company=company, role=role, actor=actor(), employer_job_id=req, posting_id=pid,
         location=loc, pay_text=pay, source=a.source or ("pipeline" if pid else "manual"),
@@ -206,11 +214,13 @@ def cmd_add(conn, a):
         try:
             kw = dict(app_id=app_id, company=row["company"], role=row["role"],
                       employer_job_id=row["employer_job_id"], posting_id=row["posting_id"])
-            rel = folders.create_folder(jd, **kw) if mode == "auto" else folders.use_folder(jd, mode, **kw)
+            rel = (folders.create_folder(jd, taken=lambda r: store.folder_in_use(conn, r) is not None, **kw)
+                   if mode == "auto" else folders.use_folder(jd, mode, **kw))
             store.edit_field(conn, app_id, "folder", rel, actor())
             print(f"folder {rel}")
-        except (TrackerError, OSError) as e:
-            print(f"warning: #{app_id} was added but the folder step failed: {e}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 - the application is committed; a retry must not duplicate it
+            print(f"warning: #{app_id} was added but the folder step failed ({type(e).__name__}: {e}); "
+                  f"set it with `trk edit {app_id} --folder <path>`", file=sys.stderr)
     rerender(conn, a)
 
 
@@ -228,6 +238,21 @@ def cmd_render(conn, a):
         print("Apply the change with trk, or rerun with --force to overwrite.", file=sys.stderr)
         return 1
     print(f"wrote {res.path}")
+    return 0
+
+
+def cmd_closed_report(conn, a):
+    """On demand only: nothing re-renders this file."""
+    jd = get_job_dir()
+    if jd is None:
+        raise TrackerError("JOBSEARCH_VAULT_DIR is not set")
+    if a.since:
+        try:
+            date.fromisoformat(a.since)
+        except ValueError:
+            raise TrackerError(f"--since {a.since!r} is not a YYYY-MM-DD date") from None
+    path, n = render.write_closed_report(conn, jd, status=a.status, since=a.since)
+    print(f"wrote {path} ({n} closed row{'s' if n != 1 else ''})")
     return 0
 
 
@@ -358,6 +383,11 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="overwrite even if the file was edited by hand")
     p.set_defaults(fn=cmd_render)
 
+    p = sub.add_parser("closed-report", help="write Application_Tracker_Closed.md (on-demand snapshot of closed rows)")
+    p.add_argument("--status", metavar="STATUS", help="only this closed status")
+    p.add_argument("--since", metavar="YYYY-MM-DD", help="only rows whose status date is on or after this")
+    p.set_defaults(fn=cmd_closed_report)
+
     p = sub.add_parser("sweep", parents=[nr], help="applied rows silent for --days (90) -> assumed-rejected")
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--apply", action="store_true", help="make the change (default: dry run)")
@@ -368,7 +398,17 @@ def build_parser():
     return ap
 
 
+def load_env(path=None):
+    """Load <repo>/.env (JOBSEARCH_VAULT_DIR and friends) without overriding real environment variables."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path or Path(__file__).resolve().parents[2] / ".env", override=False)
+    except Exception:  # noqa: BLE001 - a missing or unreadable .env must never stop trk
+        pass
+
+
 def main(argv=None):
+    load_env()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         argv = ["ls"]

@@ -263,7 +263,7 @@ def _opt(args, key, flag, out, kind=str):
         return
     if not isinstance(v, kind) or isinstance(v, bool):
         raise ToolInputError(f"{key} must be a {'string' if kind is str else 'number'}")
-    out += [flag, v]
+    out.append(f"{flag}={v}")   # `--flag=value` keeps a value that starts with '-' from being read as a flag
 
 
 def _app_id(args):
@@ -281,39 +281,45 @@ def trk_argv(name, args):
             raise ToolInputError("scope must be active, closed or all")
         out = ["ls"]
         if args.get("status"):
-            return out + ["--status", str(args["status"])]
+            return out + [f"--status={args['status']}"]
         return out + ([] if scope == "active" else [f"--{scope}"])
     if name == "tracker_find":
         terms = args.get("terms")
         if not isinstance(terms, list) or not terms or not all(isinstance(t, str) and t.strip() for t in terms):
             raise ToolInputError("terms is required (a non-empty list of strings)")
         return ["find", "--"] + [t.strip() for t in terms]
+    # Options first, then `--`, then positionals, so a value that starts with "-" cannot be read as a flag.
     if name == "tracker_show":
-        return ["show", _app_id(args)]
+        return ["show", "--", _app_id(args)]
     if name == "tracker_set_status":
-        out = ["set", _app_id(args), _text(args, "status")]
+        out = ["set"]
+        pos = [_app_id(args), _text(args, "status")]
         _opt(args, "date", "--date", out)
         _opt(args, "note", "--note", out)
-        return out
+        return out + ["--"] + pos
     if name == "tracker_note":
-        return ["note", _app_id(args), _text(args, "text")]
+        return ["note", "--", _app_id(args), _text(args, "text")]
     if name == "tracker_contact":
-        out = ["contact", _app_id(args), _text(args, "name")]
+        out = ["contact"]
+        pos = [_app_id(args), _text(args, "name")]
         for k in ("role", "email", "phone", "linkedin", "title", "company"):
             _opt(args, k, f"--{k}", out)
-        return out
+        return out + ["--"] + pos
     if name == "tracker_edit":
-        out = ["edit", _app_id(args)]
+        out = ["edit"]
+        pos = [_app_id(args)]
         for k, flag in (("next_action", "--next-action"), ("follow_up", "--follow-up"), ("closes", "--closes"),
                         ("role", "--role"), ("company", "--company"), ("req", "--req"), ("posting", "--posting"),
                         ("location", "--location"), ("pay", "--pay"), ("close_reason", "--close-reason"),
                         ("applied", "--applied"), ("source", "--source"), ("folder", "--folder"),
                         ("notes", "--notes")):
             _opt(args, k, flag, out)
-        if len(out) == 2:
+        if not out[1:]:
             raise ToolInputError("tracker_edit needs at least one field to change")
-        return out
+        return out + ["--"] + pos
     if name == "tracker_add":
+        if args.get("folder") not in (None, "auto", "none"):
+            raise ToolInputError("folder must be 'auto' or 'none' for tracker_add (set a path later with tracker_edit)")
         out = ["add"]
         for k in ("company", "role", "req", "posting", "source", "status", "date", "folder", "location", "pay"):
             _opt(args, k, f"--{k}", out)
@@ -361,6 +367,8 @@ def check_select(sql):
     """Heuristic guard; returns an error message or None. The real protection is the claude_ro role."""
     if not isinstance(sql, str) or not sql.strip():
         return "sql is required (a single SELECT statement)"
+    if "\\" in sql or re.search(r"(?<![A-Za-z0-9_$])[eE]\s*'", sql):
+        return "backslashes and E'...' string prefixes are not allowed"  # E-strings fool _strip_literals
     bare = _strip_literals(sql).strip().rstrip(";").strip()
     if ";" in bare:
         return "only one statement is allowed"
@@ -378,7 +386,8 @@ def pg_connect_ro():
     conn = psycopg.connect(host=os.environ.get("PGHOST", "localhost"), user="claude_ro",
                            dbname=os.environ.get("TRACKER_PGDATABASE") or "resume", row_factory=dict_row,
                            connect_timeout=10,
-                           options=f"-c default_transaction_read_only=on -c statement_timeout={QUERY_TIMEOUT_MS}")
+                           options=f"-c default_transaction_read_only=on -c statement_timeout={QUERY_TIMEOUT_MS} "
+                                   f"-c idle_in_transaction_session_timeout=5000 -c lock_timeout=5000")
     conn.read_only = True  # BEGIN READ ONLY; autocommit stays off, so the whole call is one such transaction
     return conn
 
@@ -403,7 +412,7 @@ def run_jobs_query(args):
     try:
         with pg_connect_ro() as conn:
             cur = conn.cursor(row_factory=tuple_row)
-            cur.execute(sql)
+            cur.execute(sql, prepare=True)  # extended protocol: Postgres refuses more than one statement
             if cur.description is None:
                 return _result("the statement returned no result set", True)
             cols = [d.name for d in cur.description]

@@ -300,3 +300,93 @@ def test_cli_sweep_dry_run_then_apply(conn, jd, capsys):
     assert "quarterly sweep" in row["events"][-1]["note"]
     assert run(capsys, "set", str(old["app_id"]), "screen")[0] == 0         # real news reopens it
     assert store.get(conn, old["app_id"])["is_active"]
+
+
+# ---- review fixes ----
+
+def test_add_explicit_folder_in_use_inserts_nothing(conn, jd, capsys):
+    assert run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "Applications/Dup")[0] == 0
+    rc, out, err = run(capsys, "add", "--company", "Beta LLC", "--role", "B", "--folder", "Applications/Dup")
+    assert rc == 1 and "already used" in err
+    assert conn.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"] == 1
+
+
+def test_add_bad_folder_value_inserts_nothing(conn, jd, capsys):
+    rc, _, err = run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "../escape")
+    assert rc == 1 and "relative" in err
+    assert conn.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"] == 0
+
+
+def test_add_folder_failure_after_insert_warns_exit_0(conn, jd, capsys, monkeypatch):
+    def boom(*a, **k):
+        raise psycopg.errors.UniqueViolation("simulated")
+    monkeypatch.setattr(store, "edit_field", boom)
+    rc, out, err = run(capsys, "add", "--company", "Acme Corp", "--role", "A")
+    assert rc == 0 and "added #1" in out and "folder step failed" in err
+    assert conn.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"] == 1
+
+
+def test_add_auto_skips_folder_value_already_in_db(conn, jd, capsys):
+    # a DB folder value with no directory on disk must not be reused by auto mode
+    _app(conn, company="Acme Corp", role="A", employer_job_id="R1", folder="Applications/AcmeCorp_A_R1")
+    conn.execute("UPDATE tracker.application SET employer_job_id = NULL")  # keep (company, req) unique
+    rc, out, err = run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--req", "R1")
+    assert rc == 0 and "folder Applications/AcmeCorp_A_R1_2" in out and not err.strip().startswith("warning: #")
+
+
+def test_edit_several_fields_all_or_nothing(conn, jd, capsys):
+    run(capsys, "add", "--company", "Acme Corp", "--role", "Keep", "--folder", "none")
+    rc, _, err = run(capsys, "edit", "1", "--source", "bogus", "--role", "Changed")
+    assert rc == 1
+    assert conn.execute("SELECT role FROM tracker.application").fetchone()["role"] == "Keep"
+    assert run(capsys, "edit", "1", "--source", "board", "--role", "Changed")[0] == 0
+    assert conn.execute("SELECT role FROM tracker.application").fetchone()["role"] == "Changed"
+
+
+def test_edit_folder_validated(conn, jd, capsys):
+    run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "none")
+    assert run(capsys, "edit", "1", "--folder", "../x")[0] == 1
+    assert run(capsys, "edit", "1", "--folder", "Applications/Ok_1")[0] == 0
+    assert run(capsys, "edit", "1", "--folder", "none")[0] == 0
+    assert conn.execute("SELECT folder FROM tracker.application").fetchone()["folder"] is None
+
+
+def test_dotenv_loaded_without_overriding(tmp_path, monkeypatch):
+    import backend.tracker.cli as c
+    env = tmp_path / ".env"
+    env.write_text("TRK_TEST_FROM_ENV=file\nTRK_TEST_KEEP=file\n")
+    monkeypatch.delenv("TRK_TEST_FROM_ENV", raising=False)
+    monkeypatch.setenv("TRK_TEST_KEEP", "real")
+    c.load_env(env)
+    import os
+    assert os.environ["TRK_TEST_FROM_ENV"] == "file" and os.environ["TRK_TEST_KEEP"] == "real"
+    monkeypatch.delenv("TRK_TEST_FROM_ENV", raising=False)
+
+
+def test_closed_report(conn, jd, capsys):
+    a = _app(conn, company="Acme | Corp", role="A", folder="Applications/Cl 1")
+    b = _app(conn, company="Beta LLC", role="B", status="applied", status_date="2026-01-05")
+    c = _app(conn, company="Gamma", role="C", status="applied")
+    _app(conn, company="Open Co", role="D")
+    store.set_status(conn, a["app_id"], "rejected", "t", status_date="2026-02-01")
+    store.set_status(conn, b["app_id"], "declined", "t", status_date="2026-03-01")
+    store.edit_field(conn, b["app_id"], "close_reason", "salary", "t")
+    store.set_status(conn, c["app_id"], "passed", "t", status_date="2026-03-10")
+    rc, out, _ = run(capsys, "closed-report")
+    assert rc == 0 and "3 closed rows" in out
+    text = (jd / render.CLOSED_NAME).read_text()
+    assert "node_id: PRO:job-application-tracker-closed" in text and "ai_edit_policy: read-only" in text
+    assert "not kept current" in text and "Closed: 3 (" in text
+    assert "Open Co" not in text and "Acme \\| Corp" in text and "[open](Applications/Cl%201/index.md)" in text
+    assert "| ID | Applied | Company | Role | Req | Status | Since | Reason | Folder |" in text
+    assert text.index("Gamma") < text.index("Beta LLC") < text.index("Acme")      # newest status date first
+    assert not (jd / (render.CLOSED_NAME + ".tmp")).exists()
+    run(capsys, "closed-report", "--status", "declined", "--since", "2026-02-15")
+    text = (jd / render.CLOSED_NAME).read_text()
+    assert "Beta LLC" in text and "Gamma" not in text and "Acme" not in text
+    assert run(capsys, "closed-report", "--since", "nope")[0] == 1
+    assert run(capsys, "closed-report", "--status", "bogus")[0] == 1
+    # never re-rendered by other commands
+    (jd / render.CLOSED_NAME).write_text("x")
+    run(capsys, "note", "1", "hi")
+    assert (jd / render.CLOSED_NAME).read_text() == "x"

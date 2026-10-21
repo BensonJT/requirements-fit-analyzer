@@ -93,7 +93,8 @@ def test_no_fuzzy_title_match_and_wrong_company_never_matches(pgc, duck):
 
 @pytest.mark.parametrize("status,applied,decision", [
     ("built", None, "hold"), ("passed", None, "pass"), ("closed-unsent", None, "pass"),
-    ("withdrawn", None, "pass"), ("withdrawn", "2026-09-05", "build"), ("applied", "2026-09-05", "build"),
+    ("withdrawn", None, "pass"), ("withdrawn", "2026-09-05", "build"),
+    ("declined", None, "pass"), ("declined", "2026-09-05", "build"), ("applied", "2026-09-05", "build"),
     ("rejected", "2026-09-05", "build"), ("assumed-rejected", "2026-09-05", "build"),
     ("interview", "2026-09-05", "build"), ("offer", "2026-09-05", "build"), ("passed", "2026-09-05", "pass")])
 def test_decision_for_pg(status, applied, decision):

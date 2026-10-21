@@ -142,6 +142,8 @@ def app(conn, company, role=None):
     ("Assumed Rejected", "Closed", True, "assumed-rejected"),
     ("Rejected - Poor Fit", "Closed", True, "rejected"),
     ("Declined", "Closed", True, "declined"),
+    ("Declined", "Closed", False, "passed"),              # user ruling: declined with no apply date = declined to pursue
+    ("Declined offer", "Active", False, "passed"),
     ("Withdrew", "Closed", True, "withdrawn"),
     ("Skip -  Not pursuing", "Closed", False, "passed"),
     ("Pass — Poor Fit", "Closed", False, "passed"),
@@ -307,3 +309,23 @@ def test_different_req_ids_never_merge(env, conn):
 def test_far_apart_dates_not_merged(env, conn):
     run(env)
     assert len(app(conn, "Sigma")) == 2
+
+
+def test_req_platform_needs_a_digit_and_loc_state_is_uppercase():
+    assert M.clean_role("Analyst (Deel ATS)")["employer_job_id"] is None
+    assert M.clean_role("Analyst (Workday 12345)")["employer_job_id"] == "12345"
+    assert M.clean_role("Analyst (Austin TX)")["location"] == "Austin TX"
+    hrs = M.clean_role("Analyst (20 hrs/wk)")
+    assert hrs["location"] is None and not hrs["clean"]
+
+
+def test_rerun_guard_covers_application_bullet(env, conn):
+    run(env)
+    a = app(conn, "Beta Inc")[0]
+    conn.execute("INSERT INTO tracker.application_bullet (app_id, bullet_id, position) VALUES (%s, 1, 1)", [a["app_id"]])
+    with pytest.raises(SystemExit) as e:
+        run(env)
+    assert "application_bullet" in str(e.value)
+    assert conn.execute("SELECT count(*) AS n FROM tracker.application_bullet").fetchone()["n"] == 1
+    assert run(env, "--force") == 0
+    assert conn.execute("SELECT count(*) AS n FROM tracker.application_bullet").fetchone()["n"] == 0

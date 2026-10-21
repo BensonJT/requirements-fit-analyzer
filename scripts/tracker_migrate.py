@@ -68,6 +68,8 @@ def map_status(text, section, has_date_applied):
     sect = section.strip().lower()
     for rx, status, confident in _RULES:
         if rx.search(t):
+            if status == "declined" and not has_date_applied:
+                return "passed", confident, ""     # user ruling: declined with no apply date = he declined to pursue it
             if sect == "closed" and status in SECTION_CLOSED_FALLBACK:
                 return SECTION_CLOSED_FALLBACK[status], True, ""      # user-confirmed section tiebreaker
             return status, confident, "" if confident else "weak text rule"
@@ -91,10 +93,10 @@ def parse_date(s):
     return None
 
 
-_LOC = re.compile(r"remote|hybrid|on-?site|work at home|\b[A-Z]{2}\b|united states|\bUSA?\b|multi-state"
-                  r"|multiple locations|\bnationwide\b", re.I)
+_LOC = re.compile(r"(?i:remote|hybrid|on-?site|work at home|united states|multi-state"
+                  r"|multiple locations|\bnationwide\b)|\b[A-Z]{2}\b|\bUSA?\b")   # state / US codes: uppercase only ("hrs/wk" is not a place)
 _REQ_LABELLED = re.compile(r"(?:^|\s)(?:req(?:uisition)?|job ?id|job|id)\s*#?:?\s*([A-Za-z0-9][A-Za-z0-9_-]{2,})$", re.I)
-_REQ_PLATFORM = re.compile(r"^(?:workday|greenhouse|lever|ashby|deel|taleo|icims)\s+([A-Za-z0-9_-]{3,})$", re.I)
+_REQ_PLATFORM = re.compile(r"^(?:workday|greenhouse|lever|ashby|deel|taleo|icims)\s+((?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})$", re.I)
 _REQ_BARE = re.compile(r"^[A-Za-z]{0,3}-?\d{4,}[A-Za-z0-9-]*$")
 _CLOSES = re.compile(r"(?:closes?|apply (?:by|before)|deadline)\s+(\d{4}-\d{2}-\d{2})", re.I)
 _PAY = re.compile(r"\$\s?\d")
@@ -535,14 +537,19 @@ def insertion_order(rows):
 
 # ---------------------------------------------------------------- database
 def load_db(conn, ordered, networks, force):
-    bad = conn.execute("SELECT count(*) AS n FROM tracker.event WHERE actor <> %s", [ACTOR]).fetchone()["n"]
-    if bad and not force:
-        raise SystemExit(f"refusing: {bad} event(s) have an actor other than '{ACTOR}' (real edits would be lost); "
-                         "use --force to wipe anyway")
     contact_ids, today = {}, dt.date.today()
     with conn.transaction():
-        conn.execute("TRUNCATE tracker.application, tracker.event, tracker.contact, tracker.app_contact, "
-                     "tracker.network RESTART IDENTITY CASCADE")
+        conn.execute("LOCK TABLE tracker.application IN ACCESS EXCLUSIVE MODE")   # no write can slip in after the check
+        bad = conn.execute("SELECT count(*) AS n FROM tracker.event WHERE actor <> %s", [ACTOR]).fetchone()["n"]
+        if bad and not force:
+            raise SystemExit(f"refusing: {bad} event(s) have an actor other than '{ACTOR}' (real edits would be lost); "
+                             "use --force to wipe anyway")
+        bullets = conn.execute("SELECT count(*) AS n FROM tracker.application_bullet").fetchone()["n"]
+        if bullets and not force:
+            raise SystemExit(f"refusing: tracker.application_bullet has {bullets} row(s) (would be lost); "
+                             "use --force to wipe anyway")
+        conn.execute("TRUNCATE tracker.application, tracker.application_bullet, tracker.event, tracker.contact, "
+                     "tracker.app_contact, tracker.network RESTART IDENTITY CASCADE")
         for r in ordered:
             notes = []
             if r.recruiter_residual:

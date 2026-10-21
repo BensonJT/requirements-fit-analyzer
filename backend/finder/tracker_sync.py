@@ -43,6 +43,12 @@ _NOT_APPLIED_STATUS = re.compile(r"not pursuing|not applied|\bskip|\bpass\b|clos
 _UNSENT_STATUS = re.compile(r"package (built|ready)|materials ready|unsent|evaluating|on hold|holding|pending", re.I)
 _DECISION_RANK = {"build": 2, "pass": 1, "hold": 0}   # one tracker row of several for a posting decides it
 
+TRACKER_SOURCE_ENV = "TRACKER_SOURCE"   # `markdown` (default) | `postgres`
+
+
+class TrackerSourceError(RuntimeError):
+    """TRACKER_SOURCE is invalid, or the Postgres tracker was selected but cannot be read."""
+
 
 def decision_for(row) -> tuple:
     """(decision, reason) a matched tracker row records. A `pass` carries an `other:` reason, which trains no
@@ -53,6 +59,26 @@ def decision_for(row) -> tuple:
     if _UNSENT_STATUS.search(status) or row.section.strip().lower() == "on hold":
         return "hold", None
     return "build", None
+
+
+def decision_for_pg(row) -> tuple:
+    """(decision, reason) for a Postgres tracker row (design section 8). `built` is an unsent package: hold;
+    `passed` / `closed-unsent` never went out: pass; `withdrawn` before applying (no date_applied): pass;
+    anything that was applied (date_applied set) is a build. A remaining status without a date (an interview or
+    rejection logged without the apply date) was still an application: build."""
+    status = (row.status or "").strip().lower()
+    if status == "built":
+        return "hold", None
+    if status in ("passed", "closed-unsent"):
+        return "pass", f"other: tracker status {status}"
+    if not _has_date(row.date_applied):
+        if status == "withdrawn":
+            return "pass", f"other: tracker status {status}"
+    return "build", None
+
+
+def _has_date(value) -> bool:
+    return bool((value or "").strip()) and value.strip() not in ("—", "-")
 
 
 def _now():
@@ -212,27 +238,71 @@ def match_rows(rows: list, postings: list) -> list:
     return out
 
 
-def sync(con, vault_dir: str, verbose: bool = False, log=print) -> dict:
-    """Rebuilds `tracker` from the markdown and records a tracker decision for each matched posting."""
-    path = job_search_dir(vault_dir) / TRACKER_FILE
-    if not path.exists():
-        log(f"Tracker sync: {path} not found; skipped.")
-        return {"rows": 0, "exact": 0, "fuzzy": 0, "none": 0}
-    rows = parse_tracker(path)
-    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id, url FROM postings").fetchall()
-    matches = match_rows(rows, postings)
-    now = _now()
-    counts = {"rows": len(rows), "exact": 0, "fuzzy": 0, "none": 0, "decisions_added": 0}
+def pg_rows(conn=None) -> list:
+    """TrackerRow records for every tracker.application row. Section comes from the status table
+    (active -> "Active", else "Closed"). Raises TrackerSourceError when Postgres cannot be read."""
+    own = conn is None
+    try:
+        if own:
+            from backend.tracker import db
+            conn = db.connect()
+        found = conn.execute("""SELECT a.posting_id, a.employer_job_id, a.company, a.role, a.status, a.date_applied,
+                                       s.is_active
+                                FROM tracker.application a JOIN tracker.status s USING (status)
+                                ORDER BY a.app_id""").fetchall()
+    except Exception as e:   # psycopg errors, missing module, bad credentials: never fall back to markdown
+        raise TrackerSourceError(f"TRACKER_SOURCE=postgres but the tracker database could not be read: {e}") from e
+    finally:
+        if own and conn is not None:
+            conn.close()
+    return [TrackerRow("Active" if r["is_active"] else "Closed",
+                       r["date_applied"].isoformat() if r["date_applied"] else "",
+                       r["company"], r["role"], r["status"], r["posting_id"], r["employer_job_id"])
+            for r in found]
+
+
+def match_rows_pg(rows: list, postings: list) -> list:
+    """(row, matched_posting_id, match_kind, ambiguous) per Postgres tracker row. Exact only, never fuzzy:
+    the row's posting_id when it exists in `postings`; else its employer_job_id equal to a req_id (or standing
+    alone inside the url) of a posting whose employer `company_matches`. More than one such posting matches
+    none (ambiguous=True). match_kind is 'posting_id', 'req_id' or 'none'. `postings` as for `match_rows`."""
+    known = {p[0] for p in postings}
+    employers = defaultdict(list)    # employer -> [(posting_id, req_id, url)]
+    for pid, employer, _title, _seen, *rest in postings:
+        employers[employer].append((pid, str(rest[0]).strip().lower() if rest and rest[0] else None,
+                                    str(rest[1]).lower() if len(rest) > 1 and rest[1] else ""))
+    employer_keys = {e: norm_company(e) for e in employers}
+    out = []
+    for r in rows:
+        if r.posting_id and r.posting_id in known:
+            out.append((r, r.posting_id, "posting_id", False))
+            continue
+        job_id = (r.job_id or "").strip().lower()
+        if not job_id:
+            out.append((r, None, "none", False))
+            continue
+        keys = company_keys(r.company)
+        url_re = re.compile(rf"(?<![0-9a-z]){re.escape(job_id)}(?![0-9a-z])")
+        cands = {pid for employer, key in employer_keys.items() if company_matches(key, keys)
+                 for pid, req, url in employers[employer] if req == job_id or url_re.search(url)}
+        if len(cands) == 1:
+            out.append((r, next(iter(cands)), "req_id", False))
+        else:
+            out.append((r, None, "none", len(cands) > 1))
+    return out
+
+
+def _apply(con, rows, matches, decide, counts, now):
+    """Rebuild the `tracker` mirror and record decisions. `matches` = (row, matched, kind) triples."""
     con.execute("BEGIN")
     try:
         con.execute("DELETE FROM tracker")
         wanted = {}   # posting_id -> (decision, reason, section) of its most advanced tracker row
         for r, matched, kind in matches:
-            counts[kind] += 1
             con.execute("INSERT INTO tracker VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [r.section, r.date_applied, r.company, r.role, r.status, r.posting_id, matched, kind, now])
             if matched:
-                decision, reason = decision_for(r)
+                decision, reason = decide(r)
                 if matched not in wanted or _DECISION_RANK[decision] > _DECISION_RANK[wanted[matched][0]]:
                     wanted[matched] = (decision, reason, r.section)
         for pid, (decision, reason, section) in wanted.items():
@@ -253,8 +323,54 @@ def sync(con, vault_dir: str, verbose: bool = False, log=print) -> dict:
     except Exception:
         con.execute("ROLLBACK")
         raise
+
+
+def sync(con, vault_dir: str, verbose: bool = False, log=print, source: Optional[str] = None, pg_conn=None) -> dict:
+    """Rebuilds `tracker` from the configured source and records a tracker decision for each matched posting.
+
+    `source` (default: $TRACKER_SOURCE, else `markdown`): `markdown` reads the vault file (fuzzy matching);
+    `postgres` reads tracker.application (exact matching only; raises TrackerSourceError if unreachable)."""
+    source = (source or os.environ.get(TRACKER_SOURCE_ENV) or "markdown").strip().lower()
+    if source == "postgres":
+        return _sync_pg(con, verbose, log, pg_conn)
+    if source != "markdown":
+        raise TrackerSourceError(f"{TRACKER_SOURCE_ENV}={source!r}: expected 'markdown' or 'postgres'")
+    path = job_search_dir(vault_dir) / TRACKER_FILE
+    if not path.exists():
+        log(f"Tracker sync: {path} not found; skipped.")
+        return {"rows": 0, "exact": 0, "fuzzy": 0, "none": 0}
+    rows = parse_tracker(path)
+    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id, url FROM postings").fetchall()
+    matches = match_rows(rows, postings)
+    now = _now()
+    counts = {"rows": len(rows), "exact": 0, "fuzzy": 0, "none": 0, "decisions_added": 0}
+    for _r, _m, kind in matches:
+        counts[kind] += 1
+    _apply(con, rows, matches, decision_for, counts, now)
     if verbose:
         for r, _, kind in matches:
             if kind == "none":
                 log(f"  unmatched: {r.section} | {r.date_applied} | {r.company} | {r.role}")
+    return counts
+
+
+def _sync_pg(con, verbose, log, pg_conn):
+    rows = pg_rows(pg_conn)
+    postings = con.execute("SELECT posting_id, employer, title, first_seen_at, req_id, url FROM postings").fetchall()
+    matched = match_rows_pg(rows, postings)
+    counts = {"source": "postgres", "rows": len(rows), "exact": 0, "fuzzy": 0, "none": 0, "posting_id": 0,
+              "req_id": 0, "ambiguous": 0, "decisions_added": 0}
+    for _r, _m, kind, ambiguous in matched:
+        counts[kind] += 1
+        if kind != "none":
+            counts["exact"] += 1
+        counts["ambiguous"] += ambiguous
+    _apply(con, rows, [(r, m, k) for r, m, k, _a in matched], decision_for_pg, counts, _now())
+    log(f"Tracker sync (postgres): {counts['rows']} rows, {counts['posting_id']} by posting_id, "
+        f"{counts['req_id']} by req_id, {counts['none']} unmatched ({counts['ambiguous']} ambiguous).")
+    if verbose:
+        for r, _, kind, ambiguous in matched:
+            if kind == "none":
+                log(f"  unmatched{' (ambiguous req)' if ambiguous else ''}: {r.section} | {r.date_applied} | "
+                    f"{r.company} | {r.role}")
     return counts

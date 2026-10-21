@@ -435,6 +435,47 @@ def test_tracker_sync_exact_fuzzy_none_and_decisions(tmp_path):
     assert again["decisions_added"] == 0 and con.execute("SELECT count(*) FROM tracker").fetchone()[0] == 5
 
 
+@pytest.mark.parametrize("status,section,decision", [
+    ("Applied", "Active", "build"), ("Rejected", "Closed", "build"), (None, "Closed", "build"),
+    ("Passed initial screen (2026-10-16)", "Active", "build"),
+    ("Package built, unsent", "Active", "hold"), ("Materials Ready", "Active", "hold"), ("", "On Hold", "hold"),
+    ("Not Pursuing", "Closed", "pass"), ("Pass — Poor Fit", "Closed", "pass"), ("Not Applied", "Closed", "pass"),
+    ("Recruiter inquiry sent (not applied)", "Active", "pass"), ("Closed before submission", "Closed", "pass"),
+])
+def test_tracker_decision_for_status(status, section, decision):
+    """User ruling 2026-10-20: only an application is a build; a built, unsent package is a hold."""
+    row = tracker_sync.TrackerRow(section, "2026-10-20", "Acme Corp", "Role", status)
+    got, reason = tracker_sync.decision_for(row)
+    assert got == decision
+    assert (reason or "").startswith("other:") == (decision == "pass")
+
+
+def test_tracker_sync_hold_becomes_build_once_applied_and_never_undoes_a_later_ruling(tmp_path):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    ids = _seed(con)
+    pid = ids["A"]
+    md = ("## Active\n\n| Date Applied | Company | Role | Status | Posting ID |\n| --- | --- | --- | --- | --- |\n"
+          "| — | Acme Corp | Process Excellence Lead | {status} | {pid} |\n")
+    path = tmp_path / "Application_Tracker.md"
+    latest = lambda: con.execute("SELECT decision FROM vw_decisions WHERE posting_id = ?", [pid]).fetchone()[0]
+
+    path.write_text(md.format(status="Package built, unsent", pid=pid))
+    assert tracker_sync.sync(con, str(tmp_path), log=_quiet)["decisions_added"] == 1 and latest() == "hold"
+    assert tracker_sync.sync(con, str(tmp_path), log=_quiet)["decisions_added"] == 0          # unchanged: no new row
+
+    con.execute("INSERT INTO decisions VALUES (?, 'pass', 'requirement: x', 'cli', NULL, ?)",
+                [pid, tracker_sync._now()])                                                  # the user rules later
+    path.write_text(md.format(status="Not Pursuing", pid=pid))
+    tracker_sync.sync(con, str(tmp_path), log=_quiet)
+    assert latest() == "pass" and con.execute(
+        "SELECT count(*) FROM decisions WHERE posting_id = ? AND source = 'tracker'", [pid]).fetchone()[0] == 1
+
+    path.write_text(md.format(status="Applied", pid=pid))                    # an application wins over the pass
+    tracker_sync.sync(con, str(tmp_path), log=_quiet)
+    assert latest() == "build"
+    con.close()
+
+
 def test_match_rows_fuzzy_prefers_a_posting_near_the_application_date():
     """A 2025 application must not fuzzy-match a same-titled 2026 req at the same employer --
     only a posting first seen within FUZZY_MATCH_WINDOW_DAYS of the tracker's date applied

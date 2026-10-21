@@ -1,8 +1,10 @@
 """Mirrors the vault's Application_Tracker.md into the `tracker` table and matches rows to postings.
 
 The markdown stays the source of truth; this module only reads it. A matched tracker row
-also records a `decisions` row (source 'tracker', decision 'build'), so a tracked posting is
-never surfaced again and later serves as a positive label.
+also records a `decisions` row (source 'tracker'). Only an application is a `build` (a positive
+label for every lens model); a package built but not sent is a `hold`, and an explicit
+not-applied status a `pass` (user ruling 2026-10-20: Claude recommends and builds packages, so
+a built package is not the user's pick). See `decision_for`.
 """
 import os
 import re
@@ -31,6 +33,24 @@ class TrackerRow:
     role: str
     status: Optional[str] = None
     posting_id: Optional[str] = None
+
+
+# Tracker status text -> decision (user ruling 2026-10-20). Anything else (Applied, Rejected, Interviewing,
+# a blank status...) is an application: `build`, as before.
+_NOT_APPLIED_STATUS = re.compile(r"not pursuing|not applied|\bskip|\bpass\b|closed before submission", re.I)
+_UNSENT_STATUS = re.compile(r"package (built|ready)|materials ready|unsent|evaluating|on hold|holding|pending", re.I)
+_DECISION_RANK = {"build": 2, "pass": 1, "hold": 0}   # one tracker row of several for a posting decides it
+
+
+def decision_for(row) -> tuple:
+    """(decision, reason) a matched tracker row records. A `pass` carries an `other:` reason, which trains no
+    lens model (features.training_set drops label-0 decision rows) but stops the posting resurfacing."""
+    status = (row.status or "").strip()
+    if _NOT_APPLIED_STATUS.search(status):
+        return "pass", f"other: tracker status {status}"
+    if _UNSENT_STATUS.search(status) or row.section.strip().lower() == "on hold":
+        return "hold", None
+    return "build", None
 
 
 def _now():
@@ -170,14 +190,29 @@ def sync(con, vault_dir: str, verbose: bool = False, log=print) -> dict:
     con.execute("BEGIN")
     try:
         con.execute("DELETE FROM tracker")
+        wanted = {}   # posting_id -> (decision, reason, section) of its most advanced tracker row
         for r, matched, kind in matches:
             counts[kind] += 1
             con.execute("INSERT INTO tracker VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [r.section, r.date_applied, r.company, r.role, r.status, r.posting_id, matched, kind, now])
-            if matched and not con.execute("SELECT 1 FROM decisions WHERE posting_id = ? AND source = 'tracker'",
-                                           [matched]).fetchone():
-                con.execute("INSERT INTO decisions VALUES (?, 'build', NULL, 'tracker', ?, ?)", [matched, r.section, now])
-                counts["decisions_added"] += 1
+            if matched:
+                decision, reason = decision_for(r)
+                if matched not in wanted or _DECISION_RANK[decision] > _DECISION_RANK[wanted[matched][0]]:
+                    wanted[matched] = (decision, reason, r.section)
+        for pid, (decision, reason, section) in wanted.items():
+            # Record a tracker decision when the tracker's call changes (a hold becomes a build once applied).
+            # Only an application overrides a later ruling made elsewhere (`mark`, a sheet): a tracker hold or
+            # pass never undoes one.
+            prev = con.execute("""SELECT decision, decided_at FROM decisions WHERE posting_id = ? AND source = 'tracker'
+                                  ORDER BY decided_at DESC LIMIT 1""", [pid]).fetchone()
+            if prev and prev[0] == decision:
+                continue
+            if decision != "build" and con.execute(
+                    "SELECT 1 FROM decisions WHERE posting_id = ? AND source != 'tracker' AND decided_at > ?",
+                    [pid, prev[1] if prev else datetime.min]).fetchone():
+                continue
+            con.execute("INSERT INTO decisions VALUES (?, ?, ?, 'tracker', ?, ?)", [pid, decision, reason, section, now])
+            counts["decisions_added"] += 1
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")

@@ -2,8 +2,9 @@
 """Snapshot the pipeline's fit population from DuckDB into PostgreSQL (schema `jobs`).
 
 Design: DESIGN_tracker_db.md section 7. Replaces jobs.fit_snapshot and jobs.decisions wholesale in ONE
-transaction (readers see the old snapshot until commit), records a jobs.snapshot_run row, then
-CLUSTERs and ANALYZEs. DuckDB is opened read-only; Postgres is the database `resume` unless --db says
+transaction (the swap is atomic, but TRUNCATE holds an exclusive lock, so readers wait for the load's few
+seconds; lock_timeout 60 s and statement_timeout 10 min keep a stuck lock from hanging the launcher),
+records a jobs.snapshot_run row, then CLUSTERs and ANALYZEs. DuckDB is opened read-only; Postgres is the database `resume` unless --db says
 otherwise.
 
     .venv/bin/python scripts/pg_snapshot.py [--duckdb db/jobsearch.duckdb] [--db NAME]
@@ -79,6 +80,8 @@ def fetch(duck, ids):
 
 def load(pg, snap, decs, t0, source):
     """Replace jobs.fit_snapshot and jobs.decisions in one transaction, then CLUSTER and ANALYZE."""
+    pg.execute("SET lock_timeout = '60s'")        # fail instead of waiting forever behind a long reader
+    pg.execute("SET statement_timeout = '10min'")
     with pg.transaction():
         pg.execute("TRUNCATE jobs.fit_snapshot, jobs.decisions")
         with pg.cursor() as cur:

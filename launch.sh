@@ -390,7 +390,7 @@ done
 # A failure only warns; STATUS (and so the run's exit code and timings line) is left as the steps set it.
 echo
 echo "════ $(date '+%H:%M:%S')  $PY -u scripts/pg_snapshot.py"
-"$PY" -u scripts/pg_snapshot.py || echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
+timeout 900 "$PY" -u scripts/pg_snapshot.py || echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
 
 SECS=$(( $(date +%s) - RUN_STARTED ))
 echo

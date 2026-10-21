@@ -111,6 +111,18 @@ def test_failed_write_leaves_no_row(conn):
     assert orphans == 0
 
 
+def test_source_values(conn):
+    for src in store.SOURCES:
+        assert _new(conn, source=src)["source"] == src
+    assert "sheet" in store.SOURCES
+    with pytest.raises(store.TrackerError):
+        _new(conn, source="psychic")
+    a = _new(conn)
+    assert store.edit_field(conn, a["app_id"], "source", "sheet", "owner")["source"] == "sheet"
+    with pytest.raises(psycopg.errors.CheckViolation):          # the DB constraint itself
+        conn.execute("UPDATE tracker.application SET source = 'psychic' WHERE app_id = %s", [a["app_id"]])
+
+
 def test_note_event(conn):
     a = _new(conn)
     store.add_note(conn, a["app_id"], "HM review next week", "owner")

@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS tracker.application (
   location        text,
   pay_text        text,                           -- as posted
   source          text NOT NULL DEFAULT 'manual'
-                  CHECK (source IN ('pipeline','linkedin','recruiter','referral','board','manual','migrated')),
+                  CHECK (source IN ('pipeline','linkedin','recruiter','referral','board','manual','migrated','sheet')),
   folder          text UNIQUE,                    -- vault-relative application folder
   status          text NOT NULL REFERENCES tracker.status,
   status_date     date NOT NULL,

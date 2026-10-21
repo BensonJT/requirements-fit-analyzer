@@ -17,7 +17,7 @@ EDITABLE_FIELDS = {
     "date_applied": "date", "closes_on": "date", "follow_up_due": "date",
     "next_action": "text", "close_reason": "text", "notes": "text",
 }
-SOURCES = ("pipeline", "linkedin", "recruiter", "referral", "board", "manual", "migrated")
+SOURCES = ("pipeline", "linkedin", "recruiter", "referral", "board", "manual", "migrated", "sheet")
 CONTACT_ROLES = ("recruiter", "hiring_manager", "panelist", "referral", "staffing", "other")
 CONTACT_FIELDS = ("title", "company", "email", "phone", "linkedin", "notes")
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# trk: the application tracker CLI. Resolves the repo from this script's real location.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+repo="$(cd -P "$(dirname "$src")/.." && pwd)"
+cd "$repo" || exit 1
+exec "$repo/.venv/bin/python" -m backend.tracker.cli "$@"

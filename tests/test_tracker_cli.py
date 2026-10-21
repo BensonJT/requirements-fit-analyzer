@@ -11,6 +11,12 @@ TEST_DB = "resume_test_wp2"
 PID = "0123456789abcdef0123"
 
 
+@pytest.fixture(autouse=True)
+def _pre_cutover(monkeypatch):
+    """These tests were written against the preview default; the cutover test sets it explicitly."""
+    monkeypatch.setattr(render, "CUTOVER", False)
+
+
 @pytest.fixture(scope="session")
 def _db():
     try:
@@ -155,7 +161,7 @@ def test_existing_unlogged_file_refused(conn, jd):
 
 
 def test_cutover_false_never_writes_live(conn, jd, monkeypatch):
-    assert render.CUTOVER is False
+    monkeypatch.setattr(render, "CUTOVER", False)
     _app(conn)
     render.render(conn, jd, force=True)
     render.render(conn, jd, preview=False, force=True)

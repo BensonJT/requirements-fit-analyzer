@@ -284,3 +284,19 @@ def test_cli_errors(conn, jd, capsys):
     assert run(capsys, "edit", "1")[0] == 2                    # no options
     assert run(capsys, "set", "x")[0] == 2                     # argparse usage
     assert run(capsys, "nonsense")[0] == 2
+
+
+def test_cli_sweep_dry_run_then_apply(conn, jd, capsys):
+    old = _app(conn, status="applied", status_date="2025-01-01")
+    _app(conn, company="Beta LLC", status="applied")                      # today: too recent
+    _app(conn, company="Gamma Inc", status="screen", status_date="2025-01-01")   # not 'applied'
+    rc, out, _ = run(capsys, "sweep")
+    assert rc == 0 and "Acme Corp" in out and "Beta LLC" not in out and "Gamma" not in out and "dry run" in out
+    assert store.get(conn, old["app_id"])["status"] == "applied"
+    rc, out, _ = run(capsys, "sweep", "--apply")
+    assert rc == 0 and "marked 1 row(s) assumed-rejected" in out
+    row = store.get(conn, old["app_id"])
+    assert row["status"] == "assumed-rejected"
+    assert "quarterly sweep" in row["events"][-1]["note"]
+    assert run(capsys, "set", str(old["app_id"]), "screen")[0] == 0         # real news reopens it
+    assert store.get(conn, old["app_id"])["is_active"]

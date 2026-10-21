@@ -70,7 +70,11 @@ node_id: TEST:tracker
 | 2026-07-04 | Rho | Shared Posting Old | Rejected | 2026-07-05 | | | PID_DUP |
 | 2026-09-04 | Rho | Shared Posting New | Rejected | 2026-09-05 | | | PID_DUP |
 | 2026-06-01 | Sigma | Folder Twin | Rejected | 2026-06-02 | | | |
-| 2026-06-02 | Sigma | Folder Twin | Rejected | 2026-06-03 | | | |
+| 2026-06-20 | Sigma | Folder Twin | Rejected | 2026-06-21 | | | |
+| 2026-05-01 | Upsilon | Same Job Role | Applied | 2026-05-02 | Quinn Reed | n1 | |
+| 2026-05-03 | Upsilon | Same Job Role | Rejected | 2026-05-10 | | n2 | |
+| 2026-04-01 | Phi | Two Reqs Role (req P1000) | Rejected | 2026-04-02 | | | |
+| 2026-04-01 | Phi | Two Reqs Role (req P2000) | Rejected | 2026-04-02 | | | |
 | 2026-06-03 | Tau | Quarterly Review Analyst | Rejected | 2026-06-04 | | | |
 """
 
@@ -143,6 +147,7 @@ def app(conn, company, role=None):
     ("Pass — Poor Fit", "Closed", False, "passed"),
     ("Closed before submission", "Closed", False, "closed-unsent"),
     ("No Longer Posted", "Closed", False, "closed-unsent"),
+    ("Not Applied", "Closed", False, "passed"),
     ("On Hold", "Closed", False, "passed"),               # user ruling: status text On Hold = decided not to apply
     ("Evaluating", "Closed", False, "closed-unsent"),     # section tiebreaker: built text in Closed
     ("Applied", "Closed", True, "assumed-rejected"),
@@ -150,6 +155,12 @@ def app(conn, company, role=None):
 ])
 def test_status_rules(text, section, dated, expected):
     assert M.map_status(text, section, dated)[0] == expected
+
+
+@pytest.mark.parametrize("text,section", [("Not Applied", "Closed"), ("Applied", "Closed"), ("Recruiter Call", "Closed"),
+                                           ("RTR unsigned - holding lightly", "Active")])
+def test_rulings_are_confident(text, section):
+    assert M.map_status(text, section, True)[1] is True
 
 
 def test_status_unmatched_defaults():
@@ -170,9 +181,9 @@ def test_clean_role():
 def test_load_numbering_and_fields(env, conn):
     assert run(env) == 0
     n = conn.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"]
-    assert n == 21
+    assert n == 24
     order = [r["company"] for r in conn.execute("SELECT company FROM tracker.application ORDER BY app_id").fetchall()]
-    assert order[:2] == ["Sigma", "Sigma"]
+    assert order[0] == "Phi"
     dated = [r["date_applied"] for r in conn.execute("SELECT date_applied FROM tracker.application ORDER BY app_id").fetchall()]
     known = [d for d in dated if d]
     assert known == sorted(known) and dated[len(known):] == [None] * (len(dated) - len(known))
@@ -245,7 +256,7 @@ def test_rerun_is_idempotent(env, conn):
     run(env)
     second = conn.execute("SELECT app_id, company, role, status, posting_id, folder FROM tracker.application ORDER BY app_id").fetchall()
     assert first == second
-    assert conn.execute("SELECT count(*) AS n FROM tracker.event").fetchone()["n"] == 2 * len(first)
+    assert conn.execute("SELECT count(*) AS n FROM tracker.event").fetchone()["n"] == 2 * len(first) + 1      # +1: the merged-away duplicate row
     assert conn.execute("SELECT min(app_id) AS m FROM tracker.application").fetchone()["m"] == 1
 
 
@@ -274,3 +285,25 @@ def test_dry_run_touches_nothing(env, conn):
 def test_dry_run_needs_no_database(env, monkeypatch):
     monkeypatch.setattr(db, "connect", lambda *a, **k: (_ for _ in ()).throw(AssertionError("connected")))
     assert run(env, "--dry-run") == 0
+
+
+def test_merge_same_job_duplicates(env, conn):
+    run(env)
+    ups = app(conn, "Upsilon")
+    assert len(ups) == 1 and ups[0]["status"] == "rejected"           # latest status date wins
+    assert ups[0]["date_applied"] == dt.date(2026, 5, 1) or ups[0]["date_applied"] == dt.date(2026, 5, 3)
+    ev = conn.execute("SELECT note FROM tracker.event WHERE app_id = %s AND kind = 'migrated' ORDER BY event_id", [ups[0]["app_id"]]).fetchall()
+    assert len(ev) == 2 and "[merged duplicate]" in ev[1]["note"] and "Applied" in ev[1]["note"]
+    assert conn.execute("SELECT count(*) AS n FROM tracker.app_contact WHERE app_id = %s", [ups[0]["app_id"]]).fetchone()["n"] == 1
+    text = env["report"].read_text(encoding="utf-8")
+    assert "## Merged duplicates" in text and "no req id; date applied within 3 days" in text
+
+
+def test_different_req_ids_never_merge(env, conn):
+    run(env)
+    assert sorted(r["employer_job_id"] for r in app(conn, "Phi")) == ["P1000", "P2000"]
+
+
+def test_far_apart_dates_not_merged(env, conn):
+    run(env)
+    assert len(app(conn, "Sigma")) == 2

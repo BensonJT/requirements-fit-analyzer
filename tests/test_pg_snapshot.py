@@ -101,3 +101,9 @@ def test_locked_duckdb_exits_nonzero(pg, duck_path, capsys):
     finally:
         holder.close()
     assert "locked" in capsys.readouterr().err
+
+
+def test_load_sets_lock_and_statement_timeouts(pg):
+    snap_mod.load(pg, [], [], 0, "test")
+    got = pg.execute("SELECT current_setting('lock_timeout') AS l, current_setting('statement_timeout') AS s").fetchone()
+    assert (got["l"], got["s"]) == ("1min", "10min")

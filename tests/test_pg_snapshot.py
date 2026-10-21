@@ -67,7 +67,7 @@ def _ids(pg):
 
 def test_population_and_columns(pg, duck_path):
     # the tracker table has an application for D (closed, not decided); absent-table case is its own test
-    pg.execute("INSERT INTO tracker.application (company, role, posting_id, status) VALUES ('Acme Corp', 'Analyst', %s, 'built')", [D])
+    pg.execute("INSERT INTO tracker.application (company, role, posting_id, status, status_date) VALUES ('Acme Corp', 'Analyst', %s, 'built', '2026-10-01')", [D])
     assert snap_mod.run(duck_path, TEST_DB) == 0
     assert _ids(pg) == {A, C, D}  # B rejected, E closed and unnamed
     rows = {r["posting_id"]: r for r in pg.execute("SELECT * FROM jobs.fit_snapshot")}

@@ -9,7 +9,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from backend.tracker import db, folders, render, store
+from backend.tracker import db, folders, gsheet, render, store
 from backend.tracker.store import TrackerError
 
 EDIT_OPTIONS = {   # argparse dest -> (flag, store field)
@@ -69,12 +69,21 @@ def rerender(conn, args):
             print("warning: JOBSEARCH_VAULT_DIR not set; tracker view not re-rendered", file=sys.stderr)
             return
         res = render.render(conn, jd)
+        gsheet.spawn()
         if res.status == "refused":
             print(f"warning: {res.path.name} was edited by hand ({res.notes[0]}); the database change "
                   "is saved but the view was NOT updated.\nApply your edit with trk, then run "
                   "`trk render --force` to overwrite the file.", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - the DB write already succeeded
         print(f"warning: could not render the tracker view: {e}", file=sys.stderr)
+
+
+def cmd_sheet(conn, a):
+    """Refresh the Google Sheet view now (in the foreground)."""
+    if not gsheet.configured():
+        raise UsageError("TRACKER_SHEET_ID is not set in .env (or TRACKER_PGDATABASE is not the real database)")
+    counts = gsheet.run_locked(conn)
+    print("refreshed the tracker sheet: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
 
 
 def cmd_ls(conn, a):
@@ -229,6 +238,8 @@ def cmd_render(conn, a):
     if jd is None:
         raise TrackerError("JOBSEARCH_VAULT_DIR is not set")
     res = render.render(conn, jd, preview=a.preview, force=a.force)
+    if not a.preview:
+        gsheet.spawn()
     if res.status == "refused":
         print(f"refused: {res.path} {res.notes[0]}; not overwritten.", file=sys.stderr)
         lines = res.diff.splitlines()
@@ -348,6 +359,9 @@ views and upkeep:
                                        --no-render skips that). A hand-edited view is refused unless --force.
   trk closed-report [--status S] [--since YYYY-MM-DD]
                                        write Application_Tracker_Closed.md, a one-time snapshot
+  trk sheet                            refresh the Google Sheet view (wide columns, filters, contacts,
+                                       history). Every write and render also refreshes it in the
+                                       background; the log is logs/tracker_sheet.log. One way only.
   trk check                            folders, posting ids, duplicates, overdue follow-ups
   trk sweep [--days 90]                list applied rows silent that long; --apply moves them to assumed-rejected
 
@@ -433,6 +447,9 @@ def build_parser():
     p.add_argument("--days", type=int, default=90)
     p.add_argument("--apply", action="store_true", help="make the change (default: dry run)")
     p.set_defaults(fn=cmd_sweep)
+
+    p = sub.add_parser("sheet", help="refresh the Google Sheet view now (writes also refresh it in the background)")
+    p.set_defaults(fn=cmd_sheet)
 
     p = sub.add_parser("check", help="validate folders, posting ids, duplicates, follow-ups")
     p.set_defaults(fn=cmd_check)

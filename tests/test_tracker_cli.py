@@ -112,12 +112,13 @@ def test_render_sections_and_content(conn, jd):
     res = render.render(conn, jd, today=TODAY, now=NOW)
     assert res.status == "written" and res.path.name == "Application_Tracker_PREVIEW.md"
     t = res.path.read_text()
-    assert "## Active (1)" in t and "## Closed (1)" in t and "## Consultant networks (1)" in t
+    assert "## Active (1)" in t and "## Consultant networks (1)" in t
+    assert "## Closed" not in t and "Closed: 1 (" in t and "trk ls --closed" in t
     assert "node_id: PRO:job-application-tracker-preview" in t
-    assert "1 built, 1 rejected. Follow-ups due within 7 days: 1." in t
+    assert "1 built. Follow-ups due within 7 days: 1." in t and "Closed: 1 (1 rejected)." in t
     assert "Follow up \\| call" in t and "Pat Example (recruiter)" in t
     assert "[open](Applications/AcmeCorp_SrAnalyst_R123/index.md)" in t
-    assert "| 2 |" in t and "| Netco | " in t
+    assert "| 2 |" not in t and "Beta LLC" not in t and "| Netco | " in t
     assert all(l.startswith("|") for l in t.splitlines() if "| Acme" in l or "| Beta" in l)
 
 

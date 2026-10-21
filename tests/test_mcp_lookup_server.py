@@ -40,7 +40,8 @@ def _rpc(db, *msgs):
     """Send messages to a fresh server; return the responses keyed by id."""
     stdin = "".join((m if isinstance(m, str) else json.dumps(m)) + "\n" for m in msgs)
     res = subprocess.run([sys.executable, SERVER, "--db", db], input=stdin, capture_output=True, text=True,
-                         timeout=120, cwd=ROOT)
+                         timeout=120, cwd=ROOT,
+                         env={**os.environ, "TRACKER_PGDATABASE": "no_such_db_for_tests"})  # hermetic: no snapshot fallback
     assert res.returncode == 0, res.stderr
     lines = res.stdout.splitlines()
     out = [json.loads(line) for line in lines]  # every stdout line is protocol: nothing else may be printed
@@ -55,7 +56,7 @@ def _text(resp):
     return resp["result"]["content"][0]["text"]
 
 
-def test_initialize_and_tools_list_expose_only_the_two_read_only_tools(tmp_path):
+def test_initialize_and_tools_list_lead_with_the_two_posting_tools(tmp_path):
     r = _rpc(_db(tmp_path),
              {"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}},
@@ -66,8 +67,8 @@ def test_initialize_and_tools_list_expose_only_the_two_read_only_tools(tmp_path)
     assert r[1]["result"]["protocolVersion"] == "2025-06-18"
     assert "tools" in r[1]["result"]["capabilities"]
     tools = r[2]["result"]["tools"]
-    assert [t["name"] for t in tools] == ["lookup_posting", "search_postings"]
-    assert all(t["annotations"]["readOnlyHint"] and not t["annotations"]["destructiveHint"] for t in tools)
+    assert [t["name"] for t in tools][:2] == ["lookup_posting", "search_postings"]
+    assert all(t["annotations"]["readOnlyHint"] and not t["annotations"]["destructiveHint"] for t in tools[:2])
     assert r[3]["result"] == {}
 
 

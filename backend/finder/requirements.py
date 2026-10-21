@@ -18,7 +18,7 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-09-30.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-10-20.1"   # bump when splitting or classing changes (part of the requirement cache key)
                                     # 2026-09-30.1: USAJobs paragraph dumps -- an inline qualification opener
                                     # ("SPECIALIZED EXPERIENCE GS-14:", "Specialized experience is defined as:")
                                     # opens Required mid-paragraph; application mechanics (time-in-grade, SF-50,
@@ -56,6 +56,19 @@ PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you
                    r"|need from you|to be successful"
                    # 2026-09-29.3: Grafana's "What Makes You a Great Fit:" was read as more responsibilities
                    r"|great fit|good fit|strong fit|makes you")
+# 2026-10-20.1: the SOFT person headings -- a portrait of the candidate, not a list of gates. Capital One's "Who you
+# are:" ("Do-er:", "Team Player:", "You ask why...") filed seven traits as Required at weight 1.0, above its real
+# Basic Qualifications (Bachelor's 0.54), so the top-18 cut, the judge and Jev read the traits as the bar. When the
+# posting ALSO has an explicit Required heading, a soft block's lines are Preferred unless they are qualification-
+# shaped (years / degree / "Must"); with no other Required heading, the soft block still carries the requirements.
+SOFT_PERSON_HEADINGS = (r"who you are|about you|this is you|ideal candidate|candidate profile|your profile|right fit"
+                        r"|great fit|good fit|strong fit|makes you|to be successful|what we look for"
+                        r"|what we.re looking for|what we are looking for|what we seek|your background")
+# A heading that also names a gate list stays hard: "Top skills or competencies to be successful:", "Here is what you
+# need to be successful:" (both measured 2026-10-20 -- real experience lines that the soft rule alone demoted).
+HARD_PERSON_HEADINGS = (r"skills|knowledge|experience|education|competenc|expertise|you have|you bring|you.ll bring"
+                        r"|you will bring|you.re bringing|we expect|must.haves?|you must have|you should have"
+                        r"|what you will need|you need|you.ll need|what we need|need from you|what it takes")
 # Preferred headings the rules' PREFERRED_HEADINGS does not carry (splitter only; the rule engine is unchanged).
 SPLITTER_PREFERRED_HEADINGS = r"desirable|a plus|good to have|\bwe prefer\b|\bprefer(?:red)? to have\b"   # 2026-09-29.4: RTX "Qualifications We Prefer"
 DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits|perks|what we offer|why join"
@@ -420,13 +433,15 @@ def split_requirements(text: str, max_units: int = 0) -> list:
     lines = rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or "")))
     kinds = [_heading_kind(l) if l else None for l in lines]
     has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
+    persona = [k == "required" and _soft_person_heading(l) for l, k in zip(lines, kinds)]
+    explicit_required = any(k == "required" and not soft for k, soft in zip(kinds, persona))
     section = "intro" if has_headings else "body"
     units, seen, qual_shaped = [], set(), []
-    for line, kind in zip(lines, kinds):
+    for line, kind, soft in zip(lines, kinds, persona):
         if not line:
             continue
         if kind is not None:
-            section = kind
+            section = "persona" if soft else kind
             continue
         if section == "drop" or NOTICE.search(line) or _subheading(line):
             continue
@@ -444,6 +459,9 @@ def split_requirements(text: str, max_units: int = 0) -> list:
             # 2026-09-29.2: a stated status ("..., preferred", "Must ...") belongs to its own sentence, not to every
             # sentence the rejoined line carries
             line_section = inline_section(piece) or section
+            if line_section == "persona":
+                line_section = ("required" if not explicit_required or _qualification_shaped(piece)
+                                else "preferred")
             if not (10 <= len(piece) <= MAX_UNIT + 50):   # short level lines count as level; short work drops below
                 continue
             klass, unit_text = classify(piece)
@@ -461,6 +479,14 @@ def split_requirements(text: str, max_units: int = 0) -> list:
         keep = sorted(range(len(units)), key=lambda i: (-units[i].weight, i))[:max_units]
         units = [units[i] for i in sorted(keep)]
     return units
+
+
+def _soft_person_heading(line: str) -> bool:
+    """A Required-kind heading that is a candidate portrait ("Who you are"), not a gate list ("Basic
+    Qualifications", "Requirements", "What you bring")."""
+    s = line.strip().rstrip(":")
+    return (bool(re.search(SOFT_PERSON_HEADINGS, s, re.I)) and not re.search(P.REQUIRED_HEADINGS, s, re.I)
+            and not re.search(HARD_PERSON_HEADINGS, s, re.I))
 
 
 def qualification_shaped(piece: str) -> bool:
@@ -488,7 +514,8 @@ def _rescue_required(units: list, qual_shaped: list) -> list:
 
 def splitter_fingerprint() -> str:
     """Changes when the splitter version or any heading pattern changes (hashed into rubric / cache versions)."""
-    payload = "|".join([SPLITTER_VERSION, RESPONSIBILITY_HEADINGS, PERSON_HEADINGS, DROP_HEADINGS,
+    payload = "|".join([SPLITTER_VERSION, RESPONSIBILITY_HEADINGS, PERSON_HEADINGS, SOFT_PERSON_HEADINGS, HARD_PERSON_HEADINGS,
+                        DROP_HEADINGS,
                         P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 

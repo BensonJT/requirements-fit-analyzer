@@ -58,7 +58,8 @@ def resolve_us(rows):
     for param, group, vid, desc, _count in rows:
         if not desc or not vid or desc.strip().lower() not in US_NAMES:
             continue
-        if (group or "").strip().lower() == "country":
+        # "Country" on most tenants; TD Bank, Gartner and Alteryx name the group "Location Country" (2026-10-22)
+        if "country" in (group or "").strip().lower():
             key = NESTED_COUNTRY_KEY if param == NESTED_LOCATION_PARAM else param
             return key, [vid], desc
         if "country" in (param or "").lower():

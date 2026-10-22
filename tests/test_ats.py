@@ -1391,3 +1391,20 @@ def test_broken_boards_empty_when_healthy(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     store.log_board(con, "r", "Good", "greenhouse", True, 1.0, datetime(2026, 10, 1), job_count=1)
     assert store.broken_boards(con) == [] and report._broken_boards_block(con) == []
+
+
+# ---- US facet resolution (facets.resolve_us) ----
+
+def test_resolve_us_accepts_location_country_group():
+    """TD Bank, Gartner and Alteryx nest the country list under a group named "Location Country", not
+    "Country"; it must still resolve to the nested locationCountry key (2026-10-22)."""
+    from backend.ats import facets
+    rows = [("locationMainGroup", "Location Country", "us-id", "United States of America", 900),
+            ("locationMainGroup", "Location Country", "ca-id", "Canada", 800)]
+    assert facets.resolve_us(rows) == ("locationCountry", ["us-id"], "United States of America")
+
+
+def test_resolve_us_plain_country_group_unchanged():
+    from backend.ats import facets
+    rows = [("locationMainGroup", "Country", "us-id", "United States of America", 10)]
+    assert facets.resolve_us(rows) == ("locationCountry", ["us-id"], "United States of America")

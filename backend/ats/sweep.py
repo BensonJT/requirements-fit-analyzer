@@ -269,6 +269,8 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
     -- see the module docstring on sweep_bridge. `max_ring` is passed straight through to it.
     """
     all_rows = load_registry()
+    if not (platform or employer or limit or skip_sweep):
+        _log_unswept_rows(log)
     if platform:
         all_rows = [r for r in all_rows if r["platform"] == platform]
     if employer:
@@ -327,9 +329,45 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
                 f"{bridge_stats['succeeded']} boards ok, {bridge_stats['failed']} failed, "
                 f"{bridge_stats['seen']} live postings, {bridge_stats['new']} new, "
                 f"{bridge_stats['reopened']} reopened, {bridge_stats['closed']} taken down")
+        if stats or bridge_stats:
+            _log_broken_boards(con, log)
         return stats
     finally:
         con.close()
+
+
+def _log_unswept_rows(log=print):
+    """One line naming the registry rows the loader skips because their platform has no adapter
+    (2026-10-22: Optum's taleo row was skipped silently from 9/15 while its notes read
+    'probe-verified'). Rows whose source is 'unresolved' are deliberate and not counted."""
+    from collections import Counter
+    try:
+        skipped = [r for r in load_registry(implemented_only=False)
+                   if r["platform"] not in adapters.IMPLEMENTED_PLATFORMS]
+    except Exception:  # noqa: BLE001 — informational only
+        return
+    if skipped:
+        by = Counter(r["platform"] or "?" for r in skipped)
+        log(f"Registry: {len(skipped)} row(s) not swept, no adapter for their platform "
+            f"({', '.join(f'{p} {n}' for p, n in by.most_common())}): "
+            f"{', '.join(r['employer'] for r in skipped)}")
+
+
+def _log_broken_boards(con, log=print):
+    """The loud list (2026-10-22): boards failing or empty for store.BROKEN_BOARD_RUNS runs in a row.
+    The per-board lines above scroll past in a 150-board run; this block sits at the end of the sweep."""
+    try:
+        boards = store.broken_boards(con)
+    except Exception as e:  # noqa: BLE001 — the health check must never fail the sweep
+        log(f"Broken-board check FAILED: {type(e).__name__}: {e}")
+        return
+    if not boards:
+        log(f"Board health: no board has failed or come back empty {store.BROKEN_BOARD_RUNS} runs in a row.")
+        return
+    log(f"\n!!! BROKEN BOARDS: {len(boards)} board(s) failed or came back empty "
+        f"{store.BROKEN_BOARD_RUNS}+ runs in a row (fix the registry row or the adapter):")
+    for line in store.broken_boards_lines(boards):
+        log(f"!!!   {line}")
 
 
 def _run_finder(con, stats, report=True, llm_top=0, full_screen=False, log=print):

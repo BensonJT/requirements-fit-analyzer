@@ -894,3 +894,22 @@ def test_sweep_run_limit_applies_after_track_filter(tmp_path, monkeypatch):
     # have been called with zero rows).
     assert len(seen_bridge_rows) == 2
     assert all(r["track"] == "bridge" for r in seen_bridge_rows)
+
+
+# ---------------------------------------------------------------- street-address shapes (2026-10-22)
+# Target and Starbucks print a street address before the city; every result was dropped and both
+# boards read 0 live for a month.
+ADDRESS_CASES = [
+    ("5437 Urbana Pike, Frederick,MD 21704-7275", "Frederick", "MD", True),          # Target
+    ("5115 Leesburg Pike, Falls Church,VA 22041-3207", "Leesburg", "VA", False),     # street name only
+    ("2070 Yellow Springs Rd, Frederick, Maryland, United States", "Frederick", "MD", True),  # Starbucks
+    ("10670 US Hwy 441, Leesburg, Florida, United States", "Leesburg", "VA", False),  # wrong state
+    ("8381 Leesburg Pike, Vienna, Virginia, United States", "Leesburg", "VA", False),
+    ("1 Main St, Prince Frederick, MD 20678", "Frederick", "MD", False),             # whole-city rule
+    ("Paris, Ile-de-France, FR", "Paris", "FR", False),                               # not a US state
+]
+
+
+def test_address_shapes():
+    for text, city, state, want in ADDRESS_CASES:
+        assert bridge.location_matches(text, city, state) is want, text

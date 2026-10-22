@@ -61,24 +61,54 @@ def client():
     return httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=True)
 
 
+RETRIES_429 = 8          # a 429 gets its own, longer budget (see _request)
+BACKOFF_429_CAP = 20.0   # seconds; the longest single wait after a 429
+
+
+def _retry_after(resp):
+    """Seconds from a numeric Retry-After header, or None."""
+    try:
+        return float(resp.headers.get("retry-after"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _request(c, method, url, **kw):
-    """One request with retries on transient failures (DNS blips, 429, 5xx, timeouts)."""
-    last = None
-    for attempt in range(RETRIES):
+    """One request with retries on transient failures (DNS blips, 429, 5xx, timeouts).
+
+    A 429 gets a longer budget than other errors (2026-10-22): Accenture's Workday tenant began
+    answering ~30-50% of CXS calls with 429 in bursts of up to five, even at one call a second, and
+    three tries at 2s/4s/6s lost one page in ~40 almost every night (three runs failed in a row). It
+    now backs off exponentially (2, 4, 8, 16, then 20s each, or Retry-After when the server sends
+    one) for up to RETRIES_429 tries. Other errors keep the old three tries."""
+    tries_429 = tries_other = 0
+    while True:
         try:
             resp = c.request(method, url, **kw)
-            if resp.status_code in (429, 500, 502, 503, 504):
-                last = httpx.HTTPStatusError(f"{resp.status_code} on {url}", request=resp.request, response=resp)
-                time.sleep(2 * (attempt + 1))
-                continue
-            if resp.status_code in (404, 410):
-                raise Gone(f"{resp.status_code} {url}")
-            resp.raise_for_status()
-            return resp
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
-            last = e
-            time.sleep(2 * (attempt + 1))
-    raise last
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError):
+            tries_other += 1
+            if tries_other >= RETRIES:
+                raise
+            time.sleep(2 * tries_other)
+            continue
+        if resp.status_code == 429:
+            tries_429 += 1
+            if tries_429 >= RETRIES_429:
+                raise httpx.HTTPStatusError(f"429 on {url} (after {tries_429} tries)", request=resp.request,
+                                            response=resp)
+            wait = _retry_after(resp)
+            time.sleep(min(wait if wait is not None else 2.0 * 2 ** (tries_429 - 1), BACKOFF_429_CAP))
+            continue
+        if resp.status_code in (500, 502, 503, 504):
+            tries_other += 1
+            if tries_other >= RETRIES:
+                raise httpx.HTTPStatusError(f"{resp.status_code} on {url}", request=resp.request, response=resp)
+            time.sleep(2 * tries_other)
+            continue
+        if resp.status_code in (404, 410):
+            raise Gone(f"{resp.status_code} {url}")
+        resp.raise_for_status()
+        return resp
 
 
 # ================================================================ Workday

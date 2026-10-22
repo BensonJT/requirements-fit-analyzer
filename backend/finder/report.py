@@ -673,6 +673,22 @@ def _prob(p) -> str:
     return "—" if p is None else f"{p:.2f}"
 
 
+def _broken_boards_block(con) -> list:
+    """Top_Jobs lines naming every board failing or empty store.BROKEN_BOARD_RUNS runs in a row
+    (2026-10-22: ten boards were broken for days to a month and nothing on this page said so).
+    Empty list when none, or when the check itself fails -- it must never cost the report."""
+    try:
+        boards = store.broken_boards(con)
+    except Exception:  # noqa: BLE001
+        return []
+    if not boards:
+        return []
+    lines = [f"> **⚠️ Broken boards ({len(boards)}):** failed or empty {store.BROKEN_BOARD_RUNS}+ sweeps in a "
+             f"row, so their postings are missing from this page. Fix the registry row or the adapter.\n>"]
+    lines += [f"> - {_cell(line)}" for line in store.broken_boards_lines(boards)]
+    return ["\n".join(lines) + "\n"]
+
+
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
                    review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS,
                    unclear_cap: int = TOP_UNCLEAR_CAP, jev_gate_on: bool = True) -> Path:
@@ -768,6 +784,7 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
          "probability (Apply at 0.60 or above, Review from 0.40). **J3** is Jev's call: required m/p/f, then "
          "process·technical·AI grade initials (B/A/S/W). It never moves the rank; since 2026-09-30 it can demote a "
          "row into the Jev demoted section below._\n"]
+    w.extend(_broken_boards_block(con))
 
     def gate_line(gates: dict, label: str) -> str:
         return (f"of {gates['total']} judged {label}-tier rows: "

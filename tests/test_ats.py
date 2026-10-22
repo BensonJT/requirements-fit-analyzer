@@ -1297,3 +1297,97 @@ def test_deel_detail_without_jsonld_raises_not_gone():
         raise AssertionError("must not raise Gone")
     except RuntimeError:
         pass
+
+
+# ---------------------------------------------------------------- 429 backoff (2026-10-22)
+class _Resp429:
+    def __init__(self, code, headers=None):
+        self.status_code, self.headers, self.request = code, headers or {}, None
+
+    def raise_for_status(self):
+        pass
+
+
+class _Client429:
+    def __init__(self, codes):
+        self.codes, self.calls = list(codes), 0
+
+    def request(self, method, url, **kw):
+        self.calls += 1
+        return _Resp429(self.codes.pop(0))
+
+
+def test_request_rides_out_a_429_burst(monkeypatch):
+    """Accenture answered ~40% of calls with 429 in bursts of five; three tries lost a page a night."""
+    from backend.ats import adapters as A
+    sleeps = []
+    monkeypatch.setattr(A.time, "sleep", sleeps.append)
+    c = _Client429([429] * 5 + [200])
+    assert A._request(c, "POST", "u").status_code == 200
+    assert c.calls == 6 and sleeps == [2.0, 4.0, 8.0, 16.0, 20.0]
+
+
+def test_request_gives_up_after_the_429_budget(monkeypatch):
+    import httpx
+    import pytest
+    from backend.ats import adapters as A
+    monkeypatch.setattr(A.time, "sleep", lambda s: None)
+    c = _Client429([429] * A.RETRIES_429)
+    with pytest.raises(httpx.HTTPStatusError):
+        A._request(c, "GET", "u")
+    assert c.calls == A.RETRIES_429
+
+
+def test_request_5xx_keeps_three_tries(monkeypatch):
+    import httpx
+    import pytest
+    from backend.ats import adapters as A
+    monkeypatch.setattr(A.time, "sleep", lambda s: None)
+    c = _Client429([503] * 10)
+    with pytest.raises(httpx.HTTPStatusError):
+        A._request(c, "GET", "u")
+    assert c.calls == A.RETRIES
+
+
+# ---------------------------------------------------------------- broken-board list (2026-10-22)
+def test_broken_boards_flags_three_bad_runs_in_a_row(tmp_path):
+    from datetime import timedelta
+    from backend.finder import report
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t0 = datetime(2026, 10, 1, 6)
+    for day in range(5):
+        now = t0 + timedelta(days=day)
+        store.log_board(con, "r", "Good", "greenhouse", True, 1.0, now, job_count=10)
+        # failing for the last three runs, fine before
+        if day < 2:
+            store.log_board(con, "r", "Moved", "greenhouse", True, 1.0, now, job_count=5)
+        else:
+            store.log_board(con, "r", "Moved", "greenhouse", False, 1.0, now, error="404 https://x\nmore")
+        store.log_board(con, "r", "Empty", "lever", True, 1.0, now, job_count=0)
+        # one bad run is not a streak
+        store.log_board(con, "r", "Blip", "workday", day != 4, 1.0, now, job_count=3 if day != 4 else None,
+                        error="429" if day == 4 else None)
+        store.log_board(con, "r", "Store", "workday", True, 1.0, now, job_count=0, track="bridge")
+    # left the registry long ago: never listed
+    for day in range(4):
+        store.log_board(con, "r", "Gone", "ashby", False, 1.0, t0 - timedelta(days=30 + day), error="404")
+    # re-pointed to another platform after its last bad run: drops off at once
+    for day in range(3):
+        store.log_board(con, "r", "Fixed", "lever", True, 1.0, t0 + timedelta(days=day), job_count=0)
+    store.log_board(con, "r", "Fixed", "greenhouse", True, 1.0, t0 + timedelta(days=4), job_count=2)
+    boards = store.broken_boards(con)
+    assert [(b["employer"], b["kind"], b["streak"]) for b in boards] == [
+        ("Moved", "failing", 3), ("Empty", "empty", 5), ("Store", "empty", 5)]
+    assert boards[0]["last_good"] == date(2026, 10, 2)
+    lines = store.broken_boards_lines(boards)
+    assert lines[0] == "Moved (greenhouse): failing 3 runs in a row, last good 10/02 -- 404 https://x"
+    assert lines[2].startswith("Store (workday) [bridge]: empty 5 runs in a row, never had postings")
+    block = report._broken_boards_block(con)
+    assert len(block) == 1 and "Broken boards (3)" in block[0] and "Moved (greenhouse)" in block[0]
+
+
+def test_broken_boards_empty_when_healthy(tmp_path):
+    from backend.finder import report
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    store.log_board(con, "r", "Good", "greenhouse", True, 1.0, datetime(2026, 10, 1), job_count=1)
+    assert store.broken_boards(con) == [] and report._broken_boards_block(con) == []

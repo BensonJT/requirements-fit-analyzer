@@ -2016,6 +2016,65 @@ def log_board(con, run_id, employer, platform, ok, elapsed, now, job_count=None,
     )
 
 
+BROKEN_BOARD_RUNS = 3      # this many bad runs in a row puts a board on the broken list
+BROKEN_BOARD_RECENT_DAYS = 3  # boards not run this close to the newest run are gone from the registry
+
+
+def broken_boards(con, runs=BROKEN_BOARD_RUNS, recent_days=BROKEN_BOARD_RECENT_DAYS):
+    """Boards whose newest `runs` runs ALL failed or came back with 0 postings (2026-10-22).
+
+    `vw_board_health` shows only each board's newest run, and an empty board counts there as ok, so
+    Accenture (429, three runs), Spring Health and Fundraise Up (404, moved boards) and seven boards
+    that read 0 every night for a month (wrong slug or a location shape the bridge matcher could not
+    read) went unnoticed. This is the list that makes them loud: the sweep log and Top_Jobs print it.
+
+    Only boards that ran within `recent_days` of the newest run are considered, so a board that has
+    left the registry drops off by itself, and a board the employer has since been swept on under
+    another platform (a registry fix) drops off at once. Returns dicts, worst first:
+    employer, platform, track, kind ('failing' when the newest run errored, else 'empty'),
+    streak (bad runs in a row, newest back), last_good (date of the newest run with postings, or
+    None), error (the newest error text)."""
+    rows = con.execute("""
+        WITH r AS (
+            SELECT employer, platform, coalesce(track, 'fit') AS track, ok, coalesce(job_count, 0) AS n,
+                   error, ran_at,
+                   row_number() OVER (PARTITION BY employer, platform, coalesce(track, 'fit')
+                                      ORDER BY ran_at DESC) AS rn
+            FROM board_runs),
+        b AS (
+            SELECT employer, platform, track,
+                   min(rn) FILTER (WHERE ok AND n > 0) AS first_good_rn,
+                   count(*) AS total_runs,
+                   max(ran_at) AS last_ran,
+                   max(ran_at) FILTER (WHERE ok AND n > 0) AS last_good,
+                   arg_max(error, ran_at) AS last_error,
+                   arg_max(ok, ran_at) AS last_ok
+            FROM r GROUP BY ALL)
+        SELECT employer, platform, track, last_ok, coalesce(first_good_rn - 1, total_runs) AS streak,
+               CAST(last_good AS DATE), last_error
+        FROM b
+        WHERE coalesce(first_good_rn - 1, total_runs) >= ?
+          AND last_ran >= (SELECT max(ran_at) FROM board_runs) - to_days(CAST(? AS INTEGER))
+          AND NOT EXISTS (SELECT 1 FROM board_runs x          -- moved to another platform since
+                          WHERE x.employer = b.employer AND coalesce(x.track, 'fit') = b.track
+                            AND x.platform <> b.platform AND x.ran_at > b.last_ran)
+        ORDER BY last_ok, streak DESC, employer""", [runs, recent_days]).fetchall()
+    return [dict(employer=e, platform=p, track=t, kind="empty" if ok else "failing", streak=s,
+                 last_good=lg, error=err) for e, p, t, ok, s, lg, err in rows]
+
+
+def broken_boards_lines(boards):
+    """One short line per broken board, for the sweep log and the Top_Jobs header."""
+    out = []
+    for b in boards:
+        since = f"last good {b['last_good']:%m/%d}" if b["last_good"] else "never had postings"
+        why = (b["error"] or "").splitlines()[0][:80] if b["kind"] == "failing" else "0 postings"
+        track = " [bridge]" if b["track"] == "bridge" else ""
+        out.append(f"{b['employer']} ({b['platform']}){track}: {b['kind']} {b['streak']} runs in a row, "
+                   f"{since} -- {why}")
+    return out
+
+
 def log_run(con, run_id, started_at, finished_at, attempted, succeeded, failed,
             seen, new, reopened, closed, details, elapsed):
     con.execute(

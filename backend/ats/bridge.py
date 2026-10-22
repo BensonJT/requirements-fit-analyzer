@@ -139,7 +139,31 @@ def _extract_city_state(text: str):
         m = pat.match(text) if pat.pattern.startswith("^") else pat.search(text)
         if m:
             return m.group("city").strip(), _normalize_state(m.group("state").strip())
-    return None
+    return _address_city_state(text)
+
+
+# Street-address shapes (2026-10-22): Target prints "5437 Urbana Pike, Frederick,MD 21704-7275" and
+# Starbucks "2070 Yellow Springs Rd, Frederick, Maryland, United States". No pattern above matched
+# either, so every result was dropped and both boards read 0 every night. Tried only after every
+# shape above has failed, and only on text with a street part (two or more commas once a trailing
+# country and ZIP are removed), so no text that matched before is read differently now. The city
+# is still the WHOLE second-to-last field and the state must be a real US state, so "5115 Leesburg
+# Pike, Falls Church,VA" is Falls Church, never Leesburg.
+_TRAILING_COUNTRY_RE = re.compile(r"\s*,\s*(?:united states(?: of america)?|usa|us)\s*$", re.I)
+_TRAILING_ZIP_RE = re.compile(r"\s+\d{5}(?:-\d{4})?\s*$")
+_US_STATE_CODES = frozenset(US_STATES.values())
+
+
+def _address_city_state(text: str):
+    t = _TRAILING_COUNTRY_RE.sub("", text)
+    t = _TRAILING_ZIP_RE.sub("", t)
+    fields = [f.strip() for f in t.split(",")]
+    if len(fields) < 3 or not all(fields[-2:]):
+        return None
+    city, state = fields[-2], _normalize_state(fields[-1])
+    if state not in _US_STATE_CODES or not re.fullmatch(_CITY, city):
+        return None
+    return city, state
 
 
 def location_matches(location_text: str, place_city: str, place_state: str, allow_no_state: bool = False) -> bool:

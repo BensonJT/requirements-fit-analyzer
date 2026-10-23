@@ -1421,3 +1421,215 @@ def test_relocation_place_gets_relocation_flag(monkeypatch):
                     location="Nashville, TN", url="", description="Hybrid role in our Nashville office.")
     S.screen(job, skip_tracker=True)
     assert any(f.startswith("local/hybrid via relocation: ") for f in job.flags), job.flags
+
+
+# ---------------------------------------------------------------- Phenom (2026-10-23)
+def _phenom_fake(monkeypatch, total_us=3, page=2, us_name="United States of America", drop=None):
+    """A fake /widgets endpoint: `total_us` US jobs, served `page` at a time; `drop` = an index
+    the server never returns (to simulate a short enumeration)."""
+    bodies = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    def fake_request(c, method, url, **kw):
+        body = kw["json"]
+        bodies.append(body)
+        assert method == "POST" and url == "https://careers.example.com/widgets"
+        agg = [{"field": "country", "value": {us_name: total_us, "India": 5}}]
+        if not body["selected_fields"]:
+            return Resp({"refineSearch": {"totalHits": total_us + 5, "data": {"jobs": [{}], "aggregations": agg}}})
+        jobs = [{"jobId": f"R{i}", "title": f"Business Analyst {i}", "country": us_name,
+                 "location": "Reston, Virginia, " + us_name,
+                 "multi_location": ["Reston, Virginia, " + us_name], "type": "Full time",
+                 "category": "Operations", "postedDate": "2026-10-08T00:00:00.000+0000",
+                 "ml_skills": ["x"]} for i in range(total_us) if i != drop]
+        frm = body["from"]
+        return Resp({"refineSearch": {"totalHits": total_us, "data": {"jobs": jobs[frm:frm + page], "aggregations": agg}}})
+
+    monkeypatch.setattr(A, "_request", fake_request)
+    monkeypatch.setattr(A, "PHENOM_PAGE", page)
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    return bodies
+
+
+def test_phenom_pages_us_scoped_and_builds_urls(monkeypatch):
+    bodies = _phenom_fake(monkeypatch)
+    row = {"employer": "Example", "platform": "phenom", "identifier_1": "https://careers.example.com",
+           "identifier_2": "global/en", "identifier_3": "EXAGLOBAL"}
+    out = A.list_jobs(row)
+    assert not getattr(out, "truncated", False)
+    assert [p["req_id"] for p in out] == ["R0", "R1", "R2"]
+    assert bodies[1]["selected_fields"] == {"country": ["United States of America"]}
+    assert (bodies[1]["lang"], bodies[1]["country"]) == ("en_global", "global")
+    p = out[0]
+    assert p["url"] == "https://careers.example.com/global/en/job/R0/Business-Analyst-0"
+    assert (p["country"], p["employment_type"], p["posted_at"]) == ("US", "full_time", date(2026, 10, 8))
+    assert "ml_skills" not in A.json.loads(p["raw_json"])
+    assert "phenom" in A.IMPLEMENTED_PLATFORMS and "phenom" in A.DETAIL_PLATFORMS
+
+
+def test_phenom_short_enumeration_is_truncated(monkeypatch):
+    _phenom_fake(monkeypatch, total_us=4, page=10, drop=2)
+    row = {"employer": "Example", "platform": "phenom", "identifier_1": "careers.example.com",
+           "identifier_2": "us/en", "identifier_3": ""}
+    assert getattr(A.list_jobs(row), "truncated", False)
+
+
+def test_phenom_detail_reads_ddo():
+    job = {"title": "BA", "description": "<p>Lead process work.</p><p>Pay: $90,000 - $120,000 per year.</p>",
+           "qualifications": "<p>Five years.</p>", "multi_location": [{"location": "Remote, United States"}],
+           "remote": "Yes", "type": "Full time", "postedDate": "2026-10-01T00:00:00.000+0000"}
+    html = f'<script>phApp.ddo = {A.json.dumps({"jobDetail": {"data": {"job": job}}})}; phApp.x = 1;</script>'
+    f = A._phenom_detail_fields(html, {})
+    assert f["description_text"].startswith("Lead process work.") and "Five years." in f["description_text"]
+    assert (f["workplace_type"], f["pay_min"], f["posted_at"]) == ("remote", 90000, date(2026, 10, 1))
+    try:
+        A._phenom_detail_fields('<script>phApp.ddo = {"jobDetail": {"data": {}}};</script>', {})
+    except A.Gone:
+        raise AssertionError("an empty record must not read as Gone")
+    except RuntimeError:
+        pass
+
+
+# ---------------------------------------------------------------- SuccessFactors RMK (2026-10-23)
+_RMK_TABLE = """<span class="paginationLabel">Results <b>1 – 2</b> of <b>3</b></span><table><tbody>
+<tr class="data-row"><td class="colTitle"><span class="jobTitle hidden-phone">
+<a href="/job/Addison-Business-Analyst-TX/1413524200/" class="jobTitle-link">Business Analyst</a></span></td>
+<td class="colLocation"><span class="jobLocation">Addison, TX, US</span></td>
+<td class="colDate"><span class="jobDate">Oct 23, 2026</span></td></tr>
+<tr class="data-row"><td class="colTitle"><span class="jobTitle hidden-phone">
+<a href="/job/Remote-Process-Lead/1413191400/" class="jobTitle-link">Process Lead</a></span></td>
+<td class="colLocation"><span class="jobLocation">Remote, VA, US</span></td>
+<td class="colDate"><span class="jobDate">Oct 20, 2026</span></td></tr></tbody></table>"""
+
+_RMK_TILES = """<span id="tile-search-results-label">Showing 1 to 1 of 1 Jobs</span><ul>
+<li class="job-tile job-id-1413376700" data-url="/job/Rochester-Lead%2C-Systems-Engineering-NY-14606/1413376700/">
+<a class="jobTitle-link" href="/job/Rochester-Lead%2C-Systems-Engineering-NY-14606/1413376700/"> Lead, Systems Engineering </a>
+<div id="job-1413376700-desktop-section-country-value">US </div>
+<div id="job-1413376700-desktop-section-location-value">Rochester, NY, US, 14606 </div></li></ul>"""
+
+
+def test_rmk_table_and_tile_templates():
+    total, out = A._rmk_page(_RMK_TABLE, "https://careers.example.com")
+    assert total == 3 and [p["req_id"] for p in out] == ["1413524200", "1413191400"]
+    p = out[0]
+    assert p["url"] == "https://careers.example.com/job/Addison-Business-Analyst-TX/1413524200/"
+    assert (p["location_primary"], p["country"], p["posted_at"]) == ("Addison, TX, US", "US", date(2026, 10, 23))
+    assert out[1]["workplace_type"] == "remote"
+    total, out = A._rmk_page(_RMK_TILES, "https://jobs.example.com")
+    assert total == 1 and out[0]["title"] == "Lead, Systems Engineering"
+    assert (out[0]["country"], out[0]["location_primary"]) == ("US", "Rochester, NY, US, 14606")
+    assert "successfactors_rmk" in A.IMPLEMENTED_PLATFORMS and "successfactors_rmk" in A.DETAIL_PLATFORMS
+
+
+def test_rmk_pages_with_country_facet_and_flags_short_pull(monkeypatch):
+    urls = []
+    second = _RMK_TABLE.replace("1 – 2", "3 – 3").replace("1413524200", "1413000001").split("<tr", 2)
+    pages = {0: _RMK_TABLE, 2: second[0] + "<tr" + second[1] + "</tbody></table>"}
+
+    class Resp:
+        def __init__(self, text):
+            self.text = text
+
+    def fake(c, method, url, **kw):
+        urls.append(url)
+        start = int(url.rsplit("startrow=", 1)[1])
+        return Resp(pages.get(start, "<span>Results <b>0</b> of <b>3</b></span>"))
+
+    monkeypatch.setattr(A, "_request", fake)
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    row = {"employer": "Example", "platform": "successfactors_rmk", "identifier_1": "careers.example.com",
+           "identifier_2": "US", "identifier_3": ""}
+    out = A.list_jobs(row)
+    assert urls[0] == "https://careers.example.com/search/?q=&optionsFacetsDD_country=US&startrow=0"
+    assert len(out) == 3 and not getattr(out, "truncated", False)
+    pages[2] = "<span>Results <b>3 – 3</b> of <b>3</b></span>"       # page 2 comes back empty
+    assert getattr(A.list_jobs(row), "truncated", False)
+    pages[0] = "<html>maintenance</html>"                              # no count at all: raise, never []
+    try:
+        A.list_jobs(row)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError:
+        pass
+
+
+def test_rmk_detail_reads_microdata():
+    html = """<span itemprop="jobLocation"><meta itemprop="addressLocality" content="Addison">
+    <meta itemprop="addressRegion" content="TX"><meta itemprop="addressCountry" content="US"></span>
+    <meta itemprop="datePosted" content="Fri Oct 23 07:00:00 UTC 2026">
+    <span itemprop="description" class="jobdescription"><p>Req ID: 1</p><p>Pay $90,000 - $110,000 per year.</p></span>"""
+    f = A._rmk_detail_fields(html, {"locations": None})
+    assert f["description_text"].startswith("Req ID: 1") and f["pay_min"] == 90000
+    assert f["posted_at"] == date(2026, 10, 23)
+    assert A.json.loads(f["locations"]) == ["Addison, TX, US"]
+
+
+# ---------------------------------------------------------------- Avature (2026-10-23)
+def _avature_article(job_id, title, loc, posted="02-Feb-2026"):
+    return (f'<article class="article article--result"><h3 class="article__header__text__title">'
+            f'<a class="link" href="https://careers.example.com/en_US/ex/JobDetail/{title.replace(" ", "-")}/{job_id}">{title}</a></h3>'
+            f'<div class="article__header__text__subtitle"><span class="list-item-location">{loc}</span>'
+            f'<span class="list-item-ref">Job ID: {job_id}</span><span class="list-item-posted">{posted}</span></div></article>')
+
+
+def test_avature_pages_by_offset_and_checks_count(monkeypatch):
+    jobs = [_avature_article(str(100 + i), f"Analyst {i}", "Cary, North Carolina, United States" if i % 2 else "Tokyo, Japan")
+            for i in range(5)]
+    urls = []
+
+    class Resp:
+        def __init__(self, text):
+            self.text = text
+
+    def fake(c, method, url, **kw):
+        urls.append(url)
+        off = int(url.rsplit("jobOffset=", 1)[1])
+        return Resp('<div aria-label="5 results"></div>' + "".join(jobs[off:off + 2]))
+
+    monkeypatch.setattr(A, "_request", fake)
+    monkeypatch.setattr(A, "AVATURE_PAGE_DELAY", 0)
+    row = {"employer": "Example", "platform": "avature", "identifier_1": "careers.example.com",
+           "identifier_2": "en_US/ex", "identifier_3": ""}
+    out = A.list_jobs(row)
+    assert urls[:2] == ["https://careers.example.com/en_US/ex/SearchJobs/?jobOffset=0",
+                        "https://careers.example.com/en_US/ex/SearchJobs/?jobOffset=2"]
+    assert [p["req_id"] for p in out] == ["100", "101", "102", "103", "104"] and not getattr(out, "truncated", False)
+    assert (out[1]["country"], out[0]["country"], out[0]["posted_at"]) == ("US", None, date(2026, 2, 2))
+    assert "avature" in A.IMPLEMENTED_PLATFORMS and "avature" in A.DETAIL_PLATFORMS
+    jobs.pop()                                            # the site says 5 but serves 4: never close-pass
+    assert getattr(A.list_jobs(row), "truncated", False)
+
+
+def test_avature_deloitte_shape_floor_count(monkeypatch):
+    art = ('<article class="article--result " data-total="999+"><h3><a class="link" '
+           'href="https://apply.example.com/en_US/careers/JobDetail/Senior-Consultant/3728{n}">Senior Consultant</a></h3>'
+           '<div class="article__header__text__subtitle"><span> Example US </span> | <span> Consulting </span> | '
+           '<span>Multiple Locations</span></div></article>')
+    total, floor, out = A._avature_page(art.format(n=51) + art.format(n=52))
+    assert (total, floor) == (999, True)
+    assert [p["req_id"] for p in out] == ["372851", "372852"] and out[0]["location_primary"] == "Multiple Locations"
+
+
+def test_avature_detail_jsonld_and_view_fields():
+    ld = {"@type": "JobPosting", "description": "<p>Work you'll do</p><p>Pay $100,000 - $140,000 per year.</p>",
+          "datePosted": "2026-10-22", "validThrough": "2026-11-30"}
+    html = (f'<script type="application/ld+json">{A.json.dumps({"@type": "JobPosting", "title": "x"})}</script>'
+            f'<script type="application/ld+json">{A.json.dumps(ld)}</script>'
+            '<div class="article__header--locations"><p class="paragraph">Atlanta, Georgia, United States</p></div>')
+    f = A._avature_detail_fields(html, {})
+    assert f["description_text"].startswith("Work you'll do") and f["pay_min"] == 100000
+    assert (f["posted_at"], f["posting_end_at"], f["country"]) == (date(2026, 10, 22), date(2026, 11, 30), "US")
+    html = ('<div class="article__content__view__field"><div class="article__content__view__field__label">Work Arrangement</div>'
+            '<div class="article__content__view__field__value">Hybrid</div></div>'
+            '<div class="article__content__view__field"><div class="article__content__view__field__label">Posted Date</div>'
+            '<div class="article__content__view__field__value">30-Sep-2026</div></div>'
+            '<div class="article__content__view__field"><div class="article__content__view__field__value">'
+            '<p>Job Description</p><p>Lead security programs.</p></div></div>')
+    f = A._avature_detail_fields(html, {})
+    assert "Lead security programs." in f["description_text"]
+    assert (f["workplace_type"], f["posted_at"]) == ("hybrid", date(2026, 9, 30))

@@ -78,6 +78,36 @@ def fetch(duck, ids):
     return snap, decs
 
 
+ONE_SQL = f"""
+SELECT {", ".join("p." + c for c in POSTING_COLS)},
+       {", ".join("f." + c for c in LENS_COLS)},
+       (SELECT decision FROM decisions d WHERE d.posting_id = p.posting_id
+         ORDER BY decided_at DESC LIMIT 1) AS latest_decision
+FROM postings p LEFT JOIN vw_lens_fit f USING (posting_id)
+WHERE p.posting_id = ?
+"""
+
+
+def snapshot_one(pg, duck, posting_id):
+    """Copy ONE posting into jobs.fit_snapshot (in_tracker = true) if it is not there yet. For `trk add`
+    (2026-10-23): a posting added the same day that the nightly snapshot left out (a screen reject, or new
+    since the run) otherwise has no row until the next night, so the sheet's "open" link and the add's
+    field fill-in are missing. Returns True when a row was inserted."""
+    if pg.execute("SELECT 1 FROM jobs.fit_snapshot WHERE posting_id = %s", [posting_id]).fetchone():
+        return False
+    r = duck.execute(ONE_SQL, [posting_id]).fetchone()
+    if r is None:
+        return False
+    r = list(r)
+    i = POSTING_COLS.index("description_text")
+    if r[i]:
+        r[i] = r[i].replace("\x00", "")
+    row = tuple(r) + (True, dt.datetime.now().replace(microsecond=0))
+    pg.execute(f"INSERT INTO jobs.fit_snapshot ({', '.join(SNAPSHOT_COLS)}) "
+               f"VALUES ({', '.join(['%s'] * len(SNAPSHOT_COLS))}) ON CONFLICT (posting_id) DO NOTHING", row)
+    return True
+
+
 def load(pg, snap, decs, t0, source):
     """Replace jobs.fit_snapshot and jobs.decisions in one transaction, then CLUSTER and ANALYZE."""
     pg.execute("SET lock_timeout = '60s'")        # fail instead of waiting forever behind a long reader

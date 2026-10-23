@@ -186,9 +186,34 @@ def snapshot_row(conn, posting_id):
                         "FROM jobs.fit_snapshot WHERE posting_id = %s", [posting_id]).fetchone()
 
 
+def ensure_snapshot(conn, posting_id):
+    """Pull one posting from the jobsearch DuckDB into jobs.fit_snapshot when the nightly snapshot left it
+    out (2026-10-23), so the sheet's "open" link and the field fill-in work the same day. Never fatal: a
+    locked or missing DuckDB (a sweep running) just leaves the row for the nightly snapshot."""
+    import importlib.util
+    import duckdb
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.environ.get("JOBSEARCH_DUCKDB", os.path.join(root, "db", "jobsearch.duckdb"))
+    try:
+        spec = importlib.util.spec_from_file_location("pg_snapshot", os.path.join(root, "scripts", "pg_snapshot.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        duck = duckdb.connect(path, read_only=True)
+        try:
+            if mod.snapshot_one(conn, duck, posting_id):
+                print(f"posting {posting_id} copied into jobs.fit_snapshot (was not in the nightly snapshot)")
+        finally:
+            duck.close()
+    except Exception as e:  # noqa: BLE001 -- best effort; the nightly snapshot picks it up
+        print(f"note: could not copy posting {posting_id} into jobs.fit_snapshot now ({type(e).__name__}); "
+              f"the nightly snapshot will add it")
+
+
 def cmd_add(conn, a):
     company, role, req, loc, pay = a.company, a.role, a.req, a.location, a.pay
     pid = store._posting_id(a.posting)
+    if pid and not snapshot_row(conn, pid):
+        ensure_snapshot(conn, pid)
     if pid:
         snap = snapshot_row(conn, pid)
         if snap:

@@ -107,3 +107,17 @@ def test_load_sets_lock_and_statement_timeouts(pg):
     snap_mod.load(pg, [], [], 0, "test")
     got = pg.execute("SELECT current_setting('lock_timeout') AS l, current_setting('statement_timeout') AS s").fetchone()
     assert (got["l"], got["s"]) == ("1min", "10min")
+
+
+def test_snapshot_one_inserts_a_missing_posting_once(pg, duck_path):
+    """2026-10-23: `trk add` copies one posting the nightly snapshot left out (B is a screen reject)."""
+    d = duckdb.connect(duck_path, read_only=True)
+    try:
+        assert snap_mod.snapshot_one(pg, d, B) is True
+        assert snap_mod.snapshot_one(pg, d, B) is False          # already there: no second insert
+        assert snap_mod.snapshot_one(pg, d, "f" * 20) is False   # not in DuckDB: nothing to copy
+    finally:
+        d.close()
+    row = pg.execute("SELECT in_tracker, description_text FROM jobs.fit_snapshot WHERE posting_id = %s",
+                     [B]).fetchone()
+    assert row["in_tracker"] is True and "\x00" not in row["description_text"]

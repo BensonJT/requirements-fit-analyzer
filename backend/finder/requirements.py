@@ -18,7 +18,7 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-10-20.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-10-23.1"   # bump when splitting or classing changes (part of the requirement cache key)
                                     # 2026-09-30.1: USAJobs paragraph dumps -- an inline qualification opener
                                     # ("SPECIALIZED EXPERIENCE GS-14:", "Specialized experience is defined as:")
                                     # opens Required mid-paragraph; application mechanics (time-in-grade, SF-50,
@@ -44,7 +44,10 @@ RESPONSIBILITY_HEADINGS = (r"responsibilit|what you.ll do|what you will do|dutie
                            r"|typical day|any given day|essential functions|what you will be doing|what you get to do"
                            r"|your role|role description|position description|the impact you will have"
                            r"|how you will make an impact|success looks like|measures of success|success measures"
-                           r"|success metrics|^you will$|^you.ll$")
+                           r"|success metrics|^you will$|^you.ll$"
+                           # 2026-10-23.1, mined from the 53 active postings still without a Required section
+                           r"|how you.ll make an impact|what you will be responsible for|problems you.ll solve"
+                           r"|work you.ll own|what you will transform")
 # Person-side headings the rules' REQUIRED_HEADINGS does not carry; counted as Required for coverage only.
 PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you|your background"
                    r"|what we.re looking for|what we are looking for|competenc|you have|you bring|you.ll bring"
@@ -55,7 +58,9 @@ PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you
                    r"|this is you|what we seek|you should have|you will bring|you.re bringing|what we need"
                    r"|need from you|to be successful"
                    # 2026-09-29.3: Grafana's "What Makes You a Great Fit:" was read as more responsibilities
-                   r"|great fit|good fit|strong fit|makes you")
+                   r"|great fit|good fit|strong fit|makes you"
+                   # 2026-10-23.1
+                   r"|who we are looking for|who we.re looking for|thrive here if")
 # 2026-10-20.1: the SOFT person headings -- a portrait of the candidate, not a list of gates. Capital One's "Who you
 # are:" ("Do-er:", "Team Player:", "You ask why...") filed seven traits as Required at weight 1.0, above its real
 # Basic Qualifications (Bachelor's 0.54), so the top-18 cut, the judge and Jev read the traits as the bar. When the
@@ -63,7 +68,8 @@ PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you
 # shaped (years / degree / "Must"); with no other Required heading, the soft block still carries the requirements.
 SOFT_PERSON_HEADINGS = (r"who you are|about you|this is you|ideal candidate|candidate profile|your profile|right fit"
                         r"|great fit|good fit|strong fit|makes you|to be successful|what we look for"
-                        r"|what we.re looking for|what we are looking for|what we seek|your background")
+                        r"|what we.re looking for|what we are looking for|what we seek|your background"
+                        r"|who we are looking for|who we.re looking for|thrive here if")
 # A heading that also names a gate list stays hard: "Top skills or competencies to be successful:", "Here is what you
 # need to be successful:" (both measured 2026-10-20 -- real experience lines that the soft rule alone demoted).
 HARD_PERSON_HEADINGS = (r"skills|knowledge|experience|education|competenc|expertise|you have|you bring|you.ll bring"
@@ -333,7 +339,9 @@ def _whole_heading(s: str) -> bool:
     known = "|".join([P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS, PERSON_HEADINGS,
                       RESPONSIBILITY_HEADINGS, REQUIRED_LABELS])
     m = re.search(known, s, re.I)
-    return bool(m) and len(m.group(0)) >= len(re.sub(r"^(?:what|who)\s+|\W+$", "", s)) - 4
+    # 2026-10-23: case-insensitive -- a sentence-case "What you’ll bring" kept its "What", failed the length test,
+    # and Oracle 348110's whole requirement list was read as responsibilities (0 Required lines)
+    return bool(m) and len(m.group(0)) >= len(re.sub(r"^(?:what|who)\s+|\W+$", "", s, flags=re.I)) - 4
 
 
 def _known_heading_label(s: str) -> bool:

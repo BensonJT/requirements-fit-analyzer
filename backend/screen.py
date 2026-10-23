@@ -1037,7 +1037,14 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         # prefix is what UNPENALIZED_FLAG_PATTERNS anchors on, so scoring is untouched either way.
         hits = commutable_locations(job)
         far = long_commute_site(job, hits)
-        if far:
+        # 2026-10-23: a match carried only by RELOCATION_PLACES is a move, not a commute -- say so. Same
+        # "^local/hybrid" prefix, so scoring is untouched.
+        reloc_places = getattr(P, "RELOCATION_PLACES", [])
+        reloc = bool(reloc_places) and bool(hits) and all(place_matches(h, reloc_places) for h in hits)
+        if reloc:
+            flags.append(f"local/hybrid via relocation: {hits[0]} -- the one accepted relocation; "
+                         f"ask about remote and relocation support")
+        elif far:
             # The JD's own in-office cadence decides a far place (2026-09-22 ruling; thresholds in profile.py).
             days = office_days(f"{job.title}\n{job.description}")
             if days is None and job.extra.get("workplace_type") == "onsite":

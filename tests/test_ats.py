@@ -1408,3 +1408,16 @@ def test_resolve_us_plain_country_group_unchanged():
     from backend.ats import facets
     rows = [("locationMainGroup", "Country", "us-id", "United States of America", 10)]
     assert facets.resolve_us(rows) == ("locationCountry", ["us-id"], "United States of America")
+
+
+def test_relocation_place_gets_relocation_flag(monkeypatch):
+    """2026-10-23: a posting whose only in-area site is a RELOCATION place is flagged as a move, not a commute."""
+    from backend import screen as S
+    from backend import profile as P
+    monkeypatch.setattr(P, "COMMUTABLE_PLACES", ["nashville, tn"])
+    monkeypatch.setattr(P, "RELOCATION_PLACES", ["nashville, tn"])
+    monkeypatch.setattr(P, "COMMUTE_FAR_PLACES", [])
+    job = S.Listing(source="ats", search_pass="t", title="Senior Data Analyst", company="Acme",
+                    location="Nashville, TN", url="", description="Hybrid role in our Nashville office.")
+    S.screen(job, skip_tracker=True)
+    assert any(f.startswith("local/hybrid via relocation: ") for f in job.flags), job.flags

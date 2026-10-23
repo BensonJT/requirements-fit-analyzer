@@ -366,6 +366,10 @@ FAR_COMMUTE_REJECT_DAYS = None
 # plain commute -- neither remote-only nor flagged (e.g. an office the user would drive to for that employer
 # only). Matched on the normalized company name, exactly as EMPLOYER_RESIDENCE_NOTES is.
 COMMUTE_EMPLOYER_PLACES = {}
+# Places the user would MOVE to, not commute to. Also listed in COMMUTABLE_PLACES (that is what lets them
+# pass the location rule); a posting whose only in-area sites are here gets a "via relocation" flag instead
+# of the commute flag. Spelled exactly as in COMMUTABLE_PLACES. Default empty; set in profile_local.py.
+RELOCATION_PLACES = []
 
 # Per-employer residence knowledge the JD text never states (§23 amendment): some employers restrict
 # remote hires to residents near one of a handful of hub offices without writing that policy into the

@@ -1603,6 +1603,30 @@ def test_avature_pages_by_offset_and_checks_count(monkeypatch):
     assert "avature" in A.IMPLEMENTED_PLATFORMS and "avature" in A.DETAIL_PLATFORMS
     jobs.pop()                                            # the site says 5 but serves 4: never close-pass
     assert getattr(A.list_jobs(row), "truncated", False)
+    assert any("jobSort=postedDate" in u for u in urls)  # a short first pass tries the second order
+
+
+def test_avature_second_order_recovers_a_shifted_posting(monkeypatch):
+    """The name-ordered pass misses job 102 (a page shifted mid-pull); the posted-date pass has it."""
+    named = [_avature_article(str(i), f"Analyst {i}", "Reston, Virginia, United States") for i in (100, 101, 103)]
+    dated = [_avature_article(str(i), f"Analyst {i}", "Reston, Virginia, United States") for i in (103, 102, 101, 100)]
+
+    class Resp:
+        def __init__(self, text):
+            self.text = text
+
+    def fake(c, method, url, **kw):
+        off = int(url.rsplit("jobOffset=", 1)[1])
+        jobs = dated if "jobSort=postedDate" in url else named
+        return Resp('<div aria-label="4 results"></div>' + "".join(jobs[off:off + 2]))
+
+    monkeypatch.setattr(A, "_request", fake)
+    monkeypatch.setattr(A, "AVATURE_PAGE_DELAY", 0)
+    row = {"employer": "Example", "platform": "avature", "identifier_1": "https://careers.example.com",
+           "identifier_2": "en_US/ex", "identifier_3": ""}
+    out = A.list_jobs(row)
+    assert sorted(p["req_id"] for p in out) == ["100", "101", "102", "103"]
+    assert not getattr(out, "truncated", False)
 
 
 def test_avature_deloitte_shape_floor_count(monkeypatch):

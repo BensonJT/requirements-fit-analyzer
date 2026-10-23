@@ -1946,31 +1946,56 @@ def _avature_page(html):
     return total, floor, out
 
 
-def avature_jobs(row, max_pages=None):
-    base = _avature_base(row)
+_AVATURE_ORDERS = ("", "jobSort=postedDate&jobSortDirection=DESC&")
+
+
+def _avature_pass(c, row, base, order, max_pages):
+    """One ordered pass over the board: (postings, total, floor, capped)."""
     out, seen, offset, pages, total, floor = [], set(), 0, 0, None, False
+    while True:
+        html = _request(c, "GET", f"{base}/SearchJobs/?{order}jobOffset={offset}").text
+        page_total, page_floor, got = _avature_page(html)
+        if pages == 0:
+            if page_total is None and not got:
+                # Never return [] for an unread board: the close pass would take every posting down.
+                raise RuntimeError(f"{row['employer']}: no results and no count on {base}/SearchJobs/")
+            total, floor = page_total, page_floor
+        fresh = [p for p in got if p["req_id"] not in seen]
+        for p in fresh:
+            seen.add(p["req_id"])
+            out.append(p)
+        pages += 1
+        offset += len(got)
+        if not fresh or (total is not None and not floor and offset >= total):
+            return out, total, floor, False
+        if max_pages and pages >= max_pages:
+            return out, total, floor, True
+        time.sleep(AVATURE_PAGE_DELAY)
+
+
+def avature_jobs(row, max_pages=None):
+    """Offset paging over a name-sorted list shifts when a job is added or removed mid-pull, so a
+    pass can skip a posting. A second pass in posted-date order is unioned in when the first falls
+    short of the site's count, and always when the count is only a floor ("999+", Deloitte), where
+    a short pull cannot be detected (the eightfold adapter does the same with two orders)."""
+    base = _avature_base(row)
+    out, seen = [], set()
     with _avature_client() as c:
-        while True:
-            html = _request(c, "GET", f"{base}/SearchJobs/?jobOffset={offset}").text
-            page_total, page_floor, got = _avature_page(html)
-            if pages == 0:
-                if page_total is None and not got:
-                    # Never return [] for an unread board: the close pass would take every posting down.
-                    raise RuntimeError(f"{row['employer']}: no results and no count on {base}/SearchJobs/")
-                total, floor = page_total, page_floor
-            fresh = [p for p in got if p["req_id"] not in seen]
-            for p in fresh:
-                seen.add(p["req_id"])
-                out.append(p)
-            pages += 1
-            offset += len(got)
-            if not fresh or (total is not None and not floor and offset >= total):
-                break
-            if max_pages and pages >= max_pages:
+        for i, order in enumerate(_AVATURE_ORDERS):
+            got, total, floor, capped = _avature_pass(c, row, base, order, max_pages)
+            for p in got:
+                if p["req_id"] not in seen:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            if capped:
                 return Truncated(out)
+            if i == 0:
+                first_total, first_floor = total, floor
+                if total is not None and not floor and len(out) >= total:
+                    return out
             time.sleep(AVATURE_PAGE_DELAY)
     # Complete only when the count the site shows is reached (a "999+" floor counts as a minimum).
-    if total is None or len(out) < total:
+    if first_total is None or len(out) < first_total:
         return Truncated(out)
     return out
 

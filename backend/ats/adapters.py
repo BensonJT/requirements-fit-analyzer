@@ -18,6 +18,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from urllib.parse import quote
 
 import httpx
@@ -1564,6 +1565,468 @@ def deel_detail(row, posting):
     return _deel_detail_fields(resp.text, posting)
 
 
+# ================================================================ Phenom (careers.<employer>.com)
+# Registry: identifier_1 = the career-site host (https://careers.conduent.com), identifier_2 = the
+# site path the host redirects to (us/en, global/en), identifier_3 = the Phenom refNum (COJCONUS;
+# reference only -- the widgets call does not need it). The search page's own XHR,
+# `POST /widgets` with ddoKey=refineSearch, pages with from/size and returns `totalHits`, a
+# `country` aggregation and job records (title, location, multi_location, jobId, postedDate).
+# US scope (like Workday's Country facet): one cheap unfiltered call reads the country aggregation,
+# and the pull filters on whichever spelling the tenant uses ("United States" at Conduent,
+# "United States of America" at Cisco and MITRE). A board with no US value is pulled whole.
+# The JD lives in the job page's embedded `phApp.ddo = {...}` (jobDetail.data.job.description);
+# a removed job answers 410, which _request raises as Gone.
+PHENOM_PAGE = 100
+_US_COUNTRY_NAMES = {"united states of america", "united states", "usa", "u.s.a.", "us", "u.s.",
+                     "united states (usa)"}
+_PHENOM_DDO = re.compile(r"phApp\.ddo\s*=\s*")
+
+
+def _phenom_site(row):
+    host = row["identifier_1"].rstrip("/")
+    if not host.startswith("http"):
+        host = "https://" + host
+    path = (row["identifier_2"] or "us/en").strip("/")
+    country, lang = (path.split("/") + ["en"])[:2]
+    return host, path, f"{lang}_{country}", country
+
+
+def _phenom_body(lang, country, frm, size, us_value=None):
+    return {"lang": lang, "deviceType": "desktop", "country": country, "pageName": "search-results",
+            "ddoKey": "refineSearch", "from": frm, "size": size, "jobs": True, "counts": True,
+            "all_fields": ["country"], "clearAll": False, "jdsource": "facets", "isSliderEnable": False,
+            "pageId": "page20", "siteType": "external", "keywords": "", "global": True,
+            "selected_fields": {"country": [us_value]} if us_value else {}, "locationData": {}}
+
+
+def _phenom_search(c, host, body):
+    data = _request(c, "POST", f"{host}/widgets", json=body).json().get("refineSearch")
+    if not isinstance(data, dict) or "totalHits" not in data:
+        raise RuntimeError(f"no refineSearch block from {host}/widgets")
+    return data
+
+
+def _phenom_us_value(search):
+    """The tenant's spelling of the United States in the `country` aggregation, or None."""
+    for agg in (search.get("data") or {}).get("aggregations") or []:
+        if agg.get("field") == "country":
+            for value in (agg.get("value") or {}):
+                if value.strip().lower() in _US_COUNTRY_NAMES:
+                    return value
+    return None
+
+
+def _phenom_slug(title):
+    return re.sub(r"[^A-Za-z0-9]+", "-", title or "job").strip("-") or "job"
+
+
+def _phenom_position(host, path, j):
+    locs = list(j.get("multi_location") or []) or [j.get("location")]
+    country = j.get("country") or ""
+    job_id = str(j.get("jobId") or j.get("reqId"))
+    remote = j.get("remote")
+    return N.base(
+        req_id=job_id,
+        title=j.get("title"),
+        url=f"{host}/{path}/job/{quote(job_id, safe='')}/{_phenom_slug(j.get('title'))}",
+        location_primary=j.get("location") or (locs[0] if locs else None),
+        locations=N.locations_json(locs),
+        country="US" if country.strip().lower() in _US_COUNTRY_NAMES else None,
+        workplace_type=N.workplace_type("remote" if str(remote).lower() in ("yes", "true") else remote,
+                                        *[l for l in locs if isinstance(l, str)]),
+        employment_type=N.employment_type(j.get("type") or j.get("jobType")),
+        job_family=j.get("category") or None,
+        posted_at=N.parse_date(j.get("postedDate") or j.get("dateCreated")),
+        description_text=None,   # the list carries a teaser; detail fills the JD
+        raw_json=N.raw({k: v for k, v in j.items() if k not in ("ml_skills", "ml_job_parser")}),
+    )
+
+
+def phenom_jobs(row, max_pages=None):
+    host, path, lang, country = _phenom_site(row)
+    out, seen, pages = [], set(), 0
+    with client() as c:
+        us_value = _phenom_us_value(_phenom_search(c, host, _phenom_body(lang, country, 0, 1)))
+        frm, total = 0, None
+        while True:
+            data = _phenom_search(c, host, _phenom_body(lang, country, frm, PHENOM_PAGE, us_value))
+            total = data.get("totalHits") or 0
+            jobs = (data.get("data") or {}).get("jobs") or []
+            for j in jobs:
+                p = _phenom_position(host, path, j)
+                if p["req_id"] not in seen:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            pages += 1
+            frm += len(jobs)
+            if not jobs or frm >= total:
+                break
+            if max_pages and pages >= max_pages:
+                return Truncated(out)
+            time.sleep(PAGE_DELAY)
+    # A short enumeration (paging that stopped early, or a board that changed mid-pull) is never
+    # close-passed: anything missing would be read as taken down.
+    return Truncated(out) if len(out) < total else out
+
+
+def _phenom_detail_fields(html, posting):
+    m = _PHENOM_DDO.search(html)
+    if not m:
+        raise RuntimeError("no phApp.ddo block on Phenom job page")
+    ddo, _ = json.JSONDecoder().raw_decode(html, m.end())
+    job = ((ddo.get("jobDetail") or {}).get("data") or {}).get("job") or {}
+    if not job.get("title") and not job.get("description"):
+        # Never Gone: a removed job answers 410 (raised by _request); an empty record on a 200 could
+        # be a layout change, and the board close-pass handles removal anyway.
+        raise RuntimeError(f"Phenom job page has no job record: {posting.get('url')}")
+    desc = job.get("description") or ""
+    quals = job.get("qualifications") or ""
+    parts = [desc] + ([quals] if quals and quals not in desc else [])
+    text = N.html_to_text("\n".join(parts))
+    locs = [l.get("location") if isinstance(l, dict) else l for l in job.get("multi_location") or []]
+    remote = job.get("remote")
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        locations=N.locations_json(locs) if any(locs) else posting.get("locations"),
+        workplace_type=N.workplace_type("remote" if str(remote).lower() in ("yes", "true") else remote,
+                                        *[l for l in locs if l]) or posting.get("workplace_type"),
+        employment_type=N.employment_type(job.get("type") or job.get("jobType")) or posting.get("employment_type"),
+        posted_at=N.parse_date(job.get("postedDate")) or posting.get("posted_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def phenom_detail(row, posting):
+    if not posting.get("url"):
+        host, path, _, _ = _phenom_site(row)
+        posting = dict(posting, url=f"{host}/{path}/job/{quote(str(posting['req_id']), safe='')}/job")
+    with client() as c:
+        resp = _request(c, "GET", posting["url"])
+    return _phenom_detail_fields(resp.text, posting)
+
+
+# ================================================================ SAP SuccessFactors Career Site Builder (RMK)
+# Registry: identifier_1 = the career-site host (https://careers-inc.nttdata.com), identifier_2 = the
+# country facet value for US scope (`US`; blank pulls the whole board). The search page
+# `/search/?q=&optionsFacetsDD_country=US&startrow=N` is server-rendered HTML in one of two
+# templates: a table (`tr.data-row`, 25 per page, "Results 1 – 25 of 344") or tiles
+# (`li.job-tile`, 100 per page, "Showing 1 to 100 of 2085 Jobs"). Job links are
+# `/job/<slug>/<id>/`. The RSS feed (/services/rss/job/) stops at ~20 items, so it is not used.
+# The JD is the job page's schema.org microdata (itemprop=description / datePosted / address*).
+# A removed job redirects to /errorpage/; that is read as an error, never Gone -- the board
+# close-pass handles removal.
+_RMK_TOTAL = (re.compile(r"Results\s*<b>[^<]*</b>\s*of\s*<b>\s*([\d,]+)\s*</b>"),
+              re.compile(r"Showing\s+\d+\s+to\s+\d+\s+of\s+([\d,]+)\s+Jobs"))
+_RMK_JOB_ID = re.compile(r"/job/[^/]+/(\d+)/?")
+_RMK_DATE_FORMATS = ("%a %b %d %H:%M:%S %Z %Y", "%b %d, %Y", "%d %b %Y", "%m/%d/%Y")
+
+
+def _rmk_host(row):
+    host = row["identifier_1"].rstrip("/")
+    return host if host.startswith("http") else "https://" + host
+
+
+def _rmk_date(value):
+    value = (value or "").strip()
+    for fmt in _RMK_DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return N.parse_date(value) if value else None
+
+
+def _rmk_country(location, explicit=None):
+    if explicit:
+        return explicit.strip().upper()[:2] or None
+    parts = [p.strip() for p in (location or "").split(",")]
+    for p in parts[2:]:                      # "City, ST, US" / "City, ST, US, 14606"
+        if re.fullmatch(r"[A-Z]{2}", p):
+            return p
+    return None
+
+
+def _rmk_page(html, host):
+    """(total or None, [postings]) from one search-results page, either template."""
+    from bs4 import BeautifulSoup
+    total = None
+    for rx in _RMK_TOTAL:
+        m = rx.search(html)
+        if m:
+            total = int(m.group(1).replace(",", ""))
+            break
+    soup = BeautifulSoup(html, "lxml")
+    rows = []
+    for tr in soup.select("tr.data-row"):
+        a = tr.select_one("a.jobTitle-link")
+        loc = tr.select_one("td.colLocation span.jobLocation") or tr.select_one("span.jobLocation")
+        dt = tr.select_one("td.colDate span.jobDate") or tr.select_one("span.jobDate")
+        if a is not None:
+            rows.append((a.get("href"), a.get_text(" ", strip=True), loc.get_text(" ", strip=True) if loc else None,
+                         dt.get_text(" ", strip=True) if dt else None, None))
+    for li in soup.select("li.job-tile"):
+        a = li.select_one("a.jobTitle-link")
+
+        def field(name):
+            el = li.select_one(f'div[id$="-desktop-section-{name}-value"]') or li.select_one(f'div[id$="-section-{name}-value"]')
+            return el.get_text(" ", strip=True) if el else None
+        if a is not None:
+            rows.append((li.get("data-url") or a.get("href"), a.get_text(" ", strip=True), field("location"),
+                         field("date"), field("country")))
+    out = []
+    for href, title, loc, posted, country in rows:
+        m = _RMK_JOB_ID.search(href or "")
+        if not m:
+            continue
+        out.append(N.base(
+            req_id=m.group(1),
+            title=title,
+            url=host + href if href.startswith("/") else href,
+            location_primary=loc,
+            locations=N.locations_json([loc]),
+            country=_rmk_country(loc, country),
+            workplace_type=N.workplace_type(None, loc, title),
+            posted_at=_rmk_date(posted),
+            raw_json=N.raw({"href": href, "title": title, "location": loc, "date": posted, "country": country}),
+        ))
+    return total, out
+
+
+def successfactors_rmk_jobs(row, max_pages=None):
+    host = _rmk_host(row)
+    country = (row.get("identifier_2") or "").strip()
+    facet = f"&optionsFacetsDD_country={quote(country, safe='')}" if country else ""
+    out, seen, start, pages, total = [], set(), 0, 0, None
+    with client() as c:
+        while True:
+            html = _request(c, "GET", f"{host}/search/?q={facet}&startrow={start}").text
+            page_total, got = _rmk_page(html, host)
+            if page_total is None and pages == 0:
+                # Never return [] for an unread board: the close pass would take every posting down.
+                raise RuntimeError(f"{row['employer']}: no result count on {host}/search/")
+            total = page_total if page_total is not None else total
+            for p in got:
+                if p["req_id"] not in seen:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            pages += 1
+            start += len(got)
+            if not got or start >= (total or 0):
+                break
+            if max_pages and pages >= max_pages:
+                return Truncated(out)
+            time.sleep(PAGE_DELAY)
+    return Truncated(out) if len(out) < (total or 0) else out
+
+
+def _rmk_detail_fields(html, posting):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    desc = soup.select_one('[itemprop="description"]') or soup.select_one(".jobdescription")
+    if desc is None:
+        raise RuntimeError(f"no job description on RMK job page {posting.get('url')}")
+    text = N.html_to_text(str(desc))
+
+    def meta(prop):
+        el = soup.select_one(f'[itemprop="{prop}"][content]')
+        return el.get("content").strip() if el else None
+    city, region, ctry = meta("addressLocality"), meta("addressRegion"), meta("addressCountry")
+    loc = ", ".join(x for x in (city, region, ctry) if x) or None
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        locations=posting.get("locations") or N.locations_json([loc]),
+        workplace_type=N.workplace_type(None, posting.get("location_primary") or "") or posting.get("workplace_type"),
+        posted_at=_rmk_date(meta("datePosted")) or posting.get("posted_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def successfactors_rmk_detail(row, posting):
+    url = posting.get("url") or f"{_rmk_host(row)}/job/job/{posting['req_id']}/"
+    with client() as c:
+        resp = _request(c, "GET", url)
+    if "/errorpage" in str(resp.url):
+        raise RuntimeError(f"RMK job page redirected to an error page: {url}")
+    return _rmk_detail_fields(resp.text, posting)
+
+
+# ================================================================ Avature (portal sites)
+# Registry: identifier_1 = the portal host (https://www.metlifecareers.com), identifier_2 = the portal
+# path (en_US/ml, en_US/careers). `/SearchJobs/?jobOffset=N` is server-rendered HTML that pages at a
+# fixed, tenant-set size (MetLife 6, Deloitte 10; jobRecordsPerPage cannot raise it). The RSS feed
+# (/SearchJobs/feed/) stops at 20 items whatever its params, so it is not used. The count is
+# `aria-label="403 results"` (MetLife) or `data-total="999+"` on each result (Deloitte, a floor).
+# Each result is an `article--result` with a /JobDetail/<slug>/<id> link. The JD comes from the
+# job page's JobPosting JSON-LD (Deloitte) or its article__content__view fields (MetLife, whose
+# JSON-LD has no description). A removed job 404s (Gone).
+# User agent: Deloitte's nginx answers 406 to the desktop-Linux browser string `client()` sends,
+# while a plain, honest client string is served normally, so this adapter identifies itself as
+# what it is instead of posing as a browser. No challenge is involved or worked around.
+AVATURE_UA = "jobsearch-ats/1.0"
+AVATURE_PAGE_DELAY = 0.5
+_AVATURE_COUNT = re.compile(r'aria-label="([\d,]+) results?"')
+_AVATURE_FLOOR = re.compile(r'data-total="(\d+)\+"')
+_AVATURE_EXACT = re.compile(r'data-total="(\d+)"')
+_AVATURE_ID = re.compile(r"/JobDetail/(?:[^/?#]+/)?(\d+)(?:[/?#]|$)")
+_AVATURE_LDJSON = re.compile(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', re.S)
+
+
+def _avature_client():
+    return httpx.Client(timeout=TIMEOUT, headers={"User-Agent": AVATURE_UA}, follow_redirects=True)
+
+
+def _avature_base(row):
+    host = row["identifier_1"].rstrip("/")
+    if not host.startswith("http"):
+        host = "https://" + host
+    return f"{host}/{(row['identifier_2'] or '').strip('/')}"
+
+
+def _avature_country(*locs):
+    for loc in locs:
+        tail = (loc or "").rsplit(",", 1)[-1].strip().lower()
+        if tail in _US_COUNTRY_NAMES:
+            return "US"
+    return None
+
+
+def _avature_date(value):
+    value = (value or "").strip()
+    for fmt in ("%d-%b-%Y", "%b %d, %Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return N.parse_date(value) if value else None
+
+
+def _avature_page(html):
+    """(total, is_floor, [postings]) from one SearchJobs page. total is None when the page shows none."""
+    from bs4 import BeautifulSoup
+    total, floor = None, False
+    m = _AVATURE_COUNT.search(html)
+    if m:
+        total = int(m.group(1).replace(",", ""))
+    else:
+        m = _AVATURE_FLOOR.search(html) or _AVATURE_EXACT.search(html)
+        if m:
+            total, floor = int(m.group(1)), m.re is _AVATURE_FLOOR
+    out = []
+    for art in BeautifulSoup(html, "lxml").select("article[class*='article--result']"):
+        a = art.select_one("h3 a[href*='/JobDetail']") or art.select_one("a[href*='/JobDetail']")
+        if a is None:
+            continue
+        m = _AVATURE_ID.search(a.get("href") or "")
+        if not m:
+            continue
+        loc_el = art.select_one(".list-item-location")
+        if loc_el is not None:
+            loc = loc_el.get_text(" ", strip=True)
+        else:   # Deloitte: "<span>Deloitte US</span> | <span>Business</span> | <span>Location</span>"
+            spans = art.select(".article__header__text__subtitle span")
+            loc = spans[-1].get_text(" ", strip=True) if spans else None
+        posted = art.select_one(".list-item-posted")
+        title = a.get_text(" ", strip=True)
+        out.append(N.base(
+            req_id=m.group(1),
+            title=title,
+            url=a.get("href"),
+            location_primary=loc,
+            locations=N.locations_json([loc]),
+            country=_avature_country(loc),
+            workplace_type=N.workplace_type(None, loc or "", title),
+            posted_at=_avature_date(posted.get_text(" ", strip=True)) if posted else None,
+            raw_json=N.raw({"href": a.get("href"), "title": title, "location": loc,
+                            "posted": posted.get_text(" ", strip=True) if posted else None}),
+        ))
+    return total, floor, out
+
+
+def avature_jobs(row, max_pages=None):
+    base = _avature_base(row)
+    out, seen, offset, pages, total, floor = [], set(), 0, 0, None, False
+    with _avature_client() as c:
+        while True:
+            html = _request(c, "GET", f"{base}/SearchJobs/?jobOffset={offset}").text
+            page_total, page_floor, got = _avature_page(html)
+            if pages == 0:
+                if page_total is None and not got:
+                    # Never return [] for an unread board: the close pass would take every posting down.
+                    raise RuntimeError(f"{row['employer']}: no results and no count on {base}/SearchJobs/")
+                total, floor = page_total, page_floor
+            fresh = [p for p in got if p["req_id"] not in seen]
+            for p in fresh:
+                seen.add(p["req_id"])
+                out.append(p)
+            pages += 1
+            offset += len(got)
+            if not fresh or (total is not None and not floor and offset >= total):
+                break
+            if max_pages and pages >= max_pages:
+                return Truncated(out)
+            time.sleep(AVATURE_PAGE_DELAY)
+    # Complete only when the count the site shows is reached (a "999+" floor counts as a minimum).
+    if total is None or len(out) < total:
+        return Truncated(out)
+    return out
+
+
+def _avature_detail_fields(html, posting):
+    from bs4 import BeautifulSoup
+    ld = None
+    for block in _AVATURE_LDJSON.findall(html):
+        try:
+            d = json.loads(block)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("@type") == "JobPosting":
+            if ld is None or len(d.get("description") or "") > len(ld.get("description") or ""):
+                ld = d
+    soup = BeautifulSoup(html, "lxml")
+    fields = {}
+    texts = []
+    for fld in soup.select(".article__content__view__field"):
+        lab = fld.select_one(".article__content__view__field__label")
+        val = fld.select_one(".article__content__view__field__value") or fld
+        if lab is not None:
+            fields[lab.get_text(" ", strip=True).lower()] = val.get_text(" ", strip=True)
+        else:
+            texts.append(val.get_text("\n", strip=True))
+    if ld and ld.get("description"):
+        text = N.html_to_text(ld["description"])
+    elif texts:
+        text = "\n\n".join(texts)
+    else:
+        raise RuntimeError(f"no job description on Avature job page {posting.get('url')}")
+    locs = [p.get_text(" ", strip=True) for p in soup.select(".article__header--locations p")]
+    pay = N.pay_from_text(text)
+    ld = ld or {}
+    return dict(
+        description_text=text,
+        locations=N.locations_json(locs) if locs else posting.get("locations"),
+        country=_avature_country(*locs) or posting.get("country"),
+        workplace_type=N.workplace_type(fields.get("work arrangement"), *locs)
+        or posting.get("workplace_type"),
+        employment_type=N.employment_type(fields.get("working schedule")) or posting.get("employment_type"),
+        posted_at=N.parse_date(ld.get("datePosted")) or _avature_date(fields.get("posted date"))
+        or posting.get("posted_at"),
+        posting_end_at=N.parse_date(ld.get("validThrough")) or posting.get("posting_end_at"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def avature_detail(row, posting):
+    url = posting.get("url") or f"{_avature_base(row)}/JobDetail/job/{posting['req_id']}"
+    with _avature_client() as c:
+        resp = _request(c, "GET", url)
+    return _avature_detail_fields(resp.text, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -1578,6 +2041,9 @@ _LIST = {
     "usajobs": usajobs_jobs,
     "adp": adp_jobs,
     "deel": deel_jobs,
+    "phenom": phenom_jobs,
+    "successfactors_rmk": successfactors_rmk_jobs,
+    "avature": avature_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -1589,6 +2055,9 @@ _DETAIL = {
     "paylocity": paylocity_detail,
     "adp": adp_detail,
     "deel": deel_detail,
+    "phenom": phenom_detail,
+    "successfactors_rmk": successfactors_rmk_detail,
+    "avature": avature_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

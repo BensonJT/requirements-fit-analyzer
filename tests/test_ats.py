@@ -1134,6 +1134,46 @@ def test_adp_jobs_paginates_one_based_and_stops_on_total_number(monkeypatch):
     assert not getattr(out, "truncated", False)
 
 
+def test_adp_jobs_steps_by_the_page_the_server_sent_when_it_caps_top(monkeypatch):
+    """Some tenants cap $top below ADP_PAGE (Lassonde: 20 of 50, 2026-10-24). Stepping $skip by ADP_PAGE
+    skipped the rest of every page; stepping by what came back reads the whole board."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "ADP_PAGE", 4)
+    items = _adp_fixture("list.json")["jobRequisitions"]
+    inner = _adp_one_based_server(items)
+
+    class _Capped(inner):
+        def request(self, method, url, **kw):
+            return inner.request(self, method, url.replace("$top=4", "$top=2"), **kw)
+
+    monkeypatch.setattr(A, "client", _Capped)
+    out = A.adp_jobs(_ADP_ROW)
+    assert len(out) == 6 and not getattr(out, "truncated", False)
+
+
+def test_oracle_orc_scopes_parse_identifier_3():
+    assert A._oracle_orc_scopes("") == [("all", "")]
+    assert A._oracle_orc_scopes("loc:123; kw:remote work") == [
+        ("loc:123", "selectedLocationsFacet=123,"), ("kw:remote work", "keyword=remote%20work,")]
+
+
+def test_workday_filtered_pull_is_not_clamped_by_its_own_facet_counts(monkeypatch):
+    """A facet never filters its own counts: a timeType slice of 1,200 still reports the whole board's
+    timeType sum (2,461). Judged by that, every slice looked clamped and T-Mobile/Sentara were never
+    close-passed. A filtered pull is clamped only at the ceiling."""
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    page = {"total": 1, "jobPostings": [{"title": "t", "externalPath": "/job/x", "bulletFields": ["R1"]}],
+            "facets": [{"facetParameter": "timeType", "values": [{"count": 2000}, {"count": 461}]}]}
+
+    class _C:
+        def request(self, method, url, **kw): return _Resp(page)
+
+    _out, clamped = A._workday_pull(_C(), "u", "p", {"timeType": ["a"]}, None)
+    assert not clamped
+    _out, clamped = A._workday_pull(_C(), "u", "p", {}, None)
+    assert clamped
+
+
 def test_adp_jobs_board_that_is_an_exact_multiple_of_the_page_is_read_in_full(monkeypatch):
     """The regression the 1-based fix exists for: with $skip starting at 0 the first page held
     $top-1 postings, so a board of exactly 2 x $top stopped one short. It must now read all 6."""

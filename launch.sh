@@ -390,7 +390,18 @@ done
 # A failure only warns; STATUS (and so the run's exit code and timings line) is left as the steps set it.
 echo
 echo "════ $(date '+%H:%M:%S')  $PY -u scripts/pg_snapshot.py"
-timeout 900 "$PY" -u scripts/pg_snapshot.py || echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
+if timeout 900 "$PY" -u scripts/pg_snapshot.py; then
+  # Optional hook for downstream readers of the snapshot (reports, charts). The command comes from .env
+  # (POST_SNAPSHOT_CMD, never committed); it runs detached after POST_SNAPSHOT_DELAY seconds (default 45)
+  # so the launcher never waits on it. Output goes to logs/post_snapshot.log.
+  if [ -n "${POST_SNAPSHOT_CMD:-}" ]; then
+    echo "launch: post-snapshot hook starts in ${POST_SNAPSHOT_DELAY:-45}s (logs/post_snapshot.log)"
+    nohup bash -c "sleep ${POST_SNAPSHOT_DELAY:-45}; echo \"== \$(date '+%F %T')\"; $POST_SNAPSHOT_CMD" \
+      >> logs/post_snapshot.log 2>&1 < /dev/null &
+  fi
+else
+  echo "launch: WARNING pg_snapshot failed (non-fatal; the Postgres snapshot is stale)"
+fi
 # The tracker's Google Sheet view (posting links come from the snapshot just written). Skipped when
 # TRACKER_SHEET_ID is unset; never fatal.
 timeout 300 "$PY" -u -m backend.tracker.gsheet || echo "launch: WARNING tracker sheet refresh failed (non-fatal)"

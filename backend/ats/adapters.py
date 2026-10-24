@@ -236,7 +236,10 @@ def _workday_pull(c, url, public, applied, max_pages, search_text=""):
             # A board previously discovered as unclamped (or one with a stored `plain`/`country`
             # scope) can grow past the ceiling between runs -- check every pull's first page live
             # rather than trusting board_scope, or the close-pass silently closes real reqs.
-            if _workday_total_is_clamped(data):
+            # A filtered pull is judged by the ceiling alone: a facet never filters its OWN counts, so a
+            # `timeType` partition still reports the whole board's timeType sum and every slice looked
+            # clamped (T-Mobile, Sentara: union 2,461 of 2,461, yet never close-passed -- found 2026-10-24).
+            if (total >= WORKDAY_CEILING) if applied else _workday_total_is_clamped(data):
                 clamped = True
             first_page_ids = _workday_page_ids(postings)
         elif offset > 0 and total == 0 and _workday_page_ids(postings) == first_page_ids:
@@ -412,44 +415,69 @@ def _path_from_url(url, site):
 
 
 # ================================================================ Oracle Recruiting Cloud
+def _oracle_orc_scopes(spec):
+    """[(label, finder_args)] from identifier_3, or [("all", "")] when it is blank.
+
+    identifier_3 narrows a board too big to pull whole (Marriott: 13,425 global reqs, the API stops at
+    offset 10,000). It is a `;`-separated list, each entry its own pull, unioned on req id:
+    `loc:<location facet Id>` (selectedLocationsFacet, ids from the locationsFacet of a findReqs call
+    with facetsList=LOCATIONS) or `kw:<keyword>`. A posting that leaves every scoped pull is closed,
+    which is right for what we track: it left the window we care about.
+    """
+    out = []
+    for part in (spec or "").split(";"):
+        kind, _, val = part.strip().partition(":")
+        if kind == "loc" and val:
+            out.append((part.strip(), f"selectedLocationsFacet={val.strip()},"))
+        elif kind == "kw" and val:
+            out.append((part.strip(), f"keyword={quote(val.strip())},"))
+    return out or [("all", "")]
+
+
 def oracle_orc_jobs(row, max_pages=None):
     host, site = row["identifier_1"].rstrip("/"), row["identifier_2"]
     # An empty site number hits the tenant's default career site (SAIC's row has none
     # confirmed yet, and the default returned 966 postings on 2026-09-14).
     site_arg = f"siteNumber={site}," if site else ""
-    out, offset, limit, pages = [], 0, 100, 0
+    out, seen, limit = [], set(), 100
     with client() as c:
-        while True:
-            url = (f"{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
-                   f"?onlyData=true&expand=requisitionList.secondaryLocations"
-                   f"&finder=findReqs;{site_arg}limit={limit},offset={offset},sortBy=POSTING_DATES_DESC")
-            data = _request(c, "GET", url).json()
-            items = (data.get("items") or [{}])[0].get("requisitionList") or []
-            for j in items:
-                locs = [j.get("PrimaryLocation")] + list(j.get("secondaryLocations") or [])
-                out.append(N.base(
-                    req_id=str(j.get("Id") or j.get("RequisitionNumber")),
-                    title=j.get("Title"),
-                    url=f"{host}/hcmUI/CandidateExperience/en/sites/{site}/requisitions/preview/{j.get('Id')}",
-                    location_primary=j.get("PrimaryLocation"),
-                    locations=N.locations_json(locs),
-                    country=j.get("PrimaryLocationCountry"),
-                    workplace_type=N.workplace_type(j.get("WorkplaceTypeCode") or j.get("WorkplaceType"), j.get("PrimaryLocation")),
-                    employment_type=N.employment_type(j.get("JobSchedule") or j.get("WorkerType")),
-                    job_family=j.get("JobFamily") or j.get("JobFunction"),
-                    job_level=j.get("ManagerLevel"),
-                    posted_at=N.parse_date(j.get("PostedDate")),
-                    posting_end_at=N.parse_date(j.get("PostingEndDate")),
-                    description_text=None,  # list only carries a teaser; detail fills it
-                    raw_json=N.raw(j),
-                ))
-            pages += 1
-            offset += limit
-            if len(items) < limit:
-                break
-            if max_pages and pages >= max_pages:
-                return Truncated(out)
-            time.sleep(PAGE_DELAY)
+        for _label, scope_arg in _oracle_orc_scopes(row.get("identifier_3")):
+            offset, pages = 0, 0
+            while True:
+                url = (f"{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                       f"?onlyData=true&expand=requisitionList.secondaryLocations"
+                       f"&finder=findReqs;{site_arg}{scope_arg}limit={limit},offset={offset},sortBy=POSTING_DATES_DESC")
+                data = _request(c, "GET", url).json()
+                items = (data.get("items") or [{}])[0].get("requisitionList") or []
+                for j in items:
+                    req_id = str(j.get("Id") or j.get("RequisitionNumber"))
+                    if req_id in seen:
+                        continue
+                    seen.add(req_id)
+                    locs = [j.get("PrimaryLocation")] + list(j.get("secondaryLocations") or [])
+                    out.append(N.base(
+                        req_id=req_id,
+                        title=j.get("Title"),
+                        url=f"{host}/hcmUI/CandidateExperience/en/sites/{site}/requisitions/preview/{j.get('Id')}",
+                        location_primary=j.get("PrimaryLocation"),
+                        locations=N.locations_json(locs),
+                        country=j.get("PrimaryLocationCountry"),
+                        workplace_type=N.workplace_type(j.get("WorkplaceTypeCode") or j.get("WorkplaceType"), j.get("PrimaryLocation")),
+                        employment_type=N.employment_type(j.get("JobSchedule") or j.get("WorkerType")),
+                        job_family=j.get("JobFamily") or j.get("JobFunction"),
+                        job_level=j.get("ManagerLevel"),
+                        posted_at=N.parse_date(j.get("PostedDate")),
+                        posting_end_at=N.parse_date(j.get("PostingEndDate")),
+                        description_text=None,  # list only carries a teaser; detail fills it
+                        raw_json=N.raw(j),
+                    ))
+                pages += 1
+                offset += limit
+                if len(items) < limit:
+                    break
+                if max_pages and pages >= max_pages:
+                    return Truncated(out)
+                time.sleep(PAGE_DELAY)
     return out
 
 
@@ -1050,7 +1078,9 @@ def adp_jobs(row, max_pages=None):
                 out.append(_adp_position(row, item))
                 added += 1
             pages += 1
-            skip += ADP_PAGE
+            # Step by the page the server actually sent: some tenants cap $top at 20 (Lassonde, 2026-10-24),
+            # and stepping by ADP_PAGE skipped 30 of every 50 postings.
+            skip += len(items) or ADP_PAGE
             if total and len(seen) >= total:
                 return out
             if not items or not added:

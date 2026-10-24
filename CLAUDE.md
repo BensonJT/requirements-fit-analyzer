@@ -101,7 +101,7 @@ the newest promoted run is stale (see README).
 report the same day shows the next rows down, while its summary table still lists everything at or above the bar.
 
 ## Session continuity (STATUS.md)
-`docs/STATUS.md` is the session state file — read it first, update it last.
+`docs/STATUS.md` is the session state file — read it first, update it last. It is git-ignored (local only, since 2026-10-24): it names employers and the job search, so it never goes to the public repo. Update it, but never `git add -f` it.
 - **Start:** Output the SESSION START CONFIRMATION block before doing anything else
 - **End:** Overwrite STATUS.md with current state snapshot (git history is the changelog)
 - Do not wait to be asked — updating STATUS.md is part of wrapping up, same as a commit

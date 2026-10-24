@@ -191,3 +191,6 @@ logs/launch_timings.jsonl
 # These carry screening judgments about named employers, so none of it belongs in the public repo.
 logs/*
 db/*.txt
+
+# Session state file: local working log for the owner and AI sessions, never published (2026-10-24)
+docs/STATUS.md

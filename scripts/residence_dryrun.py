@@ -1,4 +1,6 @@
 """Read-only dry run for the residence-restricted-remote rule (docs/SPRINT_PLAN.md §23).
+Historical: the rule shipped in backend/screen.py, so postings it rejects are already excluded here and a
+re-run mostly shows what it lets through. Kept for the record.
 
 Opens db/jobsearch.duckdb READ-ONLY -- never call backend.ats.store.connect() here, which runs
 schema migrations and CREATE/ALTER statements against the file. Applies

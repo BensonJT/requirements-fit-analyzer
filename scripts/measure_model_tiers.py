@@ -4,7 +4,7 @@ Out-of-sample by default: pass --labels-since (when the judged wave was imported
 retrain that learned those labels started). Each labelled posting is then scored by the LATEST screen row
 written before that retrain, i.e. by models that never saw its label. `screens` is append-only, so those rows
 survive a rescreen. Without the two flags it measures in-sample on every judged row (quote those numbers only
-as in-sample).
+as in-sample). Read-only. Adjudicated rows are excluded.
 
     .venv/bin/python scripts/measure_model_tiers.py --labels-since 2026-09-28 --scores-before '2026-09-28 14:00'
 """
@@ -16,13 +16,18 @@ GOOD = ("bullseye", "adjacent")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="db/jobsearch.duckdb")
-    ap.add_argument("--labels-since")
-    ap.add_argument("--scores-before")
-    ap.add_argument("--lens-min", default="0.70,0.80,0.70", help="process,technical,ai")
-    ap.add_argument("--req-apply", type=float, default=0.60)
-    ap.add_argument("--req-review", type=float, default=0.40)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default="db/jobsearch.duckdb", help="DuckDB file, opened read-only (default db/jobsearch.duckdb, relative to the current directory); fails if a sweep holds the lock")
+    ap.add_argument("--labels-since", help="measure only postings with a label judged on or after this date "
+                                           "(when the judged wave was imported)")
+    ap.add_argument("--scores-before", help="score each posting by its latest screen before this time (when the "
+                                            "retrain started); without it the run is IN-SAMPLE")
+    ap.add_argument("--lens-min", default="0.70,0.80,0.70",
+                    help="per-lens minimum, process,technical,ai (default 0.70,0.80,0.70, as report.py MODEL_LENS_MIN)")
+    ap.add_argument("--req-apply", type=float, default=0.60,
+                    help="required-fit cut for model Apply (default 0.60, as report.py MODEL_REQ_APPLY)")
+    ap.add_argument("--req-review", type=float, default=0.40,
+                    help="required-fit cut for model Review (default 0.40, as report.py MODEL_REQ_REVIEW)")
     a = ap.parse_args()
     con = duckdb.connect(a.db, read_only=True)
 

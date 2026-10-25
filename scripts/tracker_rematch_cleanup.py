@@ -7,6 +7,11 @@ format), and with --apply deletes their tracker-sourced decisions, then re-syncs
 
     .venv/bin/python scripts/tracker_rematch_cleanup.py            # dry run
     .venv/bin/python scripts/tracker_rematch_cleanup.py --apply
+
+One-off, kept for the record; do not re-run. Tracker matching has changed since (a 90-day window on fuzzy
+matches, the Posting ID column), so the "old rule" here is no longer the rule it was written against. The
+dry run opens DuckDB read-only and reads the tracker markdown under $JOBSEARCH_VAULT_DIR (not loaded from
+.env); --apply opens DuckDB read-write. A held lock fails the open (duckdb.IOException).
 """
 import os
 import sys
@@ -22,6 +27,9 @@ VAULT = os.environ.get("JOBSEARCH_VAULT_DIR") or ""
 
 
 def main(argv=None) -> int:
+    if {"-h", "--help"} & set(argv or sys.argv[1:]):   # --help prints this docstring; it never runs the script
+        print(__doc__)
+        return 0
     apply = "--apply" in (argv or sys.argv[1:])
     con = duckdb.connect(store.DEFAULT_DB_PATH, read_only=not apply)
     rows = T.parse_tracker(T.job_search_dir(VAULT) / T.TRACKER_FILE)

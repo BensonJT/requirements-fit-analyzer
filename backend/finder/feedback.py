@@ -184,8 +184,8 @@ def _report_feedback_row(rec: dict, now) -> list:
 def write_records(con, records: list, log=print) -> dict:
     """Writes pre-normalized report_feedback rows (dicts; see `_report_feedback_row` for the fields) through
     REPORT_FEEDBACK_INSERT_SQL, then bridges any row that carries a `required_fit` into `llm_labels` via
-    `bridge_required_label` -- the SAME two write paths `load_csv`'s golden-source import uses, factored out
-    here so `blind_sheet.import_sheet` and `backend/finder/gold_ingest.py` share them instead of each keeping
+    `bridge_required_label`. `load_csv` (the golden-source `feedback --load`) shares the INSERT but does NOT
+    bridge required_fit into llm_labels (checked 2026-10-25). Factored out here so `blind_sheet.import_sheet` and `backend/finder/gold_ingest.py` share them instead of each keeping
     its own copy (blind_sheet used to round-trip through a temp CSV file just to reach `load_csv`; this is
     that same destination without the detour)."""
     now = _now()

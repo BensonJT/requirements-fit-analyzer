@@ -13,6 +13,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+import duckdb
+
 from . import adapters, store
 from .prefilter import DETAIL_TITLE_PATTERN, DIRECTIONAL_EXCLUDE_PATTERN, DIRECTIONAL_TITLE_PATTERN
 from .registry import load_registry
@@ -287,7 +289,11 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
         all_rows = all_rows[:limit]
     fit_rows = [r for r in all_rows if r.get("track", "fit") == "fit"]
     bridge_rows = [r for r in all_rows if r.get("track", "fit") == "bridge"]
-    con = store.connect(db_path)
+    try:
+        con = store.connect(db_path)
+    except duckdb.IOException as e:   # another process (a sweep, launch.sh, finder.py) holds the write lock
+        raise SystemExit(f"sweep_ats: the DuckDB is locked by another process; nothing was pulled. Run it again "
+                         f"when that finishes.\n  ({str(e).splitlines()[0]})") from None
     try:
         stats = bridge_stats = None
         details = 0

@@ -2,7 +2,7 @@
 
 Opens db/jobsearch.duckdb READ-ONLY -- never call backend.ats.store.connect() here, which runs
 schema migrations and CREATE/ALTER statements against the file. For one employer, evaluates every
-active posting with a JD that reads as remote (backend.screen.is_remote) and whose JD text carries no
+active, not-yet-rejected posting with a JD that reads as remote (backend.screen.is_remote) and whose JD text carries no
 residence restriction of its own (backend.screen.residence_restriction kind == "none" -- a posting the
 text rule already resolved is left to that rule; see backend.screen.employer_residence_note), under a
 HYPOTHETICAL note with empty hubs (the worst case: always reject). It never reads
@@ -86,7 +86,7 @@ def main():
     would_change, sample = evaluate(rows)
 
     print(f"Employer: {args.employer}")
-    print(f"{len(rows)} active, not-rejected, remote-or-unresolved posting(s) matched.")
+    print(f"{len(rows)} active, not-rejected posting(s) with a JD matched the employer.")
     print(f"{len(would_change)} would change verdict to reject under a hypothetical empty-hubs note.")
     print("Sample titles:")
     for t in sample:

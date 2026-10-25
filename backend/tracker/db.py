@@ -5,6 +5,8 @@ DuckDB: the pipeline holds the DuckDB lock for hours. Credentials come from libp
 or PG* env vars); nothing secret is read or stored here.
 
     python -m backend.tracker.db migrate [--db NAME]
+
+Connects as $PGUSER (default postgres) on $PGHOST (default localhost).
 """
 import argparse
 import os
@@ -45,9 +47,10 @@ def migrate(conn):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="python -m backend.tracker.db")
+    ap = argparse.ArgumentParser(prog="python -m backend.tracker.db", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    m = sub.add_parser("migrate", help="apply db/pg/*.sql in order")
+    m = sub.add_parser("migrate", help="apply every db/pg/*.sql in name order, one transaction per file (each is idempotent); "
+                                        "stops at the first failing file, earlier files stay applied")
     m.add_argument("--db", default=None, help="database name (default: $TRACKER_PGDATABASE or resume)")
     args = ap.parse_args(argv)
     with connect(args.db) as conn:

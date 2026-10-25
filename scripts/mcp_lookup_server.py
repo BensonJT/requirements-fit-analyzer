@@ -557,8 +557,9 @@ def serve(stdin, stdout, db=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--db", help="database path passed to lookup.py (default: lookup.py's own)")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", help="DuckDB path passed to lookup.py for the two posting tools (default: lookup.py's "
+                                 "own); the tracker tools and jobs_query use Postgres and ignore it")
     a = ap.parse_args()
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")

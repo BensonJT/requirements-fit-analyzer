@@ -11,7 +11,8 @@ otherwise.
 
 Population: active postings not screen-rejected, UNION every posting named in DuckDB `decisions`,
 UNION every posting_id in tracker.application (any status; table may be empty or absent).
-Exit 0 on success, 1 on any failure (a locked DuckDB prints a clear message).
+Exit 0 on success, 1 on any failure (a locked DuckDB prints a clear message). A Jev-status failure only
+prints a WARNING; the snapshot still loads and exits 0.
 """
 import argparse
 import datetime as dt
@@ -158,8 +159,10 @@ def run(duckdb_path, dbname=None):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--duckdb", default="db/jobsearch.duckdb")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--duckdb", default="db/jobsearch.duckdb",
+                    help="DuckDB file, opened read-only (default db/jobsearch.duckdb, relative to the current "
+                         "directory); a held write lock exits 1")
     ap.add_argument("--db", default=None, help="Postgres database (default $TRACKER_PGDATABASE or resume)")
     args = ap.parse_args(argv)
     try:

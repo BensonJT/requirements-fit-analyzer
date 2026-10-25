@@ -3,8 +3,10 @@
     python scripts/tracker_migrate.py --tracker PATH/Application_Tracker.md --duckdb db/jobsearch.duckdb \
         --report REPORT.md [--db NAME] [--dry-run] [--force]
 
+One-off, kept for the record: the cutover is done (2026-10-21) and trk is now the only writer.
 Design: DESIGN_tracker_db.md section 10. Re-runnable: it empties the tracker tables (not `tracker.status`)
-and reloads, and refuses when any event has an actor other than `migration` unless --force. --dry-run parses
+and reloads, and refuses (exit 1, no report) when any event has an actor other than `migration` or any
+application bullet exists, unless --force. --dry-run parses
 and maps everything, writes the report and never connects to PostgreSQL. The tracker file's directory is the
 Job_Search directory; application folders are stored relative to it (`Applications/<name>`).
 
@@ -669,13 +671,15 @@ def by_section_items(c):
 
 # ---------------------------------------------------------------- main
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--tracker", required=True)
-    ap.add_argument("--duckdb", required=True)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--tracker", required=True, help="markdown tracker to migrate; Applications/ beside it is matched to rows")
+    ap.add_argument("--duckdb", required=True, help="DuckDB file, opened read-only for tracker matches and req ids "
+                                                    "(also in --dry-run); a held lock fails the run")
     ap.add_argument("--db", default=None, help="PostgreSQL database (default: $TRACKER_PGDATABASE or resume)")
-    ap.add_argument("--report", required=True)
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--report", required=True, help="markdown review report to write (overwritten; parent folders created)")
+    ap.add_argument("--dry-run", action="store_true", help="parse, map and write the report; never connect to PostgreSQL")
+    ap.add_argument("--force", action="store_true", help="wipe and reload even when non-migration events or application "
+                                                         "bullets exist (they are lost)")
     a = ap.parse_args(argv)
     tracker = Path(a.tracker)
     rows, networks, dropped = parse_tracker_file(tracker)

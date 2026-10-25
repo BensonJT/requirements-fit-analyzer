@@ -35,8 +35,6 @@ def _bloated_db(path):
     con.close()
 
 
-@pytest.mark.xfail(reason="pre-existing since 2026-09-30: `compact` returns did=False on the bloated tmp DB -- "
-                          "DuckDB free-block reporting changed; the live --auto compaction still works", strict=False)
 def test_compact_keeps_rows_and_shrinks(tmp_path):
     db = str(tmp_path / "t.duckdb")
     _bloated_db(db)
@@ -45,8 +43,8 @@ def test_compact_keeps_rows_and_shrinks(tmp_path):
     size_before = os.path.getsize(db)
 
     lines = []
-    did, saved = dbm.compact(db, log=lines.append)
-    assert did and saved > 0
+    did, saved, rc = dbm.compact(db, log=lines.append)
+    assert did and saved > 0 and rc == 0
     assert os.path.getsize(db) < size_before
     assert not os.path.exists(db + ".precompact") and not os.path.exists(db + ".compacting")
 
@@ -60,16 +58,15 @@ def test_compact_keeps_rows_and_shrinks(tmp_path):
     assert after["free_fraction"] < before["free_fraction"]
 
 
-@pytest.mark.xfail(reason="pre-existing since 2026-09-30, same cause as test_compact_keeps_rows_and_shrinks", strict=False)
 def test_compact_skips_under_threshold_unless_forced(tmp_path):
     db = str(tmp_path / "t.duckdb")
     con = store.connect(db)
     store.record_board(con, "Acme", "greenhouse", [N.base(req_id="A", title="Process Lead")], datetime(2026, 9, 23))
     con.close()
     lines = []
-    did, _ = dbm.compact(db, log=lines.append)
-    assert not did and any("skipped" in l for l in lines)
-    did, _ = dbm.compact(db, force=True, keep_old=True, log=lines.append)
+    did, _, rc = dbm.compact(db, log=lines.append)
+    assert not did and rc == 0 and any("skipped" in l for l in lines)
+    did, _, _ = dbm.compact(db, force=True, keep_old=True, log=lines.append)
     assert did and os.path.exists(db + ".precompact")
     assert duckdb.connect(db, read_only=True).execute("SELECT count(*) FROM postings").fetchone()[0] == 1
 
@@ -94,6 +91,40 @@ def test_snapshot_is_a_verified_compressed_copy(tmp_path, monkeypatch):
     restored = tmp_path / "restored.duckdb"
     restored.write_bytes(raw)
     assert duckdb.connect(str(restored), read_only=True).execute("SELECT count(*) FROM postings").fetchone()[0] == 1
+
+
+def test_compact_exit_codes_busy_locked_and_abort(tmp_path, monkeypatch):
+    """compact's exit code tells the nightly maint step what happened (2026-10-25: it used to be 0 always)."""
+    import subprocess
+    db = str(tmp_path / "t.duckdb")
+    store.connect(db).close()
+    quiet = lambda *_: None  # noqa: E731
+    assert dbm.compact(str(tmp_path / "missing.duckdb"), log=quiet)[2] == 1
+    monkeypatch.setattr(dbm, "holders", lambda *_: ["123 python finder.py screen"])
+    assert dbm.compact(db, force=True, log=quiet)[2] == 2          # a known jobsearch process: REFUSED
+    monkeypatch.setattr(dbm, "holders", lambda *_: [])
+    holder = subprocess.Popen(                                    # a holder pgrep does not know about
+        [sys.executable, "-c", "import duckdb, sys, time; c = duckdb.connect(sys.argv[1]); "
+         "print('ready', flush=True); time.sleep(60)", db], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        lines = []
+        assert dbm.compact(db, force=True, log=lines.append)[2] == 2
+        assert any("locked" in l for l in lines)
+        assert dbm.report(db, log=quiet) is None
+    finally:
+        holder.kill()
+        holder.wait()
+    real_counts = dbm.table_counts
+    calls = []
+    def drifting_counts(con):                                     # the copy "loses" a row: ABORT, no swap
+        counts = real_counts(con)
+        calls.append(1)
+        return {k: v + (1 if len(calls) > 1 else 0) for k, v in counts.items()}
+    monkeypatch.setattr(dbm, "table_counts", drifting_counts)
+    lines = []
+    did, _, rc = dbm.compact(db, force=True, log=lines.append)
+    assert not did and rc == 1 and any("ABORT" in l for l in lines)
 
 
 def test_snapshot_skips_when_database_is_held(tmp_path, monkeypatch):

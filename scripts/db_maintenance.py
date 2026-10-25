@@ -24,6 +24,7 @@ step) never rewrites 2 GB for a 2% gain.
 """
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -254,19 +255,129 @@ def snapshot(db_path, out_path, log=print):
     return 0
 
 
+def _rclone(*args, **kw):
+    return subprocess.run(["rclone", *args, *os.environ.get("RCLONE_NET", "").split()], **kw)
+
+
+def snapshot_remote(db_path, remote_file, log=print):
+    """Stream a consistent, compressed copy straight to an rclone path (Drive): nothing is written locally.
+
+    Same consistency as `snapshot` (exclusive open + CHECKPOINT, held while the copy streams). The source is hashed
+    on its way into the compressor and the compressed stream on its way into `rclone rcat`. Verified twice: Drive's
+    size + sha256 must equal the stream's, then the Drive copy is streamed back, decompressed and hashed, and must
+    equal the source. Any mismatch deletes the Drive file. Returns 0 ok, 2 database busy, 3 upload failed (network:
+    skip, retry next run), 1 verification failed.
+    """
+    import threading
+    p = Path(db_path)
+    if not p.exists():
+        log(f"snapshot: {db_path} does not exist")
+        return 1
+    busy = holders(db_path)
+    if busy:
+        log("snapshot: skipped -- another jobsearch process holds the database:")
+        for l in busy:
+            log("   " + l)
+        return 2
+    comp, decomp, _ = _codec()
+    t0 = time.monotonic()
+    try:
+        con = duckdb.connect(str(p))   # exclusive: fails if anything still holds the file
+    except duckdb.Error as e:
+        log(f"snapshot: skipped -- database is locked ({e})")
+        return 2
+    src, zsum, n, zn, feed_err = hashlib.sha256(), hashlib.sha256(), 0, 0, []
+    try:
+        con.execute("CHECKPOINT")
+        wal = Path(str(p) + ".wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            log(f"snapshot: ABORT -- WAL still has {wal.stat().st_size} bytes after CHECKPOINT")
+            return 1
+        zproc = subprocess.Popen(comp, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        up = subprocess.Popen(["rclone", "rcat", remote_file, *os.environ.get("RCLONE_NET", "").split()],
+                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        def feed():   # file -> compressor, hashing the source (a thread, so the pipes never deadlock)
+            nonlocal n
+            try:
+                with open(p, "rb") as fi:
+                    while chunk := fi.read(8 * 1024 * 1024):
+                        src.update(chunk)
+                        n += len(chunk)
+                        zproc.stdin.write(chunk)
+            except Exception as e:   # noqa: BLE001
+                feed_err.append(e)
+            finally:
+                zproc.stdin.close()
+        th = threading.Thread(target=feed)
+        th.start()
+        try:
+            while chunk := zproc.stdout.read(8 * 1024 * 1024):   # compressor -> rclone, hashing the stream
+                zsum.update(chunk)
+                zn += len(chunk)
+                up.stdin.write(chunk)
+        except BrokenPipeError:
+            pass
+        th.join()
+        up.stdin.close()
+        zrc, urc = zproc.wait(), up.wait()
+        uerr = up.stderr.read().decode(errors="replace").strip().splitlines()
+    finally:
+        con.close()
+    if urc != 0:
+        log(f"snapshot: upload to {remote_file} failed (network?): {uerr[-1][:200] if uerr else 'rclone exit ' + str(urc)}")
+        _rclone("deletefile", remote_file, capture_output=True)
+        return 3
+    if feed_err or zrc != 0 or n != p.stat().st_size:
+        log(f"snapshot: ABORT -- compressor rc={zrc}, read {n} of {p.stat().st_size} bytes {feed_err or ''}")
+        _rclone("deletefile", remote_file, capture_output=True)
+        return 1
+    # Check 1: Drive's own size + sha256 equal the stream that was sent.
+    meta = _rclone("lsjson", "--hash", "--hash-type", "sha256", remote_file, capture_output=True, text=True)
+    try:
+        d = json.loads(meta.stdout)[0]
+        rsize, rsum = d["Size"], (d.get("Hashes") or {}).get("sha256", "")
+    except (ValueError, IndexError, KeyError):
+        rsize, rsum = None, ""
+    if rsize != zn or rsum != zsum.hexdigest():
+        log(f"snapshot: VERIFY FAILED -- Drive has size {rsize} sha256 {rsum[:12]}, sent {zn} {zsum.hexdigest()[:12]}; deleted")
+        _rclone("deletefile", remote_file, capture_output=True)
+        return 1
+    # Check 2: stream the Drive copy back, decompress, and hash: must equal the live database's bytes.
+    cat = subprocess.Popen(["rclone", "cat", remote_file, *os.environ.get("RCLONE_NET", "").split()],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    dproc = subprocess.Popen(decomp, stdin=cat.stdout, stdout=subprocess.PIPE)
+    cat.stdout.close()
+    chk, m = hashlib.sha256(), 0
+    while chunk := dproc.stdout.read(8 * 1024 * 1024):
+        chk.update(chunk)
+        m += len(chunk)
+    drc, crc = dproc.wait(), cat.wait()
+    if drc or crc or m != n or chk.digest() != src.digest():
+        log(f"snapshot: VERIFY FAILED -- round trip from Drive gave {m} of {n} bytes (rc {crc}/{drc}); deleted")
+        _rclone("deletefile", remote_file, capture_output=True)
+        return 1
+    log(f"snapshot : {_fmt(n)} -> {remote_file} {_fmt(zn)} (verified on Drive: sha256 {zsum.hexdigest()[:12]}; "
+        f"round trip = source {src.hexdigest()[:12]}) in {time.monotonic() - t0:.0f}s")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["report", "compact", "snapshot"])
     ap.add_argument("--db", default=DEFAULT_DB)
     ap.add_argument("--out", help="snapshot: destination file (a compressed copy, e.g. x.duckdb.zst)")
+    ap.add_argument("--remote", help="snapshot: stream to this rclone path instead (Drive; nothing written locally)")
     ap.add_argument("--force", action="store_true", help="compact even under the free-block threshold")
     ap.add_argument("--keep-old", action="store_true", help="keep the pre-compaction file as .precompact")
     a = ap.parse_args(argv)
     if a.cmd == "report":
         return 0 if report(a.db) is not None else 1
     if a.cmd == "snapshot":
+        if a.remote:
+            return snapshot_remote(a.db, a.remote)
         if not a.out:
-            ap.error("snapshot needs --out")
+            ap.error("snapshot needs --out or --remote")
         return snapshot(a.db, a.out)
     did, _ = compact(a.db, force=a.force, keep_old=a.keep_old)
     return 0

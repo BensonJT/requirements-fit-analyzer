@@ -420,11 +420,24 @@ def hard_negatives(result: dict, k: int = 20) -> list:
     return [(p, r["source"], r["label_id"], r["company"], r["title"]) for p, r in pairs[:k]]
 
 
-def latest_row(con, lens=None) -> Optional[tuple]:
-    """(model_version, path, notes) of the newest model for this lens, SQL only."""
+def _failed_gate(notes) -> bool:
+    """True when a `train --lens bullseye` run recorded a FAILED acceptance gate on this model's notes.
+    A model with no gate result (a retrain promotion, an older model) is not treated as failed."""
+    try:
+        return json.loads(notes or "{}").get("auc_employer_grouped_passed") is False
+    except (TypeError, ValueError):
+        return False
+
+
+def latest_row(con, lens=None, passed_gate_only=False) -> Optional[tuple]:
+    """(model_version, path, notes) of the newest model for this lens, SQL only. With `passed_gate_only`,
+    the newest one whose acceptance gate did not fail (see `_failed_gate`)."""
     kind = f"tfidf_lr_{lens}" if lens else "tfidf_lr"
-    return con.execute("SELECT model_version, path, notes FROM models WHERE kind = ? "
-                       "ORDER BY trained_at DESC LIMIT 1", [kind]).fetchone()
+    rows = con.execute("SELECT model_version, path, notes FROM models WHERE kind = ? "
+                       "ORDER BY trained_at DESC", [kind]).fetchall()
+    if passed_gate_only:
+        rows = [row for row in rows if not _failed_gate(row[2])]
+    return rows[0] if rows else None
 
 
 def _resolve_model_path(path: str, model_dir: Optional[str] = None) -> Optional[str]:
@@ -444,13 +457,19 @@ def _resolve_model_path(path: str, model_dir: Optional[str] = None) -> Optional[
     return next((c for c in candidates if os.path.exists(c)), None)
 
 
-def load_latest(con, lens=None, log=print, model_dir: Optional[str] = None) -> Optional[dict]:
+def load_latest(con, lens=None, log=print, model_dir: Optional[str] = None,
+                passed_gate_only: bool = False) -> Optional[dict]:
     """The newest trained model for `lens` (None = the averaged-grade model), or None when none exists,
     its file is gone, or scikit-learn is missing.
 
     `model_dir` is an extra fallback location to check by basename (see `_resolve_model_path`) -- useful when a
     non-default `train(..., model_dir=...)` was used and the DB row's path no longer resolves as-is."""
-    row = latest_row(con, lens=lens)
+    row = latest_row(con, lens=lens, passed_gate_only=passed_gate_only)
+    if passed_gate_only:
+        newest = latest_row(con, lens=lens)
+        if newest and (not row or newest[0] != row[0]):
+            log(f"Model {newest[0]} failed its acceptance gate; "
+                + (f"using {row[0]}, the newest that did not." if row else "no earlier model to use."))
     if not row:
         return None
     version, path, _ = row
@@ -510,10 +529,11 @@ BULLSEYE_MODEL = "bullseye"
 
 
 def load_bullseye_model(con, log=print, model_dir: Optional[str] = None) -> Optional[dict]:
-    """The `bullseye` model (features.train(lens=BULLSEYE_MODEL)), or None when it has not been trained.
-    NOT a lens (see BULLSEYE_MODEL) -- a separate function, not a LENSES entry, so it can only ever be loaded
-    by a caller that explicitly asks for it."""
-    return load_latest(con, lens=BULLSEYE_MODEL, log=log, model_dir=model_dir)
+    """The newest `bullseye` model (features.train(lens=BULLSEYE_MODEL)) that did not FAIL its acceptance gate,
+    or None when there is none. A model `train --lens bullseye` recorded as failing is skipped (2026-10-25:
+    before this, screen loaded it anyway). NOT a lens (see BULLSEYE_MODEL) -- a separate function, not a
+    LENSES entry, so it can only ever be loaded by a caller that explicitly asks for it."""
+    return load_latest(con, lens=BULLSEYE_MODEL, log=log, model_dir=model_dir, passed_gate_only=True)
 
 
 def employer_grouped_auc(con, rows: list, texts: list, y: list, weights: list, *, C: float, min_df: int,

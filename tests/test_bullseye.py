@@ -3,6 +3,7 @@
 Mirrors tests/test_finder.py's Required-block ranking model tests (_seed_required_corpus /
 test_train_required_model_*), since `bullseye` follows the exact same plumbing pattern.
 """
+import json
 import os
 import runpy
 import sys
@@ -108,6 +109,33 @@ def test_bullseye_never_in_lenses_or_load_lens_models(tmp_path):
     assert features.load_lens_models(con, log=_quiet) == {}
     model = features.load_bullseye_model(con, log=_quiet)
     assert model is not None and model["version"] == result["model_version"]
+    con.close()
+
+
+def test_load_bullseye_model_skips_a_model_that_failed_its_gate(tmp_path):
+    """A `train --lens bullseye` run whose acceptance gate FAILED must not feed screen (2026-10-25)."""
+    pytest.importorskip("sklearn")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    _seed_bullseye_corpus(con, n_each=20)
+    kw = dict(cv=3, min_df=1, max_df=1.0, model_dir=str(tmp_path / "models"), lens=features.BULLSEYE_MODEL, log=_quiet)
+    older = features.train(con, C=1.0, **kw)["model_version"]   # the version hashes the settings, so vary C
+    newer = features.train(con, C=4.0, **kw)["model_version"]
+    assert older != newer
+
+    def mark(version, passed):
+        notes = json.loads(con.execute("SELECT notes FROM models WHERE model_version = ?", [version]).fetchone()[0])
+        notes["auc_employer_grouped_passed"] = passed
+        con.execute("UPDATE models SET notes = ? WHERE model_version = ?", [json.dumps(notes), version])
+
+    mark(newer, False)
+    logs = []
+    model = features.load_bullseye_model(con, log=logs.append)
+    assert model["version"] == older                       # falls back to the newest that did not fail
+    assert any("failed its acceptance gate" in m for m in logs)
+    mark(older, False)
+    assert features.load_bullseye_model(con, log=_quiet) is None   # nothing passed: no bullseye signal at all
+    mark(newer, True)
+    assert features.load_bullseye_model(con, log=_quiet)["version"] == newer
     con.close()
 
 

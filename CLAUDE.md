@@ -120,6 +120,12 @@ If `docs/SPRINT_PLAN.md` exists, it is a binding contract.
 - Python: follow PEP 8; use type hints where practical; keep functions readable;
   add concise comments/docstrings.
 - Prefer "boring, maintainable" implementations over novel ones.
+- **`--help` is the command reference; keep it current.** After changing or improving a command-line tool
+  (`trk`, `finder.py` and its subcommands such as `mark`, `sweep_ats.py`, `scripts/*.py`), compare its
+  `--help` with the code before committing: every switch has a help line, choices and defaults match,
+  and the guide or epilog (`trk`'s `GUIDE`, `mark`'s `MARK_GUIDE`) covers any new side effect or failure
+  mode (a lock, a skipped step). The vault skills point to `--help` instead of copying it, so a stale
+  help line is a stale manual.
 
 ## Git commits:
 - After completing any meaningful unit of work, commit locally with a

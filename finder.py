@@ -67,6 +67,7 @@ from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, REPO)
+import duckdb  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(os.path.join(REPO, ".env"))
@@ -329,6 +330,47 @@ def cmd_top(con, a):
     path = report.write_top_jobs(con, a.vault, out_path=a.out, apply_cap=a.apply_cap, review_cap=a.review_cap,
                                  include_decided=a.include_decided, jev_gate_on=not a.no_jev_gate)
     print(path)
+
+
+MARK_GUIDE = """\
+targets:
+  a 20-hex posting_id; a posting URL (falls back to a req id found inside the URL); or "employer|title"
+  (fuzzy on both, active postings preferred). Several matches print the candidates and write nothing.
+
+what each decision feeds:
+  build   decided (leaves the lists); a positive training label for the fit models; records a human
+          required_fit of 'meets' unless --unmet names a line that is not met
+  pass    decided; a negative training label, except logistics and comp passes, which say nothing
+          about fit and are left out of training
+  hold    not decided: the posting keeps surfacing on the lists, marked held; not a training label
+  The latest mark on a posting wins, so a second mark replaces the first.
+
+pass reason codes (the word before the colon):
+  function      wrong kind of work; also a calibration hard negative for requirement coverage
+  requirement   a hard Required line is not met (alias: clearance); add --unmet "<line from the JD>";
+                records a human required_fit of 'fails', which outranks the judge's Required call
+  level         wrong seniority
+  logistics     location, travel, schedule, commute (not a training label)
+  comp          pay (not a training label)
+  nuance        a judgment call the other codes do not cover
+  other         anything else
+
+needs the JD text:
+  a requirement pass, a build, or --grade records a human call against the posting's description;
+  a posting with no JD text yet is refused (a plain pass or hold still works).
+
+examples:
+  finder.py mark 0123456789abcdef0123 build --grade bullseye --basis blind
+  finder.py mark "Acme|Senior Analyst" pass --reason "logistics: five days on site"
+  finder.py mark <url> pass --reason "requirement: active TS/SCI" --unmet "Active TS/SCI clearance required"
+  finder.py mark --from-file decisions.csv
+                columns posting,decision,reason,unmet,grade,basis (several unmet lines joined with ' || ');
+                every row is checked first, and one bad row writes nothing
+
+DuckDB lock:
+  mark writes to the pipeline DuckDB. While a sweep or launch.sh run holds it, mark stops with a
+  message and writes nothing; run it again when the run finishes.
+"""
 
 
 def _mark_reason_code(reason: str):
@@ -817,13 +859,16 @@ def main():
                    help="write the page without the Jev demotion pass (stored reviews are still shown in J3)")
     s.set_defaults(func=cmd_top)
 
-    s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision")
+    s = sub.add_parser("mark", parents=[common], help="record a build / pass / hold decision",
+                       epilog=MARK_GUIDE, formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("target", nargs="?", help='posting_id, posting URL, or "employer|title" '
-                                             "(omit when using --from-file)")
-    s.add_argument("decision", nargs="?", choices=report.DECISIONS, default=None)
-    s.add_argument("--reason", help="for pass, start with a code: " + " | ".join(PASS_REASON_CODES) +
-                   " | clearance (alias for requirement) "
-                   ' (e.g. "function: clinical ops"); only function passes become calibration negatives')
+                                             "(omit when using --from-file); must match exactly one posting")
+    s.add_argument("decision", nargs="?", choices=report.DECISIONS, default=None,
+                   help="build (pursuing it) | pass (not pursuing; needs --reason) | hold (not yet; "
+                        "it keeps surfacing, marked held)")
+    s.add_argument("--reason", help="required for pass, and must start with a code: " + " | ".join(PASS_REASON_CODES) +
+                   " | clearance (alias for requirement)"
+                   ' (e.g. "function: clinical ops"); see the reason codes below')
     s.add_argument("--unmet", action="append",
                    help="a Required line, quoted from the JD, that the human call says is not met "
                         "(repeatable); only valid with a build or a pass --reason requirement/clearance")
@@ -1029,7 +1074,11 @@ def main():
     s.set_defaults(func=cmd_setup_check)
 
     a = ap.parse_args()
-    con = store.connect(a.db or os.environ.get("JOBSEARCH_DB") or None)   # JOBSEARCH_DB: default-path override (tests)
+    try:
+        con = store.connect(a.db or os.environ.get("JOBSEARCH_DB") or None)   # JOBSEARCH_DB: default-path override (tests)
+    except duckdb.IOException as e:   # another process (a sweep, launch.sh) holds the write lock
+        sys.exit(f"{a.cmd}: the DuckDB is locked by another process (a sweep or launch.sh run?); nothing was "
+                 f"written. Run it again when that finishes.\n  ({str(e).splitlines()[0]})")
     try:
         a.func(con, a)
     finally:

@@ -59,7 +59,7 @@ Usage:
     .venv/bin/python finder.py bridge [--max-ring N] [--new-only]  # bridge (place-scoped retail) track's open list (§31.6)
 
 Every subcommand takes --db (default $JOBSEARCH_DB, else db/jobsearch.duckdb) and --vault (default
-$JOBSEARCH_VAULT_DIR; retrain ignores --vault and reads the variable). Every subcommand opens the DuckDB
+$JOBSEARCH_VAULT_DIR). Every subcommand opens the DuckDB
 read-write first: while a sweep holds the lock it stops with a message and exits 1. `<command> --help`
 gives each command's own summary and switches.
 """
@@ -732,7 +732,7 @@ def cmd_retrain(con, a):
     if a.history:
         retrain_mod.print_history(con)
         return
-    retrain_mod.run(con, dry_run=a.dry_run)
+    retrain_mod.run(con, dry_run=a.dry_run, vault_dir=a.vault)
 
 
 def cmd_judge2(con, a):
@@ -1089,7 +1089,7 @@ def main():
     s = sub.add_parser("retrain", parents=[common],
                        help="the weekly retrain (sprint plan §24): labels, reanchor, five gated models plus "
                             "required-embed, ledger in model_runs; a promotion triggers rescreen, coverage and "
-                            "required-embed score. Labels come from $JOBSEARCH_VAULT_DIR; --vault is ignored")
+                            "required-embed score. Labels come from --vault (default $JOBSEARCH_VAULT_DIR)")
     s.add_argument("--dry-run", action="store_true",
                    help="train and gate the five TF-IDF models, write ledger rows (promoted=false, reason "
                         "'dry-run'), promote and rescreen nothing; still rebuilds label_docs, skips required-embed")

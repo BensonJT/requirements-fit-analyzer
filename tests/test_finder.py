@@ -2537,6 +2537,24 @@ def test_mark_pass_requires_a_reason_code(tmp_path):
     con.close()
 
 
+def test_mark_on_a_locked_duckdb_exits_cleanly(tmp_path):
+    """A sweep holding the DuckDB write lock: mark stops with a message, no traceback, nothing written."""
+    db = str(tmp_path / "locked.duckdb")
+    store.connect(db).close()
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import duckdb, sys, time; c = duckdb.connect(sys.argv[1]); "
+         "print('ready', flush=True); time.sleep(60)", db], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        res = subprocess.run([sys.executable, os.path.join(ROOT, "finder.py"), "mark", "a" * 20, "hold", "--db", db],
+                             cwd=ROOT, capture_output=True, text=True)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert res.returncode == 1 and "Traceback" not in res.stderr
+    assert "mark: the DuckDB is locked by another process" in res.stderr and "nothing was written" in res.stderr
+
+
 # ---- sprint plan §22.3, Gap 2: mark --unmet / --grade / --basis / --from-file ----
 
 def test_mark_requirement_pass_writes_required_fails_and_bridges_to_llm_labels(tmp_path):

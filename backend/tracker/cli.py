@@ -382,6 +382,8 @@ everyday use:
                                        fields: --next-action --follow-up --closes --role --company --req
                                        --posting --location --pay --close-reason --applied --source
                                        --folder --notes   ('' clears a field; --posting none unlinks)
+  trk edit 330 --posting <20-hex id>   link a posting found later (a new employer, a recruiter lead);
+                                       like add, it copies the posting so the sheet's open link works now
 
 views and upkeep:
   trk render [--preview] [--force]     rewrite the markdown view (writes re-render it automatically;
@@ -394,10 +396,20 @@ views and upkeep:
   trk check                            folders, posting ids, duplicates, overdue follow-ups
   trk sweep [--days 90]                list applied rows silent that long; --apply moves them to assumed-rejected
 
-environment:
-  JOBSEARCH_VAULT_DIR (from the repo .env) locates the Job_Search folder; TRK_ACTOR names who made
-  each change (default 'user'). Every write is logged as an event, shown by trk show.
-  Help for one command: trk <command> --help
+posting copies:
+  add --posting and edit --posting copy a posting missing from jobs.fit_snapshot out of the pipeline's
+  DuckDB. If a sweep or launch.sh run has DuckDB locked, the row is still saved, a note prints, and the
+  nightly snapshot adds the posting (and the sheet's open link) after the next run.
+
+environment (from the repo .env):
+  JOBSEARCH_VAULT_DIR   locates the Job_Search folder
+  TRACKER_PGDATABASE    the Postgres database (default resume)
+  TRACKER_SHEET_ID      the Google Sheet view; unset means trk sheet refuses and writes skip the refresh
+  JOBSEARCH_DUCKDB      the pipeline DuckDB that posting copies read (default db/jobsearch.duckdb)
+  TRK_ACTOR             who made each change (default 'user'). Every write is logged as an event (trk show).
+
+exit codes: 0 ok, 1 error (or trk check found problems), 2 usage.
+Help for one command: trk <command> --help
 """
 
 
@@ -425,43 +437,58 @@ def build_parser():
 
     p = sub.add_parser("set", parents=[nr], help="change status")
     p.add_argument("app_id", type=int)
-    p.add_argument("status")
+    p.add_argument("status", help="new status (the list is in trk --help); a closed row set to an active "
+                                  "status reopens")
     p.add_argument("--date", help="status date YYYY-MM-DD (default today)")
-    p.add_argument("--note")
+    p.add_argument("--note", help="a note logged with the status change")
     p.set_defaults(fn=cmd_set)
 
     p = sub.add_parser("note", parents=[nr], help="add a note")
     p.add_argument("app_id", type=int)
-    p.add_argument("text")
+    p.add_argument("text", help="the note (quote it)")
     p.set_defaults(fn=cmd_note)
 
     p = sub.add_parser("contact", parents=[nr], help="link a contact")
     p.add_argument("app_id", type=int)
-    p.add_argument("name")
-    p.add_argument("--role", default="recruiter", choices=store.CONTACT_ROLES)
+    p.add_argument("name", help="the contact's name; an existing contact with the same name and --company is "
+                                  "reused (new details only fill its empty fields)")
+    p.add_argument("--role", default="recruiter", choices=store.CONTACT_ROLES,
+                   help="their part in this application (default recruiter)")
     for k in ("email", "phone", "linkedin", "title", "company"):
-        p.add_argument(f"--{k}")
+        p.add_argument(f"--{k}", help=f"the contact's {k}")
     p.set_defaults(fn=cmd_contact)
 
     p = sub.add_parser("edit", parents=[nr], help="edit fields (empty string clears; --posting none)")
     p.add_argument("app_id", type=int)
-    edit_help = {"posting": "20-hex posting id or 'none'; copies a posting missing from jobs.fit_snapshot so "
-                            "the sheet links it now (a locked DuckDB leaves it for the nightly snapshot)"}
+    edit_help = {
+        "next_action": "what happens next, shown on the views", "follow_up": "follow-up due date YYYY-MM-DD",
+        "closes": "posting close date YYYY-MM-DD", "role": "role title", "company": "company name",
+        "req": "the employer's req / job id",
+        "posting": "20-hex posting id or 'none'; copies a posting missing from jobs.fit_snapshot so "
+                   "the sheet links it now (a locked DuckDB leaves it for the nightly snapshot)",
+        "location": "location text", "pay": "pay text as posted, e.g. '$150K-$175K'",
+        "close_reason": "why a closed row closed", "applied": "date applied YYYY-MM-DD",
+        "source": "where the lead came from: " + ", ".join(store.SOURCES),
+        "folder": "package folder under Job_Search, or 'none'", "notes": "free-text notes field (replaces it)",
+    }
     for dest, (flag, _) in EDIT_OPTIONS.items():
         p.add_argument(flag, dest=dest, default=None, help=edit_help.get(dest))
     p.set_defaults(fn=cmd_edit)
 
     p = sub.add_parser("add", parents=[nr], help="add an application (and its folder)")
-    p.add_argument("--company")
-    p.add_argument("--role")
-    p.add_argument("--req")
-    p.add_argument("--posting", help="20-hex posting id or 'none'; fills blanks from jobs.fit_snapshot")
-    p.add_argument("--source", choices=store.SOURCES)
-    p.add_argument("--status", default="built")
+    p.add_argument("--company", help="company name (required unless --posting fills it)")
+    p.add_argument("--role", help="role title (required unless --posting fills it)")
+    p.add_argument("--req", help="the employer's req / job id; names the folder")
+    p.add_argument("--posting", help="20-hex posting id or 'none'; fills blank company, role, req, location "
+                                     "and pay from jobs.fit_snapshot, first copying a posting it is missing "
+                                     "(a locked DuckDB leaves that for the nightly snapshot)")
+    p.add_argument("--source", choices=store.SOURCES, help="where the lead came from (default pipeline "
+                                                            "with --posting, else manual)")
+    p.add_argument("--status", default="built", help="starting status (default built)")
     p.add_argument("--date", help="status date YYYY-MM-DD (default today)")
     p.add_argument("--folder", help="auto (default when status is built) | none | <path under Job_Search>")
-    p.add_argument("--location")
-    p.add_argument("--pay")
+    p.add_argument("--location", help="location text")
+    p.add_argument("--pay", help="pay text as posted, e.g. '$150K-$175K'")
     p.set_defaults(fn=cmd_add)
 
     p = sub.add_parser("render", help="write the markdown view")
@@ -475,7 +502,7 @@ def build_parser():
     p.set_defaults(fn=cmd_closed_report)
 
     p = sub.add_parser("sweep", parents=[nr], help="applied rows silent for --days (90) -> assumed-rejected")
-    p.add_argument("--days", type=int, default=90)
+    p.add_argument("--days", type=int, default=90, help="days with no status change (default 90)")
     p.add_argument("--apply", action="store_true", help="make the change (default: dry run)")
     p.set_defaults(fn=cmd_sweep)
 

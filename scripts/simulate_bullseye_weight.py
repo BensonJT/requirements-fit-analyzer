@@ -17,7 +17,7 @@ Two readings:
 
 Context: 2026-10-19 deep review. The process lens is binary (bullseye + adjacent are its positives), so
 coordinator roles score level with process-excellence roles, and the bullseye model is the term that can
-separate them. Same evening, measured on the user's blind lens sheet (vault Tools/Blind_Lens_Review_20261019.csv)
+separate them. Same evening, measured on the user's blind lens sheet (vault Tools/Blind_Reviews/Blind_Lens_Review_20261019.csv)
 BEFORE the bullseye model trained on it: every higher w agreed with him more often, so the view moved to 0.75.
 A run after a retrain is in-sample for every graded posting; only a newer blind sheet tests the next change.
 

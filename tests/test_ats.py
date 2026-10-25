@@ -1697,3 +1697,73 @@ def test_avature_detail_jsonld_and_view_fields():
     f = A._avature_detail_fields(html, {})
     assert "Lead security programs." in f["description_text"]
     assert (f["workplace_type"], f["posted_at"]) == ("hybrid", date(2026, 9, 30))
+
+
+# ---------------------------------------------------------------- Jibe (iCIMS career sites)
+def _jibe_record(i, **kw):
+    d = {"req_id": str(i), "slug": str(i), "language": "en-us", "title": f"Role {i}",
+         "full_location": "Tysons Corner, Virginia", "country": "United States", "country_code": "US",
+         "tags3": ["Hybrid"], "employment_type": "FULL_TIME", "categories": [{"name": "IT"}],
+         "posted_date": "2026-10-20T21:13:00+0000", "salary_min_value": 0, "salary_max_value": 0,
+         "description": "<p>Overview</p><ul><li>Map workflows</li></ul>",
+         "responsibilities": "<ul><li>Map workflows</li></ul>",
+         "qualifications": "<p>The estimated base salary range is $80,000 - $95,000 annually.</p>"}
+    d.update(kw)
+    return {"data": d}
+
+
+def _jibe_server(records, page_size, calls=None):
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, params=None, **kw):
+            if calls is not None:
+                calls.append(params)
+            p = params["page"]
+            chunk = records[(p - 1) * page_size: p * page_size]
+            return _Resp({"jobs": chunk, "totalCount": len(records)})
+    return lambda: _C()
+
+
+def test_jibe_jobs_pages_until_total_and_maps_fields(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "JIBE_PAGE", 2)
+    recs = [_jibe_record(1), _jibe_record(2, tags3=["Fully Remote"], full_location="Virtual, Minnesota"),
+            _jibe_record(3, country="India", country_code="RS", full_location="Gurugram, India")]
+    calls = []
+    monkeypatch.setattr(A, "client", _jibe_server(recs, 2, calls))
+    out = A.jibe_jobs({"employer": "Acme", "identifier_1": "careers.acme.com"})
+    assert not getattr(out, "truncated", False)
+    assert [p["req_id"] for p in out] == ["1", "2", "3"] and [c["page"] for c in calls] == [1, 2]
+    first = out[0]
+    assert first["url"] == "https://careers.acme.com/jobs/1?lang=en-us"
+    assert first["workplace_type"] == "hybrid" and first["employment_type"] == "full_time"
+    assert (first["pay_min"], first["pay_max"], first["pay_source"]) == (80000, 95000, "text")
+    assert first["description_text"].count("Map workflows") == 1      # repeated block not appended twice
+    assert out[1]["workplace_type"] == "remote"
+    assert out[2]["country"] == "IN"                                    # name wins over a bad country_code
+
+
+def test_jibe_jobs_raises_on_an_unreadable_board(monkeypatch):
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp({"error": "nope"})
+    monkeypatch.setattr(A, "client", lambda: _C())
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.jibe_jobs({"employer": "Acme", "identifier_1": "careers.acme.com"})
+
+
+def test_jibe_jobs_short_read_is_truncated(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "JIBE_PAGE", 2)
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, params=None, **kw):
+            return _Resp({"jobs": [_jibe_record(1)] if params["page"] == 1 else [], "totalCount": 5})
+    monkeypatch.setattr(A, "client", lambda: _C())
+    out = A.jibe_jobs({"employer": "Acme", "identifier_1": "careers.acme.com"})
+    assert getattr(out, "truncated", False)

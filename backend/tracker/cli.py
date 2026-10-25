@@ -169,6 +169,9 @@ def cmd_edit(conn, a):
     store.edit_fields(conn, a.app_id, dict(changes), actor())   # all or nothing
     for field, value in changes:
         print(f"#{a.app_id} {field} = {value!r}")
+    pid = store._posting_id(dict(changes).get("posting_id"))
+    if pid and not snapshot_row(conn, pid):   # same as add: the sheet's "open" link works the same day
+        ensure_snapshot(conn, pid)
     rerender(conn, a)
 
 
@@ -189,12 +192,13 @@ def snapshot_row(conn, posting_id):
 def ensure_snapshot(conn, posting_id):
     """Pull one posting from the jobsearch DuckDB into jobs.fit_snapshot when the nightly snapshot left it
     out (2026-10-23), so the sheet's "open" link and the field fill-in work the same day. Never fatal: a
-    locked or missing DuckDB (a sweep running) just leaves the row for the nightly snapshot."""
+    locked or missing DuckDB (a sweep running) just leaves the row for the nightly snapshot. Called after the
+    tracker write has committed, so a failure here never undoes the add or edit."""
     import importlib.util
-    import duckdb
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     path = os.environ.get("JOBSEARCH_DUCKDB", os.path.join(root, "db", "jobsearch.duckdb"))
     try:
+        import duckdb
         spec = importlib.util.spec_from_file_location("pg_snapshot", os.path.join(root, "scripts", "pg_snapshot.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

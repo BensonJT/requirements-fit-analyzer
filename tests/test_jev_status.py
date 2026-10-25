@@ -29,3 +29,12 @@ def test_unlisted_rows_say_why():
     assert hidden.startswith("judge tier hidden: 0 lens(es)") and "Required meets" in hidden
     assert "required-fit 0.18" in note(unclear=True, fit_required=0.18)
     assert note(band="weak").startswith("score band weak")
+
+
+def test_hard_gates_are_recognised_and_soft_gates_mean_no_lens_at_the_bar():
+    for kw in (dict(decided=True), dict(verdict="reject"), dict(level="junior"), dict(track="bridge"),
+               dict(listed="model review (non-US)"), dict(in_tracker=True), dict(verdict=None)):
+        assert note(**kw).startswith(jev_status.HARD_GATES), kw
+    for kw in (dict(listed="judge review"), dict(judge_tier="hidden"), dict(unclear=True), dict(band="weak")):
+        assert not note(**kw).startswith(jev_status.HARD_GATES), kw
+    assert "no lens at Jev's bar" in jev_status.NO_LENS_NOTE and "technical 0.80" in jev_status.NO_LENS_NOTE

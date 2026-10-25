@@ -1,15 +1,21 @@
 """Per-posting Jev status for the Postgres snapshot (2026-10-25, user request).
 
 Two values per posting, so the focus report can show and filter them:
-  jev_result  what Jev did with the row on the last Top_Jobs pass:
-                Demoted         left Apply / Review (required fails, or wrong on every lens)
-                Check Required  `fails` that rests only on judgment-call lines; not demoted
-                Kept            reviewed, nothing demotes it (Jev agrees it belongs on the list)
+  jev_result  what Jev did with the row:
+                Demoted         a Top Jobs row Jev took out of Apply / Review (required fails, or wrong on
+                                every lens)
+                Check Required  a Top Jobs row whose `fails` rests only on judgment-call lines; not demoted
+                Would demote    an eligible row NOT on Top Jobs that Jev would demote if it were (a second
+                                opinion only; 2026-10-25, Jev reviews every eligible row)
+                Would check     the same for a judgment-call-only `fails`
+                Kept            reviewed, nothing demotes it (Jev agrees the row belongs)
                 Not acted on    reviewed under a prompt_version whose required bar has not passed
-                No review yet   in Jev's subset but no stored review (no JD, or the token cap ended the run)
-                Not judged      never in Jev's subset
-  jev_note    Jev's reason, or for a Not judged row the gate that kept it out of the subset, so a strong
-              posting the pipeline filtered out can be traced to the filter (and a bad filter found).
+                No review yet   in the review set, no stored review: queued (new-review limit or token cap,
+                                the next run continues) or no JD
+                Not judged      outside the review set
+  jev_note    Jev's reason; for an eligible row off Top Jobs, also why it is off (the list's gate); for a
+              Not judged row, the gate that kept it from Jev. A strong posting the pipeline filtered out can
+              be traced to the filter, and a bad filter found.
 
 Jev never promotes: its pass only removes rows. A row the user thinks is a fit after Jev demoted it is the
 disagreement to record (`finder.py mark <id> build`, a gold ruling even when `seen`).
@@ -62,9 +68,17 @@ def exclusion_note(*, track: Optional[str], verdict: Optional[str], level: Optio
     return f"score band {band or 'none'}: below the strong / very_strong shortlist bar"
 
 
+HARD_GATES = ("bridge track", "already decided", "already in the tracker", "never screened", "screen rejected",
+              "level gate", "non-US primary")
+NO_LENS_NOTE = ("no lens at Jev's bar: needs a judge grade of bullseye or adjacent, or the lens model at process "
+                f"{jev_gate.JEV_LENS_BAR['process']:.2f} / technical {jev_gate.JEV_LENS_BAR['technical']:.2f} / "
+                f"AI {jev_gate.JEV_LENS_BAR['ai']:.2f}")
+
+
 def statuses(con, ids=None, *, levels=report.TOP_LEVELS) -> dict:
     """{posting_id: (jev_result, jev_note)} for `ids` (default: every active fit posting)."""
-    subset = jev_gate.top_subset_ids(con, levels=levels)
+    shown = jev_gate.top_subset_ids(con, levels=levels)
+    subset = jev_gate.review_subset_ids(con, levels=levels)
     flagged = jev_gate.demotions(con, subset)
     exempt = jev_gate.adjudicated_ids(con, list(subset))
     reviews = {r[0]: r[1:] for r in con.execute("""
@@ -90,29 +104,35 @@ def statuses(con, ids=None, *, levels=report.TOP_LEVELS) -> dict:
     out = {}
     for pid, track, verdict, level, decided, in_tracker, band, fit_required in rows:
         rev = reviews.get(pid)
-        if pid in subset:
-            d = flagged.get(pid)
-            if d and not d.check:
-                out[pid] = ("Demoted", "; ".join(d.reasons) + (f": {d.unmet[0]}" if d.unmet else ""))
-            elif d:
-                out[pid] = ("Check Required", "fails only on judgment-call lines" + (f": {d.unmet[0]}" if d.unmet else ""))
-            elif rev is None:
-                out[pid] = ("No review yet", f"in Jev's subset ({subset[pid]}) with no stored review: no JD, or the "
-                                             "token cap ended the run")
-            elif pid in exempt:
-                out[pid] = ("Kept", f"your own grade is on record (adjudicated); Jev: Required {rev[1]}, "
-                                    f"lenses {_lenses(*rev[2:5])}")
-            elif not rev[5]:
-                out[pid] = ("Not acted on", f"reviewed {rev[6]} under prompt_version {rev[0]}, whose required bar "
-                                            f"has not passed; Jev: Required {rev[1]}, lenses {_lenses(*rev[2:5])}")
-            else:
-                out[pid] = ("Kept", f"Jev: Required {rev[1]}, lenses {_lenses(*rev[2:5])}")
-            continue
         sel = selection.get(pid, (None, None, None))
-        note = exclusion_note(track=track, verdict=verdict, level=level, decided=decided, in_tracker=in_tracker,
+        gate = exclusion_note(track=track, verdict=verdict, level=level, decided=decided, in_tracker=in_tracker,
                               listed=listed.get(pid), judge_tier=sel[0], n_lenses_good=sel[1],
                               judge_required=sel[2], unclear=pid in unclear, band=band, fit_required=fit_required,
                               levels=levels)
+        off_list = "" if pid in shown else f" [not on Top Jobs: {gate}]"
+        if pid in subset:
+            d = flagged.get(pid)
+            if d and not d.check:
+                out[pid] = ("Demoted" if pid in shown else "Would demote",
+                            "; ".join(d.reasons) + (f": {d.unmet[0]}" if d.unmet else "") + off_list)
+            elif d:
+                out[pid] = ("Check Required" if pid in shown else "Would check",
+                            "fails only on judgment-call lines" + (f": {d.unmet[0]}" if d.unmet else "") + off_list)
+            elif rev is None:
+                out[pid] = ("No review yet", f"queued for Jev ({subset[pid]}): over this run's new-review limit or "
+                                             "the token cap (the next run continues), or no JD" + off_list)
+            elif pid in exempt:
+                out[pid] = ("Kept", f"your own grade is on record (adjudicated); Jev: Required {rev[1]}, "
+                                    f"lenses {_lenses(*rev[2:5])}" + off_list)
+            elif not rev[5]:
+                out[pid] = ("Not acted on", f"reviewed {rev[6]} under prompt_version {rev[0]}, whose required bar "
+                                            f"has not passed; Jev: Required {rev[1]}, lenses {_lenses(*rev[2:5])}"
+                            + off_list)
+            else:
+                out[pid] = ("Kept", f"Jev: Required {rev[1]}, lenses {_lenses(*rev[2:5])}" + off_list)
+            continue
+        # Outside the review set: a hard gate (decided, rejected, level, ...) or no lens at Jev's bar.
+        note = gate if gate.startswith(HARD_GATES) else NO_LENS_NOTE
         if rev is not None:
             note += f"; older Jev review {rev[6]}: Required {rev[1]}, lenses {_lenses(*rev[2:5])}"
         out[pid] = ("Not judged", note)

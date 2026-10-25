@@ -71,6 +71,66 @@ def top_subset_ids(con, *, include_decided: bool = False, levels=report.TOP_LEVE
     return out
 
 
+# ---- The Jev review set (2026-10-25, user's go): every eligible posting, not only the Top Jobs cut ----
+# Jev used to review just the rows write_top_jobs shows (first 100 Apply / 40 Review); 148 of 303 lens-strong
+# untapped postings never reached it for that reason alone. It now reviews every active, screened, non-rejected,
+# US, undecided fit posting at a shown level that is strong on at least one lens: a judge grade of bullseye or
+# adjacent, or (ungraded) the lens model at or above JEV_LENS_BAR. Technical carries 0.80, the bar model_rows
+# uses, because it is the weakest lens model. One review grades all three lenses and is cached by JD hash and
+# prompt_version, so a posting strong on several lenses costs one review, and later nights pay only for new or
+# changed JDs. Demotion still applies only to the Top Jobs rows (top_subset_ids); for the rest Jev's call is a
+# second opinion shown in the focus report (jev_status.py).
+JEV_LENS_BAR = {"process": 0.70, "technical": 0.80, "ai": 0.70}
+# New (uncached) reviews per run: a safety limit so one huge new board cannot spend the day's budget in one go.
+# Cached rows are never counted. Rows over the limit stay queued for the next run.
+JEV_MAX_NEW_PER_RUN = 300
+
+_ELIGIBLE_LENS_SQL = " OR ".join(
+    f"f.grade_{lens} IN ('bullseye', 'adjacent') OR (f.grade_{lens} IS NULL AND coalesce(f.fit_{lens}, 0) >= {bar})"
+    for lens, bar in JEV_LENS_BAR.items())
+
+
+def eligible_ids(con, *, include_decided: bool = False, levels=report.TOP_LEVELS) -> list:
+    """Posting ids strong on at least one lens and past the list's own gates, strongest rank first."""
+    from .judge import non_us_primary
+    where = ["f.verdict != 'reject'", "f.level_fit IN (SELECT unnest(?::VARCHAR[]))", "p.track = 'fit'",
+             f"({_ELIGIBLE_LENS_SQL})"]
+    if not include_decided:
+        where += ["NOT coalesce(f.decided, FALSE)", "NOT coalesce(f.in_tracker, FALSE)"]
+    rows = con.execute(f"""
+        SELECT f.posting_id, f.location_primary FROM vw_lens_fit f JOIN postings p USING (posting_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY f.rank_score DESC, f.final_score DESC, f.first_seen_at DESC""", [list(levels)]).fetchall()
+    return [pid for pid, loc in rows if not non_us_primary(loc)]
+
+
+def review_subset_ids(con, *, include_decided: bool = False, levels=report.TOP_LEVELS, **top_kw) -> dict:
+    """{posting_id: 'apply' | 'review' | 'eligible'}: the Top Jobs rows first (in their order, so the rows Jev
+    can demote are reviewed before a cap stops the run), then every other eligible posting by rank."""
+    out = dict(top_subset_ids(con, include_decided=include_decided, levels=levels, **top_kw))
+    for pid in eligible_ids(con, include_decided=include_decided, levels=levels):
+        out.setdefault(pid, "eligible")
+    return out
+
+
+def limit_new(con, rows: list, *, facts=None, limit: int = JEV_MAX_NEW_PER_RUN, run_tag=None) -> tuple:
+    """(rows to send, ids held back): every cached row, plus the first `limit` uncached rows in order."""
+    from . import jev
+    facts = facts if facts is not None else jev.load_facts()
+    pv = jev.prompt_version(facts, jev.endpoint_from_env())
+    pv = f"{pv}:{run_tag}" if run_tag else pv
+    persist, keep, held, new = jev.StorePersist(), [], [], 0
+    for p in rows:
+        if persist.jev_already_reviewed(con, p.posting_id, p.description_hash, pv, run_tag):
+            keep.append(p)
+        elif new < limit:
+            keep.append(p)
+            new += 1
+        else:
+            held.append(p.posting_id)
+    return keep, held
+
+
 def subset_postings(con, ids: list) -> list:
     """Posting objects for `ids` (order kept) that have a JD; adjudicated rows are left out by the caller."""
     if not ids:
@@ -85,17 +145,21 @@ def subset_postings(con, ids: list) -> list:
 
 
 def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, sleep_fn=None, log=print, **top_kw):
-    """Jev reviews the Top Jobs Apply / Review subset (adjudicated rows skipped). Cached reviews are skipped by
-    `jev.run` itself; a cap stop or an error is logged and the caller still writes the report. Returns the
-    RunSummary, or None when nothing was sent."""
+    """Jev reviews the review set: the Top Jobs Apply / Review rows, then every other eligible posting
+    (review_subset_ids; adjudicated rows skipped; at most JEV_MAX_NEW_PER_RUN uncached reviews). Cached
+    reviews are skipped by `jev.run` itself; a cap stop or an error is logged and the caller still writes the
+    report. Returns the RunSummary, or None when nothing was sent."""
     from . import jev
     ensure_required_bar(con, facts=facts, live_ok=live_ok, transport=transport, sleep_fn=sleep_fn, log=log)
-    wanted = top_subset_ids(con, **top_kw)
+    wanted = review_subset_ids(con, **top_kw)
     exempt = adjudicated_ids(con, list(wanted))
     rows = subset_postings(con, [pid for pid in wanted if pid not in exempt])
-    log(f"Jev gate: {len(wanted)} Top Jobs row(s) ({sum(1 for t in wanted.values() if t == 'apply')} apply / "
-        f"{sum(1 for t in wanted.values() if t == 'review')} review), {len(exempt)} adjudicated exempt, "
-        f"{len(rows)} with a JD to review")
+    rows, held = limit_new(con, rows, facts=facts)
+    log(f"Jev gate: {len(wanted)} row(s) in the review set ({sum(1 for t in wanted.values() if t == 'apply')} "
+        f"apply / {sum(1 for t in wanted.values() if t == 'review')} review / "
+        f"{sum(1 for t in wanted.values() if t == 'eligible')} other eligible), {len(exempt)} adjudicated exempt, "
+        f"{len(rows)} with a JD to send or skip as cached, {len(held)} held for the next run "
+        f"(over {JEV_MAX_NEW_PER_RUN} new reviews)")
     if not rows:
         return None
     t = time.monotonic()

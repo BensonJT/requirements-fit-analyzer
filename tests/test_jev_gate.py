@@ -198,7 +198,8 @@ def test_run_over_top_sends_the_subset_minus_adjudicated_and_never_fails_the_rep
     assert set(sent) == {"keep-meets", "demote-fails", "demote-all-wrong", "keep-unevaluated-pv", "keep-no-review",
                          "review-demote"}
     assert "exempt-human" not in sent
-    assert any("7 Top Jobs row(s) (6 apply / 1 review), 1 adjudicated exempt, 6 with a JD" in l for l in logs)
+    assert any("7 row(s) in the review set (6 apply / 1 review / 0 other eligible), 1 adjudicated exempt, "
+               "6 with a JD to send or skip as cached, 0 held" in l for l in logs)
     assert any("run failed (RuntimeError: cap reached)" in l for l in logs)
     con.close()
 
@@ -310,3 +311,30 @@ def test_report_shows_check_section(tmp_path):
     assert "1 sent to Check the Required block" in text
     con.close()
 
+
+
+# ---------------------------------------------------------------- 2026-10-25: every eligible row, new-review limit
+def test_limit_new_keeps_cached_rows_and_holds_uncached_ones_over_the_limit(monkeypatch):
+    from types import SimpleNamespace
+    from backend.finder import jev
+    cached = {"c1", "c2"}
+
+    class FakePersist:
+        def jev_already_reviewed(self, con, pid, h, pv, run_tag):
+            return pid in cached
+
+    monkeypatch.setattr(jev, "StorePersist", FakePersist)
+    rows = [SimpleNamespace(posting_id=i, description_hash="h") for i in ("n1", "c1", "n2", "n3", "c2", "n4")]
+    keep, held = jev_gate.limit_new(None, rows, facts=[], limit=2)
+    assert [p.posting_id for p in keep] == ["n1", "c1", "n2", "c2"]      # cached rows never count
+    assert held == ["n3", "n4"]
+
+
+def test_review_subset_puts_top_jobs_rows_first(tmp_path, monkeypatch):
+    con = _fixture(tmp_path)
+    monkeypatch.setattr(jev_gate, "eligible_ids", lambda con_, **kw: ["extra-strong", "keep-meets"])
+    out = jev_gate.review_subset_ids(con)
+    top = jev_gate.top_subset_ids(con)
+    assert list(out)[:len(top)] == list(top)                          # Top Jobs order kept, first
+    assert out["extra-strong"] == "eligible" and out["keep-meets"] == top["keep-meets"]
+    con.close()

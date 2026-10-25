@@ -445,8 +445,10 @@ def build_parser():
 
     p = sub.add_parser("edit", parents=[nr], help="edit fields (empty string clears; --posting none)")
     p.add_argument("app_id", type=int)
+    edit_help = {"posting": "20-hex posting id or 'none'; copies a posting missing from jobs.fit_snapshot so "
+                            "the sheet links it now (a locked DuckDB leaves it for the nightly snapshot)"}
     for dest, (flag, _) in EDIT_OPTIONS.items():
-        p.add_argument(flag, dest=dest, default=None)
+        p.add_argument(flag, dest=dest, default=None, help=edit_help.get(dest))
     p.set_defaults(fn=cmd_edit)
 
     p = sub.add_parser("add", parents=[nr], help="add an application (and its folder)")

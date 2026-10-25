@@ -132,6 +132,42 @@ def test_env_switch_and_unreachable_raises(monkeypatch, duck):
     assert con.execute("SELECT count(*) FROM tracker").fetchone()[0] == 0
 
 
+def test_daily_survives_an_unreachable_tracker_database(monkeypatch, duck, tmp_path):
+    """Postgres down overnight: the finder stage logs a warning, keeps the last tracker sync and still screens."""
+    from backend.finder import pipeline
+    con, _ = duck
+    monkeypatch.setenv("TRACKER_SOURCE", "postgres")
+    monkeypatch.setenv("TRACKER_PGDATABASE", "resume_test_wp5_missing_db")
+    monkeypatch.setenv("PGPORT", "1")
+    screened = []
+    monkeypatch.setattr(pipeline, "screen", lambda con, **kw: screened.append(1) or {"screened": 0})
+    monkeypatch.setattr(pipeline, "coverage_stage", lambda con, since=None, log=None: {})
+    monkeypatch.setattr(pipeline, "required_embed_stage", lambda con, log=None: {})
+    monkeypatch.setattr(pipeline.report_mod, "snapshots", lambda con, out_dir=None: [])
+    monkeypatch.setattr(pipeline.report_mod, "read_back", lambda con, vault_dir: 0)
+    logs = []
+    out = pipeline.daily(con, since=None, vault_dir=str(tmp_path), use_model=False, report=False, log=logs.append)
+    assert "skipped" in out["tracker"] and screened == [1]
+    assert any("Tracker sync: WARNING skipped" in m for m in logs)
+
+
+def test_finder_sync_cli_exits_cleanly_when_postgres_is_unreachable(tmp_path):
+    """No traceback, nothing written, and no --vault needed for the postgres source."""
+    import os
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = str(tmp_path / "t.duckdb")
+    ats_store.connect(db_path).close()
+    env = {k: v for k, v in os.environ.items() if k != "JOBSEARCH_VAULT_DIR"}
+    env.update(TRACKER_SOURCE="postgres", TRACKER_PGDATABASE="resume_test_wp5_missing_db", PGPORT="1",
+               JOBSEARCH_VAULT_DIR="")
+    res = subprocess.run([sys.executable, os.path.join(root, "finder.py"), "sync", "--db", db_path],
+                         cwd=root, capture_output=True, text=True, env=env)
+    assert res.returncode == 1 and "Traceback" not in res.stderr
+    assert "nothing was written" in res.stderr
+
+
 def test_unset_env_uses_markdown(tmp_path, duck, monkeypatch):
     con, _ = duck
     monkeypatch.delenv("TRACKER_SOURCE", raising=False)

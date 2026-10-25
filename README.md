@@ -63,7 +63,7 @@ The sweep above fills the database. The finder then works down it in ten steps. 
 |---|---|---|
 | 1 | Sweep | Reads whole employer boards. New postings are added once, vanished postings are closed, nothing is deleted. |
 | 2 | JD details | Fetches the full description for every new posting, then works down the backlog of older postings whose title matches a keyword list. |
-| 3 | Tracker sync | Mirrors your application tracker and reads back build / pass decisions, so decided postings leave the report. |
+| 3 | Tracker sync | Mirrors your application tracker and reads back build / pass decisions, so decided postings leave the report. If the tracker database cannot be reached, the step logs a warning, keeps the last sync, and the run continues. |
 | 4 | Screen | A rule engine (title, location or remote, pay floor, held clearance, level), then TF-IDF models: three lenses, `required` and `bullseye`. With a JD, the best lens score decides and a title-only reject is overturned. |
 | 5 | Coverage | Splits each survivor's JD into requirement lines and matches them to your evidence record. |
 | 6 | Second layer | Embeds the Required block of the high scorers and names the requirement line most likely to be unmet. |

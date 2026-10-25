@@ -504,8 +504,12 @@ def daily(con, *, since, vault_dir: Optional[str], llm_top: int = 0, report: boo
     vault_dir = os.path.expanduser(vault_dir) if vault_dir else None
     if vault_dir:
         t = time.monotonic()
-        out["tracker"] = tracker_sync.sync(con, vault_dir, log=log)
-        log(f"Tracker sync: {out['tracker']} ({time.monotonic() - t:.1f}s)")
+        try:
+            out["tracker"] = tracker_sync.sync(con, vault_dir, log=log)
+            log(f"Tracker sync: {out['tracker']} ({time.monotonic() - t:.1f}s)")
+        except tracker_sync.TrackerSourceError as e:   # Postgres down: keep the last sync, run the rest
+            out["tracker"] = {"skipped": str(e)}
+            log(f"Tracker sync: WARNING skipped ({e}); the tracker table keeps its last sync and the run continues")
         t = time.monotonic()
         out["read_back"] = report_mod.read_back(con, vault_dir)
         log(f"Decision read-back: {out['read_back']} new decisions ({time.monotonic() - t:.1f}s)")

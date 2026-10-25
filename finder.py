@@ -21,7 +21,7 @@ Usage:
                                                                 # (judge batch files as evidence)
     .venv/bin/python finder.py train --report                 # TF-IDF + LR on the labels
     .venv/bin/python finder.py setup-check                    # personal files, optional dependencies, DB
-    .venv/bin/python finder.py evidence --check               # evidence manifest: sources, units, samples
+    .venv/bin/python finder.py evidence                       # evidence manifest: sources, units, samples
     .venv/bin/python finder.py evidence --rebuild             # embed new evidence units
     .venv/bin/python finder.py coverage [--all] [--limit N]   # requirement coverage for survivors
     .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
@@ -828,8 +828,6 @@ def main():
     s.add_argument("--no-model", action="store_true",
                    help="rules only: skip every trained model; rows screened with a model become due, and the "
                         "next normal screen redoes them")
-    s.add_argument("--no-embed", action="store_true", help="ignored: screen computes no embeddings (coverage and "
-                                                           "required-embed do)")
     s.set_defaults(func=cmd_screen)
 
     s = sub.add_parser("rescreen-all", parents=[common],
@@ -973,9 +971,9 @@ def main():
     s.set_defaults(func=cmd_bullseye_backfill)
 
     s = sub.add_parser("evidence", parents=[common],
-                       help="check the evidence manifest (exit 1 if a source is missing) and, with --rebuild, re-embed it")
+                       help="check the evidence manifest: list each source, its unit count and samples (exit 1 if a "
+                            "source is missing); with --rebuild, then re-embed it")
     s.add_argument("--manifest", help="manifest path (default $JOBSEARCH_EVIDENCE, else evidence.local.toml)")
-    s.add_argument("--check", action="store_true", help="list sources, unit counts and samples; always runs, so this flag is optional")
     s.add_argument("--rebuild", action="store_true",
                    help="after a clean check, embed new units into evidence_units and delete ones no longer "
                         "produced; refuses if a source with stored units now yields none")

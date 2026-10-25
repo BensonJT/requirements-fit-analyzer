@@ -54,7 +54,7 @@ Units are 40–600 characters. Longer ones split at sentence ends, shorter ones 
 ## Commands
 
 ```bash
-.venv/bin/python finder.py evidence --check      # every source: found, unit count, three samples
+.venv/bin/python finder.py evidence              # every source: found, unit count, three samples
 .venv/bin/python finder.py evidence --rebuild    # embed new units (first run downloads the ~130 MB model)
 .venv/bin/python finder.py coverage              # cover new / changed screen survivors
 .venv/bin/python finder.py coverage --calibrate  # thresholds against near misses (see below)

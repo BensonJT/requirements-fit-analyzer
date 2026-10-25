@@ -523,9 +523,13 @@ def cmd_mark_from_file(con, a):
 
 
 def cmd_sync(con, a):
-    if not a.vault:
-        sys.exit("sync: set JOBSEARCH_VAULT_DIR or pass --vault")
-    print(tracker_sync.sync(con, a.vault, verbose=a.verbose))
+    source = (os.environ.get(tracker_sync.TRACKER_SOURCE_ENV) or "markdown").strip().lower()
+    if not a.vault and source != "postgres":   # only the markdown source reads the vault
+        sys.exit("sync: set JOBSEARCH_VAULT_DIR or pass --vault (TRACKER_SOURCE=markdown reads the vault file)")
+    try:
+        print(tracker_sync.sync(con, a.vault or "", verbose=a.verbose))
+    except tracker_sync.TrackerSourceError as e:   # read before any write, so nothing changed
+        sys.exit(f"sync: {e}; nothing was written")
 
 
 def cmd_shortlist(con, a):
@@ -919,8 +923,9 @@ def main():
 
     s = sub.add_parser("sync", parents=[common],
                        help="rebuild the DuckDB tracker table from $TRACKER_SOURCE (postgres: tracker.application, "
-                            "exact posting or req id matches; markdown, the default: Application_Tracker.md) and "
-                            "record tracker decisions; --vault is required either way")
+                            "exact posting or req id matches; markdown, the default: Application_Tracker.md, needs "
+                            "--vault) and record tracker decisions. Postgres unreachable: exits 1, nothing written "
+                            "(the nightly pipeline logs a warning and continues)")
     s.add_argument("--verbose", action="store_true", help="print unmatched tracker rows")
     s.set_defaults(func=cmd_sync)
 

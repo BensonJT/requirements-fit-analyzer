@@ -337,8 +337,8 @@ def import_sheet(con, path, *, history_path=None, log=print, now=None) -> dict:
         })
 
     if records:
-        # Goes through feedback.write_records -- the report_feedback INSERT plus the required_fit -> llm_labels
-        # bridge (which load_csv, the golden-source import, does not do) -- instead of a temp CSV round trip.
+        # Goes through feedback.write_records -- the same INSERT and the same required_fit -> llm_labels
+        # bridge load_csv's golden-source import uses -- instead of round-tripping through a temp CSV file.
         feedback.write_records(con, records, log=lambda *_a, **_k: None)
 
     stats = _score_against_sidecar({g["posting_id"]: g for g in graded}, sidecar)

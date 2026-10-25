@@ -1047,7 +1047,8 @@ def main():
     s = sub.add_parser("feedback", parents=[common],
                        help="golden-source feedback: --load, --agreement, --export; or a nested action: sheet, "
                             "sheet-import, ingest (a nested action ignores the three flags)")
-    s.add_argument("--load", help="CSV path to upsert into report_feedback")
+    s.add_argument("--load", help="golden-source CSV to upsert into report_feedback; a human required_fit "
+                                  "(meets / fails) with a description_hash is also bridged into llm_labels")
     s.add_argument("--agreement", action="store_true",
                    help="print the rule's level_fit vs confirmed human rows")
     s.add_argument("--export", help="re-export every report_feedback row with the rule's answer and needs_you")

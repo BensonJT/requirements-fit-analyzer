@@ -1,5 +1,5 @@
 """jev_status.exclusion_note: the first gate that kept a posting out of Jev's subset, in write_top_jobs order."""
-from backend.finder import jev_status
+from backend.finder import jev_status, report
 
 BASE = dict(track="fit", verdict="review", level="in_range", decided=False, in_tracker=False, listed=None,
             judge_tier=None, n_lenses_good=None, judge_required=None, unclear=False, band="strong", fit_required=0.5)
@@ -19,7 +19,7 @@ def test_gates_in_report_order():
 
 
 def test_listed_rows_name_the_cap_or_the_location_gate():
-    assert "below the Top_Jobs cap: Jev reviews only the first 40" in note(listed="judge review")
+    assert f"below the Top_Jobs cap: Jev reviews only the first {report.TOP_REVIEW_CAP}" in note(listed="judge review")
     assert "first 100" in note(listed="model apply")
     assert note(listed="model review (non-US)").startswith("non-US primary location")
 

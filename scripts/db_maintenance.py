@@ -15,9 +15,9 @@ rewrite also lays each table out contiguously, which is as close to "cluster" as
 
 Safety, in order: refuses while a sweep_ats.py, finder.py or judge2 run is running (pgrep; a live
 compaction would corrupt the run holding it). Any other holder of the DuckDB lock (lookup.py,
-pg_snapshot.py, a DuckDB shell) is not caught by that check: `report` and `compact` then fail at open
-with duckdb.IOException, and `snapshot` skips with exit 2. It CHECKPOINTs first so the WAL is folded in; copies into a
-sibling `.compacting` file; verifies every table's row count and that `store.connect` opens
+pg_snapshot.py, a DuckDB shell) is not caught by that check, but the open then fails: `report` says the
+database is locked (exit 1), and `compact` and `snapshot` stop with exit 2. It CHECKPOINTs first so the
+WAL is folded in; copies into a sibling `.compacting` file; verifies every table's row count and that `store.connect` opens
 the copy (views, schema version); only then renames old -> `.precompact`, new -> live; the
 `.precompact` file is deleted after the swap unless --keep-old, because disk space is the
 whole point (the migration backups on the external drive remain the rollback).
@@ -25,8 +25,9 @@ whole point (the migration backups on the external drive remain the rollback).
 `compact` is a no-op below COMPACT_MIN_FREE_FRACTION (10% of blocks free) so the nightly hook
 (launch.sh `maint` step) never rewrites 2 GB for a 2% gain.
 
-Exit: report 0, or 1 if the file is missing; compact always 0 (REFUSED, skipped and ABORT only print);
-snapshot 0 ok, 1 failed, 2 database busy (skipped), 3 upload failed (--remote).
+Exit: report 0, or 1 if the file is missing or locked; compact 0 compacted or skipped under the threshold,
+1 failed (missing file, ABORT), 2 database busy (REFUSED); snapshot 0 ok, 1 failed, 2 database busy
+(skipped), 3 upload failed (--remote).
 """
 import argparse
 import hashlib
@@ -85,7 +86,11 @@ def report(db_path=DEFAULT_DB, log=print):
         log(f"report: {db_path} does not exist")
         return None
     wal = Path(str(p) + ".wal")
-    con = duckdb.connect(str(p), read_only=True)
+    try:
+        con = duckdb.connect(str(p), read_only=True)
+    except duckdb.IOException as e:   # a writer the pgrep check does not know about holds the lock
+        log(f"report: database is locked by another process ({str(e).splitlines()[0]})")
+        return None
     try:
         block_size, total, used, free = database_size(con)
         counts = table_counts(con)
@@ -103,24 +108,26 @@ def report(db_path=DEFAULT_DB, log=print):
 
 
 def compact(db_path=DEFAULT_DB, force=False, keep_old=False, log=print):
-    """Rewrite the database without its free blocks. Returns (did_compact, bytes_saved)."""
+    """Rewrite the database without its free blocks. Returns (did_compact, bytes_saved, exit_code): exit 0
+    compacted or skipped under the threshold, 1 failed (missing file, ABORT), 2 database busy (REFUSED)."""
     p = Path(db_path)
     if not p.exists():
         log(f"compact: {db_path} does not exist")
-        return False, 0
+        return False, 0, 1
     busy = holders(db_path)
     if busy:
         log("compact: REFUSED -- another jobsearch process holds the database:")
         for l in busy:
             log("   " + l)
-        return False, 0
+        return False, 0, 2
     before = report(db_path, log=log)
-    if before is None:
-        return False, 0
+    if before is None:   # the file exists, so report could not open it: locked by a process pgrep missed
+        log("compact: REFUSED -- the database is locked")
+        return False, 0, 2
     if before["free_fraction"] < COMPACT_MIN_FREE_FRACTION and not force:
         log(f"compact: skipped -- {before['free_fraction']:.0%} free is under the "
             f"{COMPACT_MIN_FREE_FRACTION:.0%} threshold (use --force)")
-        return False, 0
+        return False, 0, 0
 
     new = Path(str(p) + ".compacting")
     old = Path(str(p) + ".precompact")
@@ -128,8 +135,12 @@ def compact(db_path=DEFAULT_DB, force=False, keep_old=False, log=print):
         if f.exists():
             f.unlink()
     t0 = time.monotonic()
-    # Exclusive open: this also fails loudly if something DuckDB-side still holds the file.
-    con = duckdb.connect(str(p))
+    # Exclusive open: this also fails if something DuckDB-side still holds the file.
+    try:
+        con = duckdb.connect(str(p))
+    except duckdb.IOException as e:
+        log(f"compact: REFUSED -- the database is locked ({str(e).splitlines()[0]})")
+        return False, 0, 2
     try:
         con.execute("CHECKPOINT")
         catalog = con.execute("SELECT current_database()").fetchone()[0]  # the file's stem, not a fixed name
@@ -149,14 +160,14 @@ def compact(db_path=DEFAULT_DB, force=False, keep_old=False, log=print):
     diff = {n: (c, after_counts.get(n)) for n, c in before["counts"].items() if after_counts.get(n) != c}
     if diff:
         log(f"compact: ABORT -- row counts differ after the copy: {diff}; {new.name} left for inspection")
-        return False, 0
+        return False, 0, 1
     try:
         vc = store.connect(str(new))
         vc.execute("SELECT count(*) FROM vw_active").fetchone()
         vc.close()
     except Exception as e:  # noqa: BLE001 -- any failure means: do not swap
         log(f"compact: ABORT -- the copy does not open cleanly through store.connect: {e!r}")
-        return False, 0
+        return False, 0, 1
     for f in (Path(str(new) + ".wal"),):
         if f.exists():
             f.unlink()
@@ -176,7 +187,7 @@ def compact(db_path=DEFAULT_DB, force=False, keep_old=False, log=print):
     else:
         old.unlink()
         log("compact  : previous file deleted (the external migration backups are the rollback)")
-    return True, saved
+    return True, saved, 0
 
 
 def _codec():
@@ -387,8 +398,8 @@ def main(argv=None):
         if not a.out:
             ap.error("snapshot needs --out or --remote")
         return snapshot(a.db, a.out)
-    did, _ = compact(a.db, force=a.force, keep_old=a.keep_old)
-    return 0
+    _, _, rc = compact(a.db, force=a.force, keep_old=a.keep_old)
+    return rc
 
 
 if __name__ == "__main__":

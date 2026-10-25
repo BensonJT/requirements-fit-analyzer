@@ -236,6 +236,8 @@ case "$MODE" in
     T0=$(date +%s)
     step_report
     step_compact; RC=$?
+    # compact: 0 done or under the threshold, 1 FAILED (ABORT: the live file was not swapped), 2 busy
+    [ "$RC" -eq 1 ] && say "  COMPACT FAILED (rc=1): the live database was left as it was; read the lines above"
     step_scratch
     step_worktrees
     step_repo_backups

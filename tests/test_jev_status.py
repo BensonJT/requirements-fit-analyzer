@@ -38,3 +38,8 @@ def test_hard_gates_are_recognised_and_soft_gates_mean_no_lens_at_the_bar():
     for kw in (dict(listed="judge review"), dict(judge_tier="hidden"), dict(unclear=True), dict(band="weak")):
         assert not note(**kw).startswith(jev_status.HARD_GATES), kw
     assert "no lens at Jev's bar" in jev_status.NO_LENS_NOTE and "technical 0.80" in jev_status.NO_LENS_NOTE
+
+
+def test_a_hidden_row_carrying_the_users_own_grade_says_so():
+    n = note(judge_tier="hidden", n_lenses_good=0, judge_required="meets", own_grade="stretch")
+    assert n.startswith("your own grade on record (stretch)")

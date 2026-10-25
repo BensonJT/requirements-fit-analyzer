@@ -37,7 +37,7 @@ def _lenses(p, t, a) -> str:
 def exclusion_note(*, track: Optional[str], verdict: Optional[str], level: Optional[str], decided: bool,
                    in_tracker: bool, listed: Optional[str], judge_tier: Optional[str], n_lenses_good: Optional[int],
                    judge_required: Optional[str], unclear: bool, band: Optional[str], fit_required: Optional[float],
-                   levels=report.TOP_LEVELS) -> str:
+                   levels=report.TOP_LEVELS, own_grade: Optional[str] = None) -> str:
     """Why a posting never reached Jev's subset, first gate first (the order write_top_jobs applies them).
     Pure, so the wording is testable without a database. `listed` is the uncapped list the row sits in
     ('judge apply', 'model review', ... with ' (non-US)' when the location gate dropped it)."""
@@ -58,6 +58,8 @@ def exclusion_note(*, track: Optional[str], verdict: Optional[str], level: Optio
     if listed:
         cap = report.TOP_APPLY_CAP if listed.endswith("apply") else report.TOP_REVIEW_CAP
         return f"{listed}, but below the Top_Jobs cap: Jev reviews only the first {cap}"
+    if judge_tier == "hidden" and own_grade:
+        return f"your own grade on record ({own_grade}) keeps it off the list (apply needs bullseye or adjacent)"
     if judge_tier == "hidden":
         return (f"judge tier hidden: {n_lenses_good or 0} lens(es) graded bullseye/adjacent, "
                 f"Required {judge_required or 'not judged'} (apply needs a good lens and Required meets)")
@@ -92,8 +94,9 @@ def statuses(con, ids=None, *, levels=report.TOP_LEVELS) -> dict:
         for r in report.model_rows(con, tier, levels=levels):
             listed.setdefault(r[0], f"model {tier}" + (" (non-US)" if non_us_primary(r[12]) else ""))
     unclear = {r[0] for r in report.unclear_rows(con, levels=levels)}
-    selection = {r[0]: r[1:] for r in con.execute(
-        "SELECT posting_id, tier, n_lenses_good, required_fit FROM vw_selection").fetchall()}
+    selection = {r[0]: r[1:] for r in con.execute("""
+        SELECT v.posting_id, v.tier, v.n_lenses_good, v.required_fit, CASE WHEN v.adjudicated THEN g.grade END
+        FROM vw_selection v LEFT JOIN vw_llm_labels_latest g USING (posting_id)""").fetchall()}
     where, params = "p.status = 'active'", []
     if ids is not None:
         where, params = "p.posting_id IN (SELECT unnest(?::VARCHAR[]))", [list(ids)]
@@ -104,11 +107,11 @@ def statuses(con, ids=None, *, levels=report.TOP_LEVELS) -> dict:
     out = {}
     for pid, track, verdict, level, decided, in_tracker, band, fit_required in rows:
         rev = reviews.get(pid)
-        sel = selection.get(pid, (None, None, None))
+        sel = selection.get(pid, (None, None, None, None))
         gate = exclusion_note(track=track, verdict=verdict, level=level, decided=decided, in_tracker=in_tracker,
                               listed=listed.get(pid), judge_tier=sel[0], n_lenses_good=sel[1],
                               judge_required=sel[2], unclear=pid in unclear, band=band, fit_required=fit_required,
-                              levels=levels)
+                              levels=levels, own_grade=sel[3])
         off_list = "" if pid in shown else f" [not on Top Jobs: {gate}]"
         if pid in subset:
             d = flagged.get(pid)

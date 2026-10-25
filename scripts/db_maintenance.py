@@ -3,6 +3,7 @@
     .venv/bin/python scripts/db_maintenance.py report            # sizes, free blocks, row counts; writes nothing
     .venv/bin/python scripts/db_maintenance.py compact           # rewrite the file without its free blocks, verified, swapped in
     .venv/bin/python scripts/db_maintenance.py compact --force   # even when free space is under the threshold
+    .venv/bin/python scripts/db_maintenance.py snapshot --out F  # consistent compressed copy of the DB (db_maintenance.sh --backup)
 
 Why a rewrite and not VACUUM. DuckDB has no CLUSTER and its VACUUM reclaims nothing: a
 single-file database only ever grows, because freed blocks are reused but never returned to
@@ -22,6 +23,7 @@ whole point (the migration backups on the external drive remain the rollback).
 step) never rewrites 2 GB for a 2% gain.
 """
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -170,15 +172,102 @@ def compact(db_path=DEFAULT_DB, force=False, keep_old=False, log=print):
     return True, saved
 
 
+def _codec():
+    """(compress argv, decompress argv): zstd when installed, else gzip. `.zst` / `.gz` is chosen by the caller."""
+    if shutil.which("zstd"):
+        return ["zstd", "-T0", "-3", "-q", "-c"], ["zstd", "-dc", "-q"], ".zst"
+    return ["gzip", "-c"], ["gzip", "-dc"], ".gz"
+
+
+def snapshot(db_path, out_path, log=print):
+    """Write a consistent, compressed, verified copy of the database to `out_path`.
+
+    Consistency: the copy is taken while this process holds the database's exclusive lock, right after
+    a CHECKPOINT folded the WAL into the main file -- the same exclusive open `compact` uses. Nothing else
+    can write (or even open) the file until the copy is done, so the bytes are one committed state.
+    Verification: the source is hashed as it is fed to the compressor, then the compressed file is
+    decompressed and hashed again; the two sha256 must match. Written to `<out>.part` and renamed, so a
+    half-written file never has the final name. Returns 0 ok, 2 database busy (skip), 1 failed.
+    """
+    p, out = Path(db_path), Path(out_path)
+    if not p.exists():
+        log(f"snapshot: {db_path} does not exist")
+        return 1
+    busy = holders(db_path)
+    if busy:
+        log("snapshot: skipped -- another jobsearch process holds the database:")
+        for l in busy:
+            log("   " + l)
+        return 2
+    comp, decomp, _ = _codec()
+    part = Path(str(out) + ".part")
+    part.unlink(missing_ok=True)
+    t0 = time.monotonic()
+    try:
+        con = duckdb.connect(str(p))   # exclusive: fails if anything still holds the file
+    except duckdb.Error as e:
+        log(f"snapshot: skipped -- database is locked ({e})")
+        return 2
+    try:
+        con.execute("CHECKPOINT")
+        wal = Path(str(p) + ".wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            log(f"snapshot: ABORT -- WAL still has {wal.stat().st_size} bytes after CHECKPOINT")
+            return 1
+        src = hashlib.sha256()
+        n = 0
+        with open(part, "wb") as fo, open(p, "rb") as fi:
+            proc = subprocess.Popen(comp, stdin=subprocess.PIPE, stdout=fo)
+            while True:
+                chunk = fi.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                src.update(chunk)
+                n += len(chunk)
+                proc.stdin.write(chunk)
+            proc.stdin.close()
+            rc = proc.wait()
+        if rc != 0 or n != p.stat().st_size:
+            log(f"snapshot: ABORT -- compressor rc={rc}, read {n} of {p.stat().st_size} bytes")
+            part.unlink(missing_ok=True)
+            return 1
+    finally:
+        con.close()
+    # Verify outside the lock: decompress what was written and compare to the hash of what was read.
+    chk = hashlib.sha256()
+    m = 0
+    with open(part, "rb") as fi:
+        proc = subprocess.Popen(decomp, stdin=fi, stdout=subprocess.PIPE)
+        while True:
+            chunk = proc.stdout.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            chk.update(chunk)
+            m += len(chunk)
+        rc = proc.wait()
+    if rc != 0 or m != n or chk.digest() != src.digest():
+        log(f"snapshot: ABORT -- verification failed (rc={rc}, {m} vs {n} bytes, hash match {chk.digest() == src.digest()})")
+        part.unlink(missing_ok=True)
+        return 1
+    part.rename(out)
+    log(f"snapshot : {_fmt(n)} -> {out.name} {_fmt(out.stat().st_size)} (verified sha256 {src.hexdigest()[:12]}) in {time.monotonic() - t0:.0f}s")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["report", "compact"])
+    ap.add_argument("cmd", choices=["report", "compact", "snapshot"])
     ap.add_argument("--db", default=DEFAULT_DB)
+    ap.add_argument("--out", help="snapshot: destination file (a compressed copy, e.g. x.duckdb.zst)")
     ap.add_argument("--force", action="store_true", help="compact even under the free-block threshold")
     ap.add_argument("--keep-old", action="store_true", help="keep the pre-compaction file as .precompact")
     a = ap.parse_args(argv)
     if a.cmd == "report":
         return 0 if report(a.db) is not None else 1
+    if a.cmd == "snapshot":
+        if not a.out:
+            ap.error("snapshot needs --out")
+        return snapshot(a.db, a.out)
     did, _ = compact(a.db, force=a.force, keep_old=a.keep_old)
     return 0
 

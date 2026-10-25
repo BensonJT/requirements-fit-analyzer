@@ -72,3 +72,34 @@ def test_compact_skips_under_threshold_unless_forced(tmp_path):
     did, _ = dbm.compact(db, force=True, keep_old=True, log=lines.append)
     assert did and os.path.exists(db + ".precompact")
     assert duckdb.connect(db, read_only=True).execute("SELECT count(*) FROM postings").fetchone()[0] == 1
+
+
+def test_snapshot_is_a_verified_compressed_copy(tmp_path, monkeypatch):
+    """`snapshot` (what db_maintenance.sh --backup stages): the decompressed bytes equal the checkpointed DB,
+    it opens, and no .part file is left behind."""
+    import hashlib
+    import subprocess
+    monkeypatch.setattr(dbm, "holders", lambda *_: [])
+    db = str(tmp_path / "t.duckdb")
+    con = store.connect(db)
+    store.record_board(con, "Acme", "greenhouse", [N.base(req_id="A", title="Process Lead")], datetime(2026, 9, 23))
+    con.close()
+    out = tmp_path / "t.duckdb.zst"
+    lines = []
+    assert dbm.snapshot(db, str(out), log=lines.append) == 0, lines
+    assert out.exists() and not (tmp_path / "t.duckdb.zst.part").exists()
+    _, decomp, _ = dbm._codec()
+    raw = subprocess.run(decomp, stdin=open(out, "rb"), capture_output=True, check=True).stdout
+    assert hashlib.sha256(raw).hexdigest() == hashlib.sha256(open(db, "rb").read()).hexdigest()
+    restored = tmp_path / "restored.duckdb"
+    restored.write_bytes(raw)
+    assert duckdb.connect(str(restored), read_only=True).execute("SELECT count(*) FROM postings").fetchone()[0] == 1
+
+
+def test_snapshot_skips_when_database_is_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(dbm, "holders", lambda *_: ["123 python finder.py screen"])
+    db = str(tmp_path / "t.duckdb")
+    store.connect(db).close()
+    out = tmp_path / "t.duckdb.zst"
+    assert dbm.snapshot(db, str(out), log=lambda *_: None) == 2
+    assert not out.exists()

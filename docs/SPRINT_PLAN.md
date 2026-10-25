@@ -723,7 +723,7 @@ The audit (vault `Tools/Jobsearch_Audit_20260917.md`) found and this commit fixe
 - [x] `backend/finder/feedback.py` (`load_csv`, `rule_level_fit`, `agreement`, `export`) and `finder.py feedback` (Agent B).
 - [x] `report.write_jobs_found` / `write_lens_lists` order `in_range` → `stretch_up` → `unknown`/NULL → score; `out_of_reach` / `too_low` routed to a collapsed tail, never a block or the top table; a `Level` column added (Agent D).
 - [x] Agreement run on the live DB (2026-09-17): 20/22 exact, 12/13 on `in_range`/`out_of_reach` (92%, target ≥ 80%); the two disagreements are listed in `docs/STATUS.md`.
-- [x] 232 feedback rows re-exported with the rule's answer, the judge's three grades and `needs_you` (73 flagged) — vault `Tools/Report_Feedback_20260917_rule.csv`.
+- [x] 232 feedback rows re-exported with the rule's answer, the judge's three grades and `needs_you` (73 flagged) — vault `Tools/Blind_Reviews/Report_Feedback_20260917_rule.csv`.
 - [x] Full suite green (197).
 - [x] `rescreen-all` fills `level_fit` on the whole corpus (per §20.4's ordering, after the fresh ingest).  _(reconciled 2026-09-30: DONE — `rescreen-all` ran 9/17-9/18 (STATUS line ~1209: 63,453 rows); level_fit is on every screens row since.)_
 

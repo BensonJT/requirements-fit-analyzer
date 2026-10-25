@@ -24,6 +24,7 @@ import psycopg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.tracker import db as trackerdb  # noqa: E402
+from backend.finder import jev_status  # noqa: E402
 
 POSTING_COLS = ["posting_id", "employer", "platform", "req_id", "title", "url", "location_primary",
                 "workplace_type", "work_site", "pay_min", "pay_max", "pay_interval", "posted_at",
@@ -33,7 +34,8 @@ LENS_COLS = ["final_score", "band", "tier", "verdict", "fit_process", "fit_techn
              "fit_required", "fit_bullseye", "level_fit", "grade", "grade_process", "grade_technical",
              "grade_ai", "required_fit", "rank_score", "rank_why", "lens_best"]
 DECISION_COLS = ["posting_id", "decision", "reason", "source", "source_ref", "decided_at"]
-SNAPSHOT_COLS = POSTING_COLS + LENS_COLS + ["latest_decision", "in_tracker", "snapshot_at"]
+# jev_result / jev_note (2026-10-25): what Jev did with the row, or the gate that kept it from Jev (jev_status.py).
+SNAPSHOT_COLS = POSTING_COLS + LENS_COLS + ["latest_decision", "jev_result", "jev_note", "in_tracker", "snapshot_at"]
 
 # The population SQL. ? = list of tracker posting_ids. Order is by posting_id for a stable CLUSTER.
 POPULATION_SQL = f"""
@@ -69,11 +71,17 @@ def fetch(duck, ids):
     now = dt.datetime.now().replace(microsecond=0)
     tracked = set(ids)
     snap = []
-    for r in duck.execute(POPULATION_SQL, [list(ids)]).fetchall():
+    rows = duck.execute(POPULATION_SQL, [list(ids)]).fetchall()
+    try:  # enrichment only: a Jev-status failure must never cost the night's snapshot
+        jev = jev_status.statuses(duck, [r[0] for r in rows])
+    except Exception as e:  # noqa: BLE001
+        print(f"pg_snapshot: WARNING jev status skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        jev = {r[0]: (None, f"jev status unavailable this run: {type(e).__name__}") for r in rows}
+    for r in rows:
         r = list(r)
         if r[POSTING_COLS.index("description_text")]:  # Postgres text cannot hold NUL
             r[POSTING_COLS.index("description_text")] = r[POSTING_COLS.index("description_text")].replace("\x00", "")
-        snap.append(tuple(r) + (r[0] in tracked, now))
+        snap.append(tuple(r) + jev.get(r[0], (None, None)) + (r[0] in tracked, now))
     decs = duck.execute(f"SELECT {', '.join(DECISION_COLS)} FROM decisions ORDER BY posting_id, decided_at").fetchall()
     return snap, decs
 
@@ -102,7 +110,8 @@ def snapshot_one(pg, duck, posting_id):
     i = POSTING_COLS.index("description_text")
     if r[i]:
         r[i] = r[i].replace("\x00", "")
-    row = tuple(r) + (True, dt.datetime.now().replace(microsecond=0))
+    row = tuple(r) + (None, "added by trk add after the nightly snapshot; next run fills it",
+                      True, dt.datetime.now().replace(microsecond=0))
     pg.execute(f"INSERT INTO jobs.fit_snapshot ({', '.join(SNAPSHOT_COLS)}) "
                f"VALUES ({', '.join(['%s'] * len(SNAPSHOT_COLS))}) ON CONFLICT (posting_id) DO NOTHING", row)
     return True

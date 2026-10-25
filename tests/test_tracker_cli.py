@@ -236,6 +236,41 @@ def test_cli_add_posting_missing_requires_fields(conn, jd, capsys):
     assert conn.execute("SELECT count(*) AS n FROM tracker.application").fetchone()["n"] == 0
 
 
+def test_cli_edit_posting_copies_missing_snapshot(conn, jd, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "ensure_snapshot", lambda c, pid: calls.append(pid))
+    run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "none")
+    assert run(capsys, "edit", "1", "--posting", PID)[0] == 0
+    assert calls == [PID]                                   # not in jobs.fit_snapshot: copy it now, as add does
+    conn.execute("INSERT INTO jobs.fit_snapshot (posting_id) VALUES (%s)", [PID])
+    assert run(capsys, "edit", "1", "--posting", PID)[0] == 0
+    assert run(capsys, "edit", "1", "--posting", "none")[0] == 0
+    assert run(capsys, "edit", "1", "--role", "B")[0] == 0
+    assert calls == [PID]                                   # already there, cleared, or no posting: no copy
+
+
+def test_cli_edit_posting_survives_locked_duckdb(conn, jd, capsys, monkeypatch, tmp_path):
+    """A sweep holding the DuckDB write lock must not fail the edit: the posting id is saved and the
+    nightly snapshot adds the row later."""
+    import subprocess
+    import sys
+    duck = tmp_path / "locked.duckdb"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import duckdb, sys, time; c = duckdb.connect(sys.argv[1]); "
+         "print('ready', flush=True); time.sleep(60)", str(duck)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        monkeypatch.setenv("JOBSEARCH_DUCKDB", str(duck))
+        run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "none")
+        rc, out, err = run(capsys, "edit", "1", "--posting", PID)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert rc == 0 and "Traceback" not in err
+    assert "could not copy posting" in out and "IOException" in out and "nightly snapshot will add it" in out
+    assert conn.execute("SELECT posting_id FROM tracker.application").fetchone()["posting_id"] == PID
+
+
 def test_cli_folder_none_and_non_built(conn, jd, capsys):
     run(capsys, "add", "--company", "Acme Corp", "--role", "A", "--folder", "none")
     run(capsys, "add", "--company", "Acme Corp", "--role", "B", "--status", "applied")

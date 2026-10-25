@@ -20,15 +20,15 @@
 #
 # BACKUPS (travel-safe, 2026-10-24; the E: drive stays home when Jeff travels). `--backup` takes a
 # consistent, verified, compressed copy of the DuckDB (db_maintenance.py snapshot: exclusive lock +
-# CHECKPOINT, sha256 round trip), staged in ~/share (C:, never ~/), then delivers it:
+# CHECKPOINT, sha256 round trip). No local copy is ever made (not on WSL's disk, not on C:):
 #   E: present (mountpoint -q /mnt/e AND the backup dir already exists) -> the E: backup dir
-#   E: absent                                                           -> gdrive:backups/jobsearch/
+#   E: absent (or --auto, or --drive)                                   -> streamed to gdrive:backups/jobsearch/
 # Nothing is ever written under /mnt/e unless it really is a mount: an unplugged E: leaves an empty
 # /mnt/e on WSL's own disk (ext4.vhdx never shrinks), and this script never mkdir's there.
-# Drive uploads are verified by size + sha256, the staged file is deleted after, the newest
+# Drive uploads are verified by Drive's size + sha256 and a decompressed round trip from Drive; the newest
 # $EXTERNAL_KEEP are kept. No network = one log line, skip, exit 0. `--auto` always runs the Drive backup
 # (off-site, home or away; at most once per JOBSEARCH_BACKUP_MIN_HOURS); `--backup` also writes to E: when it is home.
-# Test hooks: JOBSEARCH_E_ROOT, JOBSEARCH_BACKUP_DIR, JOBSEARCH_BACKUP_REMOTE, JOBSEARCH_BACKUP_STAGE, JOBSEARCH_DB.
+# Test hooks: JOBSEARCH_E_ROOT, JOBSEARCH_BACKUP_DIR, JOBSEARCH_BACKUP_REMOTE, JOBSEARCH_DB.
 #
 # --auto never touches the external backup drive and never deletes anything
 # a person has not seen deleted before: it compacts the live DB (verified,
@@ -49,10 +49,9 @@ E_ROOT="${JOBSEARCH_E_ROOT:-/mnt/e}"                        # where the external
 EXTERNAL_BACKUP_DIR="${JOBSEARCH_BACKUP_DIR:-$E_ROOT/backups/jobsearch}"
 EXTERNAL_KEEP="${JOBSEARCH_EXTERNAL_BACKUP_KEEP:-3}"        # newest N backups kept (E: and Drive); the menu prune of older E: files asks first
 BACKUP_REMOTE="${JOBSEARCH_BACKUP_REMOTE:-gdrive:backups/jobsearch}"
-BACKUP_STAGE="${JOBSEARCH_BACKUP_STAGE:-$HOME/share/jobsearch_backup_tmp}"   # must resolve under /mnt/c (C:), never ~/
 BACKUP_MIN_HOURS="${JOBSEARCH_BACKUP_MIN_HOURS:-20}"        # --auto only: skip if the newest Drive backup is younger
 if command -v zstd >/dev/null 2>&1; then BACKUP_EXT=".duckdb.zst"; else BACKUP_EXT=".duckdb.gz"; fi
-RCLONE_NET="--contimeout 20s --timeout 120s --retries 2 --low-level-retries 2"
+export RCLONE_NET="--contimeout 20s --timeout 120s --retries 2 --low-level-retries 2"   # db_maintenance.py snapshot --remote reads it
 VHDX_SLACK_WARN_GB=10
 mkdir -p logs
 STAMP="$(date +%Y%m%d_%H%M)"
@@ -167,10 +166,6 @@ step_external_backups() {  # menu only: keeps the newest $EXTERNAL_KEEP, lists t
 # ── backup ─────────────────────────────────────────────────────────────────
 backup_names_remote() { rclone lsf "$BACKUP_REMOTE" --files-only --include "jobsearch_*${BACKUP_EXT}" $RCLONE_NET 2>/dev/null | sort; }
 
-BK_STAGED=""
-backup_cleanup() { [ -n "$BK_STAGED" ] && rm -f "$BK_STAGED" "$BK_STAGED.part"; BK_STAGED=""; return 0; }
-trap 'backup_cleanup' EXIT
-trap 'backup_cleanup; exit 130' INT TERM
 
 step_backup() {  # $1 = auto|manual, $2 = drive to force Drive. Never fails the caller (returns 0 unless a manual run really broke).
   local mode="${1:-manual}" force="${2:-}"
@@ -184,7 +179,7 @@ step_backup() {  # $1 = auto|manual, $2 = drive to force Drive. Never fails the 
   [ "$mode" = auto ] && to_e=0   # --auto always backs up off-site to Drive (home or away); --backup writes to E: when it is home
 
   if [ "$to_e" = 0 ]; then
-    # Preflight BEFORE staging 1 GB: one cheap call that also creates the Drive folder.
+    # Preflight before streaming: one cheap call that also creates the Drive folder.
     local err; err="$(rclone mkdir "$BACKUP_REMOTE" $RCLONE_NET 2>&1)" \
       || { say "  backup skipped: cannot reach $BACKUP_REMOTE (no network or rclone sign-in?): $(echo "$err" | tail -1 | cut -c1-200)"; return 0; }
     if [ "$mode" = auto ]; then
@@ -197,51 +192,25 @@ step_backup() {  # $1 = auto|manual, $2 = drive to force Drive. Never fails the 
     fi
   fi
 
-  # Stage on C: (never ~/): resolve the path first, refuse anything that is not under /mnt/c.
-  local stage_real
-  stage_real="$(readlink -m "$BACKUP_STAGE")"
-  case "$stage_real" in /mnt/c/*) ;; *) say "  backup skipped: staging dir $stage_real is not on C: (/mnt/c)"; return 0 ;; esac
-  mkdir -p "$stage_real" || { say "  backup skipped: cannot create staging dir $stage_real"; return 0; }
-  local need avail; need=$(stat -c %s "$DB"); avail=$(df -B1 --output=avail "$stage_real" | tail -1)
-  if [ "$avail" -lt "$need" ]; then say "  backup skipped: only $((avail / 1048576)) MB free on C: for staging (need up to $((need / 1048576)) MB)"; return 0; fi
-  local staged="$stage_real/$name" rc=0
-  BK_STAGED="$staged"   # the EXIT/INT/TERM trap below removes it if the run is killed mid-way
-  run "$PY" scripts/db_maintenance.py snapshot --db "$DB" --out "$staged"; rc=$?
-  if [ "$rc" -eq 2 ]; then say "  backup skipped: database busy"; backup_cleanup; return 0; fi
-  if [ "$rc" -ne 0 ] || [ ! -s "$staged" ]; then say "  BACKUP FAILED: snapshot did not complete (nothing delivered)"; backup_cleanup; return 1; fi
-  backup_deliver "$staged" "$name" "$to_e"; rc=$?
-  backup_cleanup; [ "$to_e" = 1 ] || [ "$rc" -ne 0 ] || say "  staged file removed"
-  return "$rc"
-}
-
-backup_deliver() {  # $1 staged file, $2 name, $3 1 = E:, 0 = Drive
-  local staged="$1" name="$2" to_e="$3"
-  local lsum lsize; lsize=$(stat -c %s "$staged"); lsum="$(sha256sum "$staged" | cut -d' ' -f1)"
-
+  # No local copy anywhere (Jeff 2026-10-24: no DuckDB backups on WSL's disk or C:): E: gets the file written
+  # straight to it (<name>.part, renamed after the round-trip check); Drive gets it streamed (rclone rcat).
+  local rc=0
   if [ "$to_e" = 1 ]; then
     say "  -> E: $EXTERNAL_BACKUP_DIR/$name"
-    cp "$staged" "$EXTERNAL_BACKUP_DIR/$name" 2>>"$LOG" || { say "  BACKUP FAILED: copy to E: failed"; rm -f "$EXTERNAL_BACKUP_DIR/$name"; return 1; }
-    if [ "$(stat -c %s "$EXTERNAL_BACKUP_DIR/$name")" != "$lsize" ] || [ "$(sha256sum "$EXTERNAL_BACKUP_DIR/$name" | cut -d' ' -f1)" != "$lsum" ]; then
-      say "  BACKUP FAILED: E: copy does not match (size/sha256); removed"; rm -f "$EXTERNAL_BACKUP_DIR/$name"; return 1
-    fi
-    say "  E: backup verified ($((lsize / 1048576)) MB, sha256 ${lsum:0:12})"
+    run "$PY" scripts/db_maintenance.py snapshot --db "$DB" --out "$EXTERNAL_BACKUP_DIR/$name"; rc=$?
+    if [ "$rc" -eq 2 ]; then say "  backup skipped: database busy"; return 0; fi
+    if [ "$rc" -ne 0 ]; then say "  BACKUP FAILED: E: snapshot did not complete"; rm -f "$EXTERNAL_BACKUP_DIR/$name.part"; return 1; fi
     ls -t "$EXTERNAL_BACKUP_DIR"/jobsearch_*"$BACKUP_EXT" 2>/dev/null | tail -n +"$((EXTERNAL_KEEP + 1))" | while read -r f; do say "  prune E: $f"; rm -f "$f"; done
     return 0
   fi
-
-  say "  -> Drive $BACKUP_REMOTE/$name"
-  if ! rclone copyto "$staged" "$BACKUP_REMOTE/$name" $RCLONE_NET >>"$LOG" 2>&1; then
-    say "  backup skipped: upload failed or was interrupted (network?): will retry on the next run"
-    rclone deletefile "$BACKUP_REMOTE/$name" $RCLONE_NET >/dev/null 2>&1; return 0
-  fi
-  local rsize rsum
-  rsize="$(rclone lsjson "$BACKUP_REMOTE/$name" $RCLONE_NET 2>/dev/null | "$PY" -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["Size"] if d else "")' 2>/dev/null)"
-  rsum="$(rclone hashsum sha256 "$BACKUP_REMOTE/$name" $RCLONE_NET 2>/dev/null | cut -d' ' -f1)"
-  if [ "$rsize" != "$lsize" ] || [ "$rsum" != "$lsum" ]; then
-    say "  BACKUP FAILED: Drive copy does not match (size $rsize vs $lsize, sha256 ${rsum:0:12} vs ${lsum:0:12}); removing it"
-    rclone deletefile "$BACKUP_REMOTE/$name" $RCLONE_NET >/dev/null 2>&1; return 1
-  fi
-  say "  Drive backup verified ($((lsize / 1048576)) MB, size + sha256 ${lsum:0:12})"
+  say "  -> Drive $BACKUP_REMOTE/$name (streamed; nothing written locally)"
+  run "$PY" scripts/db_maintenance.py snapshot --db "$DB" --remote "$BACKUP_REMOTE/$name"; rc=$?
+  case "$rc" in
+    0) ;;
+    2) say "  backup skipped: database busy"; return 0 ;;
+    3) say "  backup skipped: upload failed or was interrupted (network?): will retry on the next run"; return 0 ;;
+    *) say "  BACKUP FAILED: the Drive copy did not verify (removed)"; return 1 ;;
+  esac
   local victims; victims="$(backup_names_remote | head -n -"$EXTERNAL_KEEP")"
   if [ -n "$victims" ]; then
     echo "$victims" | while read -r f; do
@@ -251,6 +220,7 @@ backup_deliver() {  # $1 staged file, $2 name, $3 1 = E:, 0 = Drive
   fi
   return 0
 }
+
 
 # ── modes ──────────────────────────────────────────────────────────────────
 MODE="${1:-menu}"

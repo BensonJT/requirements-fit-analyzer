@@ -477,7 +477,9 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
 
 
 TOP_APPLY_CAP = 100
-TOP_REVIEW_CAP = 40
+# Was 40; raised 2026-10-25 (user's go): after the gates there were 182 Review rows (140 judged + 42 model), so 40
+# showed under a quarter of them, and 112 judge-Review rows Jev agreed with never appeared.
+TOP_REVIEW_CAP = 200
 TOP_LEVELS = ("in_range", "stretch_up")
 
 _GRADE_ABBR = {"bullseye": "bull", "adjacent": "adj", "stretch": "stretch", "wrong": "wrong"}

@@ -222,6 +222,24 @@ def test_run_skips_labels_sync_without_vault_dir(tmp_path, monkeypatch):
     con.close()
 
 
+def test_run_uses_the_vault_dir_it_is_given_over_the_env(tmp_path, monkeypatch):
+    """finder.py retrain --vault reaches labels (2026-10-25: it was ignored for $JOBSEARCH_VAULT_DIR)."""
+    from backend.finder import labels as labels_mod
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    monkeypatch.setenv("JOBSEARCH_VAULT_DIR", "/from/env")
+    seen = []
+    monkeypatch.setattr(labels_mod, "sync_labels", lambda con_, vault_dir, log=print: seen.append(vault_dir))
+    monkeypatch.setattr(retrain, "_train_one",
+                        lambda con_, model, *, dry_run, log=print: {"model": model, "promoted": False, "reason": "x"})
+    monkeypatch.setattr(retrain, "_train_required_embed",
+                        lambda con_, *, dry_run, log=print: {"model": "required_embed", "promoted": False,
+                                                              "reason": "x"})
+    retrain.run(con, dry_run=True, vault_dir="/from/flag", log=_quiet)
+    retrain.run(con, dry_run=True, log=_quiet)
+    assert seen == ["/from/flag", "/from/env"]
+    con.close()
+
+
 # ---------------------------------------------------------------- history
 def test_history_prints_newest_first(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))

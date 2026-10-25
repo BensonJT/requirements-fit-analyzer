@@ -167,15 +167,16 @@ def _train_required_embed(con, *, dry_run: bool, log=print) -> dict:
     return {"model": model, "promoted": promoted, "reason": reason}
 
 
-def run(con, *, dry_run: bool = False, log=print) -> list:
+def run(con, *, dry_run: bool = False, vault_dir: Optional[str] = None, log=print) -> list:
     """labels -> train each of the five step-4 models -> required-embed train -> (only if at least one
-    model was promoted) rescreen-all, coverage, required-embed score. Returns one result dict per model."""
-    vault_dir = os.getenv("JOBSEARCH_VAULT_DIR")
+    model was promoted) rescreen-all, coverage, required-embed score. Returns one result dict per model.
+    `vault_dir` (finder.py's --vault) defaults to $JOBSEARCH_VAULT_DIR."""
+    vault_dir = vault_dir or os.getenv("JOBSEARCH_VAULT_DIR")
     if vault_dir:
         from . import labels as labels_mod
         labels_mod.sync_labels(con, vault_dir, log=log)
     else:
-        log("retrain: JOBSEARCH_VAULT_DIR not set -- skipping `labels` (label_docs left as-is)")
+        log("retrain: no --vault and JOBSEARCH_VAULT_DIR not set -- skipping `labels` (label_docs left as-is)")
 
     if not dry_run:   # recover labels whose JD was re-fetched unchanged in substance (reanchor.py)
         from . import reanchor

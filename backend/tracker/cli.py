@@ -422,21 +422,22 @@ def build_parser():
 
     p = sub.add_parser("ls", help="list applications (default: active)")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--closed", action="store_true")
-    g.add_argument("--all", action="store_true")
-    g.add_argument("--status", metavar="STATUS")
+    g.add_argument("--closed", action="store_true", help="closed rows instead")
+    g.add_argument("--all", action="store_true", help="open rows, then closed rows")
+    g.add_argument("--status", metavar="STATUS", help="only rows with this status, open or closed")
     p.set_defaults(fn=cmd_ls)
 
     p = sub.add_parser("find", help="search company / role / req / posting id / app id (AND-ed)")
-    p.add_argument("terms", nargs="+")
+    p.add_argument("terms", nargs="+", help="words that must all match (company, role, req, posting id, app id); "
+                                            "open and closed rows alike")
     p.set_defaults(fn=cmd_find)
 
     p = sub.add_parser("show", help="one application: fields, contacts, history")
-    p.add_argument("app_id", type=int)
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
     p.set_defaults(fn=cmd_show)
 
     p = sub.add_parser("set", parents=[nr], help="change status")
-    p.add_argument("app_id", type=int)
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
     p.add_argument("status", help="new status (the list is in trk --help); a closed row set to an active "
                                   "status reopens")
     p.add_argument("--date", help="status date YYYY-MM-DD (default today)")
@@ -444,12 +445,12 @@ def build_parser():
     p.set_defaults(fn=cmd_set)
 
     p = sub.add_parser("note", parents=[nr], help="add a note")
-    p.add_argument("app_id", type=int)
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
     p.add_argument("text", help="the note (quote it)")
     p.set_defaults(fn=cmd_note)
 
     p = sub.add_parser("contact", parents=[nr], help="link a contact")
-    p.add_argument("app_id", type=int)
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
     p.add_argument("name", help="the contact's name; an existing contact with the same name and --company is "
                                   "reused (new details only fill its empty fields)")
     p.add_argument("--role", default="recruiter", choices=store.CONTACT_ROLES,
@@ -459,7 +460,7 @@ def build_parser():
     p.set_defaults(fn=cmd_contact)
 
     p = sub.add_parser("edit", parents=[nr], help="edit fields (empty string clears; --posting none)")
-    p.add_argument("app_id", type=int)
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
     edit_help = {
         "next_action": "what happens next, shown on the views", "follow_up": "follow-up due date YYYY-MM-DD",
         "closes": "posting close date YYYY-MM-DD", "role": "role title", "company": "company name",

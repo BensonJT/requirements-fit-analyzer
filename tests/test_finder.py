@@ -684,6 +684,25 @@ def test_finder_import_pulls_no_optional_dependencies():
     assert res.returncode == 0, res.stdout + res.stderr
 
 
+def test_sweep_run_on_a_locked_duckdb_exits_cleanly(tmp_path, monkeypatch):
+    """Another process holding the DuckDB write lock: the sweep stops with a message before any pull."""
+    from backend.ats import sweep as ats_sweep
+    monkeypatch.setattr(ats_sweep, "load_registry", lambda: [])
+    db = str(tmp_path / "locked.duckdb")
+    store.connect(db).close()
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import duckdb, sys, time; c = duckdb.connect(sys.argv[1]); "
+         "print('ready', flush=True); time.sleep(60)", db], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        with pytest.raises(SystemExit) as exc:
+            ats_sweep.run(db_path=db, skip_sweep=True, detail_budget=0, screen=False, log=_quiet)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert "sweep_ats: the DuckDB is locked by another process; nothing was pulled" in str(exc.value)
+
+
 def test_sweep_run_screen_flag(tmp_path, monkeypatch):
     from backend.ats import sweep as ats_sweep
     monkeypatch.setattr(ats_sweep, "load_registry", lambda: [])

@@ -7,8 +7,8 @@ every candidate still has to be opened on the employer's own posting before it g
 a Jobs_Found file.
 
 Usage:
-    python sweep.py                      # 7 days, all sources
-    python sweep.py --days 14 --sources adzuna,usajobs
+    .venv/bin/python sweep.py                      # 7 days, all sources
+    .venv/bin/python sweep.py --days 14 --sources adzuna,usajobs
 """
 import argparse
 import csv
@@ -239,11 +239,14 @@ def collapse(listings):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--days", type=int, default=7)
-    ap.add_argument("--sources", default="adzuna,jooble,usajobs")
-    ap.add_argument("--outdir", default="output")
+    ap.add_argument("--days", type=int, default=7, help="listing age window in days (default 7; USAJobs caps it at 60)")
+    ap.add_argument("--sources", default="adzuna,jooble,usajobs",
+                    help="comma-separated APIs to call: adzuna, jooble, usajobs (default all); one without a key "
+                         "in .env is skipped")
+    ap.add_argument("--outdir", default="output",
+                    help="where raw_<stamp>.json, sweep_<stamp>.csv and sweep_<stamp>.md are written (default output/)")
     ap.add_argument("--from-raw", help="re-screen a saved raw_*.json instead of calling the APIs")
-    ap.add_argument("--no-resolve", action="store_true", help="skip following shortlist links")
+    ap.add_argument("--no-resolve", action="store_true", help="skip fetching each shortlisted URL (no dead-page check; candidates stay candidates)")
     args = ap.parse_args()
 
     load_dotenv()

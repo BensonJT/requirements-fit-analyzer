@@ -5,11 +5,11 @@ and record decisions so nothing is shown twice.
 Usage:
     .venv/bin/python finder.py screen                     # new / changed / version-changed rows
     .venv/bin/python finder.py rescreen-all               # every active row, prints the verdict diff
-    .venv/bin/python finder.py facets [--discover]        # each board's filter scope (country / partition)
+    .venv/bin/python finder.py facets [--discover]        # each Workday board's filter scope (country / partition)
     .venv/bin/python finder.py report --out /tmp/x.md     # Jobs_Found file (+ snapshots)
-    .venv/bin/python finder.py lenses --out /tmp/l.md     # strong on process / technical / both
+    .venv/bin/python finder.py lenses --out /tmp/l.md     # strong on both / process / technical, plus applied AI
     .venv/bin/python finder.py top --out /tmp/t.md        # END-of-pipeline list: run after judge import
-    .venv/bin/python finder.py sync --verbose             # mirror Application_Tracker.md
+    .venv/bin/python finder.py sync --verbose             # rebuild the tracker table from $TRACKER_SOURCE
     .venv/bin/python finder.py mark <posting_id|url|"employer|title"> pass --reason "travel"
     .venv/bin/python finder.py mark <target> pass --reason "requirement: active TS/SCI required" \
         --unmet "Active TS/SCI clearance required" --basis blind
@@ -17,8 +17,8 @@ Usage:
     .venv/bin/python finder.py mark --from-file decisions.csv   # one row per reviewed posting
     .venv/bin/python finder.py shortlist --days 7 --n 30
     .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
-    .venv/bin/python finder.py labels --reanchor [--dry-run]  # recover llm_labels orphaned before the
-                                                                # description_hash normalization fix (§ v11)
+    .venv/bin/python finder.py labels --reanchor [--dry-run]  # recover judge labels a re-fetched JD expired
+                                                                # (judge batch files as evidence)
     .venv/bin/python finder.py train --report                 # TF-IDF + LR on the labels
     .venv/bin/python finder.py setup-check                    # personal files, optional dependencies, DB
     .venv/bin/python finder.py evidence --check               # evidence manifest: sources, units, samples
@@ -32,6 +32,10 @@ Usage:
     .venv/bin/python finder.py feedback ingest PATH --basis seen [--dry-run] # one narrow/blind sheet
     .venv/bin/python finder.py train --lens ai                # train one lens's model (process|technical|ai)
     .venv/bin/python finder.py train --lens required          # the Required-block ranking model (NOT a lens)
+    .venv/bin/python finder.py bullseye-backfill               # once, after train --lens bullseye passes its gate
+    .venv/bin/python finder.py required-embed train|score [--all]  # second-layer Required model (NOT a lens)
+    .venv/bin/python finder.py judge export [--limit N] [--dir D]  # write grading batch files (no API call)
+    .venv/bin/python finder.py judge import [--dir D]          # load graded *.result.json into llm_labels
     .venv/bin/python finder.py retrain [--dry-run]             # weekly retrain, gated + ledgered (sprint plan §24)
     .venv/bin/python finder.py retrain --history               # print the model_runs ledger, newest first
     .venv/bin/python finder.py judge2 run --dry-run --show 3    # print payloads + prompt, call nothing (§25/§29)
@@ -54,7 +58,10 @@ Usage:
     .venv/bin/python finder.py jev rederive                            # re-derive required_fit, no API call
     .venv/bin/python finder.py bridge [--max-ring N] [--new-only]  # bridge (place-scoped retail) track's open list (§31.6)
 
-Every subcommand takes --db (default db/jobsearch.duckdb) and --vault (default $JOBSEARCH_VAULT_DIR).
+Every subcommand takes --db (default $JOBSEARCH_DB, else db/jobsearch.duckdb) and --vault (default
+$JOBSEARCH_VAULT_DIR; retrain ignores --vault and reads the variable). Every subcommand opens the DuckDB
+read-write first: while a sweep holds the lock it stops with a message and exits 1. `<command> --help`
+gives each command's own summary and switches.
 """
 import argparse
 import csv
@@ -331,6 +338,10 @@ def cmd_top(con, a):
                                  include_decided=a.include_decided, jev_gate_on=not a.no_jev_gate)
     print(path)
 
+
+LOCK_NOTE = ("DuckDB lock: every finder.py command opens the pipeline DuckDB read-write first, even one that "
+             "only reads. While a sweep or launch.sh run holds it, the command stops with a message, writes "
+             "nothing and exits 1; run it again when that finishes.")
 
 MARK_GUIDE = """\
 targets:
@@ -783,7 +794,7 @@ def cmd_setup_check(con, a):
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--db", help="override the DuckDB path")
+    common.add_argument("--db", help="DuckDB path (default $JOBSEARCH_DB, else db/jobsearch.duckdb)")
     common.add_argument("--vault", default=os.getenv("JOBSEARCH_VAULT_DIR"), help="vault / Job_Search directory")
     # For a command with its OWN nested sub-subparsers (today: `feedback`'s sheet/sheet-import/ingest), the
     # outer `--db`/`--vault` (parents=[common]) is parsed against the `feedback` parser, but argparse then
@@ -796,65 +807,91 @@ def main():
     # set. `default=argparse.SUPPRESS` makes the inner parser set nothing at all when its own `--db`/`--vault`
     # is absent, leaving whatever the outer parser (or its own default) already put in the namespace alone.
     common_inner = argparse.ArgumentParser(add_help=False)
-    common_inner.add_argument("--db", default=argparse.SUPPRESS, help="override the DuckDB path")
+    common_inner.add_argument("--db", default=argparse.SUPPRESS,
+                              help="DuckDB path (default $JOBSEARCH_DB, else db/jobsearch.duckdb)")
     common_inner.add_argument("--vault", default=argparse.SUPPRESS, help="vault / Job_Search directory")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("screen", parents=[common], help="screen rows that need it")
-    s.add_argument("--full", action="store_true", help="re-screen every active row")
-    s.add_argument("--since-hours", type=float, help="only rows first seen / given a JD in the last N hours")
-    s.add_argument("--limit", type=int)
-    s.add_argument("--no-model", action="store_true", help="rules only: skip the trained fit model")
-    s.add_argument("--no-embed", action="store_true", help="skip embeddings (Phase 3; no-op until built)")
+    s = sub.add_parser("screen", parents=[common],
+                       help="screen active fit-track rows that are new, have a re-fetched JD, or were screened "
+                            "under another rules or overall-model version; writes screens rows (a retrained "
+                            "lens model alone does not make rows due: use --full)")
+    s.add_argument("--full", action="store_true", help="re-screen every active fit-track row (bridge rows are never screened)")
+    s.add_argument("--since-hours", type=float,
+                   help="only rows first seen or given a JD in the last N hours, plus any row never screened")
+    s.add_argument("--limit", type=int, help="screen at most N candidate rows, newest first (default: all)")
+    s.add_argument("--no-model", action="store_true",
+                   help="rules only: skip every trained model; rows screened with a model become due, and the "
+                        "next normal screen redoes them")
+    s.add_argument("--no-embed", action="store_true", help="ignored: screen computes no embeddings (coverage and "
+                                                           "required-embed do)")
     s.set_defaults(func=cmd_screen)
 
-    s = sub.add_parser("rescreen-all", parents=[common], help="screen --full, then the verdict-count diff")
-    s.add_argument("--no-model", action="store_true", help="rules only: skip the trained fit model")
+    s = sub.add_parser("rescreen-all", parents=[common],
+                       help="re-screen every active fit-track row (writes screens rows), then print the verdict-count diff")
+    s.add_argument("--no-model", action="store_true",
+                   help="rules only: skip every trained model; the next normal screen then re-screens every row")
     s.set_defaults(func=cmd_rescreen_all)
 
-    s = sub.add_parser("facets", parents=[common], help="show or discover each board's filter scope")
-    s.add_argument("--discover", action="store_true", help="probe the boards live and rewrite board_scope")
-    s.add_argument("--employer", help="limit discovery to boards whose name contains this")
+    s = sub.add_parser("facets", parents=[common], help="show or discover each Workday board's filter scope")
+    s.add_argument("--discover", action="store_true",
+                   help="probe each Workday board live (network) and rewrite its board_facets and board_scope "
+                        "rows; a board that fails is logged and keeps its old rows")
+    s.add_argument("--employer", help="with --discover: probe only Workday boards whose employer contains this "
+                                      "(case-insensitive); the listing ignores it")
     s.set_defaults(func=cmd_facets)
 
     s = sub.add_parser("bridge", parents=[common],
                        help="the bridge (place-scoped retail) track's open list -- sprint plan §31.6")
     s.add_argument("--max-ring", type=int, default=1,
                    help="highest bridge_places.csv ring to include (default 1 = ring-1 only)")
-    s.add_argument("--new-only", action="store_true", help="only rows new since the previous bridge run")
+    s.add_argument("--new-only", action="store_true",
+                   help="only rows first seen by the latest bridge sweep (pool rows, and every row after a "
+                        "first-ever sweep, are never new)")
     s.add_argument("--hide-voice-high", action="store_true",
-                   help="convenience filter, off by default -- advisory voice flag never hides a row unless asked")
+                   help="hide rows whose title is flagged voice-heavy (off by default; the flag is advisory)")
     s.add_argument("--include-stale", action="store_true",
-                   help="show postings not re-confirmed in BRIDGE_STALE_DAYS+ days too (default: hidden)")
+                   help="also show postings not re-confirmed in 10+ days (BRIDGE_STALE_DAYS); hidden by default")
     s.set_defaults(func=cmd_bridge)
 
-    s = sub.add_parser("report", parents=[common], help="write a Jobs_Found file")
-    s.add_argument("--max-blocks", type=int, default=15)
-    s.add_argument("--block-min-band", default="strong", help="lowest band that gets a JD block (default strong)")
-    s.add_argument("--table-min", type=int, default=50)
+    s = sub.add_parser("report", parents=[common],
+                       help="write a Jobs_Found file (never overwrites), record its blocks in surfaced, and export snapshots")
+    s.add_argument("--max-blocks", type=int, default=15,
+                   help="most JD blocks to write (default 15); block rows are recorded in the surfaced table")
+    s.add_argument("--block-min-band", default="strong", choices=["very_strong", "strong", "partial", "weak", "none"],
+                   help="lowest band that gets a JD block (default strong)")
+    s.add_argument("--table-min", type=int, default=50,
+                   help="Summary table: rows scoring at least N, plus every block row, up to 150 (default 50)")
     s.add_argument("--since-hours", type=float, default=24, help="window for the header and Passed rows (default 24)")
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
-    s.add_argument("--no-snapshots", action="store_true")
+    s.add_argument("--no-snapshots", action="store_true",
+                   help="skip the Parquet / CSV exports to db/snapshots/ (written beside the default DB, even with --db)")
     s.set_defaults(func=cmd_report)
 
-    s = sub.add_parser("lenses", parents=[common], help="the three lens lists (process / technical / both)")
-    s.add_argument("--cap", type=int, default=report.LENS_LIST_CAP, help="rows per list (default 60)")
+    s = sub.add_parser("lenses", parents=[common], help="the lens lists (both / process / technical, plus applied AI); writes Lens_Lists_<stamp>.md")
+    s.add_argument("--cap", type=int, default=report.LENS_LIST_CAP, help="rows per list, the applied-AI list included (default 60)")
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
     s.set_defaults(func=cmd_lenses)
 
     s = sub.add_parser("top", parents=[common],
-                       help="END-of-pipeline apply/review list; run after `judge import`")
-    s.add_argument("--apply-cap", type=int, default=report.TOP_APPLY_CAP)
-    s.add_argument("--review-cap", type=int, default=report.TOP_REVIEW_CAP)
+                       help="END-of-pipeline apply/review list (writes Top_Jobs_<date>.md, never overwrites); "
+                            "run after `judge import`")
+    s.add_argument("--apply-cap", type=int, default=report.TOP_APPLY_CAP,
+                   help="most Apply rows on the page (default 150); with --jev, also the Apply rows Jev can demote")
+    s.add_argument("--review-cap", type=int, default=report.TOP_REVIEW_CAP,
+                   help="most Review rows on the page (default 200); with --jev, also the Review rows Jev can demote")
     s.add_argument("--include-decided", action="store_true", help="also show already-decided / in-tracker rows")
     s.add_argument("--out", help="output file or directory (default: the vault's Search_Results)")
     s.add_argument("--stdout", action="store_true", help="print the markdown instead of writing a file")
     s.add_argument("--jev", action="store_true",
-                   help="first have Jev review the Apply / Review subset (stage 2 demotion pass; needs "
-                        "--i-have-approval or JEV_LIVE_OK=1 for the live call)")
-    s.add_argument("--i-have-approval", action="store_true", help="--jev: authorize the live Jev call")
-    s.add_argument("--background-file", help="--jev: the fact sheet (default judge2_background.local.md)")
+                   help="first have Jev review the Top Jobs rows and other lens-strong postings (at most 300 new "
+                        "reviews), then Gemma second-reads the demotions; live only with --i-have-approval or "
+                        "JEV_LIVE_OK=1; an error is logged and the page uses stored reviews")
+    s.add_argument("--i-have-approval", action="store_true",
+                   help="--jev: authorize the live Jev and Gemma calls (or JEV_LIVE_OK=1 and JUDGE2_LIVE_OK=1)")
+    s.add_argument("--background-file", help="--jev: the fact sheet for Jev and Gemma (default "
+                                             "$JUDGE2_BACKGROUND_FILE, else judge2_background.local.md)")
     s.add_argument("--no-jev-gate", action="store_true",
                    help="write the page without the Jev demotion pass (stored reviews are still shown in J3)")
     s.set_defaults(func=cmd_top)
@@ -880,89 +917,130 @@ def main():
                                        "posting,decision,reason,unmet,grade,basis (unmet ' || '-joined)")
     s.set_defaults(func=cmd_mark)
 
-    s = sub.add_parser("sync", parents=[common], help="mirror Application_Tracker.md into the tracker table")
+    s = sub.add_parser("sync", parents=[common],
+                       help="rebuild the DuckDB tracker table from $TRACKER_SOURCE (postgres: tracker.application, "
+                            "exact posting or req id matches; markdown, the default: Application_Tracker.md) and "
+                            "record tracker decisions; --vault is required either way")
     s.add_argument("--verbose", action="store_true", help="print unmatched tracker rows")
     s.set_defaults(func=cmd_sync)
 
-    s = sub.add_parser("shortlist", parents=[common], help="top scored postings first seen in the last N days")
-    s.add_argument("--days", type=int, default=7)
-    s.add_argument("--n", type=int, default=30)
+    s = sub.add_parser("shortlist", parents=[common],
+                       help="print the top scored undecided postings first seen in the last N days (held rows "
+                            "included); writes nothing")
+    s.add_argument("--days", type=int, default=7, help="window in days by first-seen date (default 7)")
+    s.add_argument("--n", type=int, default=30, help="rows to print (default 30)")
     s.set_defaults(func=cmd_shortlist)
 
-    s = sub.add_parser("labels", parents=[common], help="rebuild label_docs from the vault")
-    s.add_argument("--report", action="store_true", help="per-source table and the Phase 2 thresholds")
+    s = sub.add_parser("labels", parents=[common], help="rebuild label_docs from the vault (replaces the vault-sourced rows)")
+    s.add_argument("--report", action="store_true",
+                   help="also print the per-source table and the training bars (250 positives, 150 pseudo-negatives)")
     s.add_argument("--pseudo", type=int, default=1500, help="pseudo-negatives to sample (default 1500)")
-    s.add_argument("--seed", type=int, default=7)
+    s.add_argument("--seed", type=int, default=7, help="seed for the pseudo-negative sample (default 7)")
     s.add_argument("--reanchor", action="store_true",
                    help="recover llm_labels a re-fetched JD expired, using the judge batch files under db/batches* "
-                        "as evidence the JD did not materially change (also runs after every sweep and retrain)")
-    s.add_argument("--dry-run", action="store_true", help="with --reanchor: print counts only, write nothing")
+                        "as evidence the JD did not materially change; moves their report_feedback rows too (also runs "
+                        "after every sweep and before every non-dry-run retrain)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="with --reanchor: print counts only, write nothing (ignored without --reanchor)")
     s.add_argument("--batch-dir", action="append", help="with --reanchor: a batch dir to search (repeatable; "
                                                         "default every db/batches* directory)")
     s.set_defaults(func=cmd_labels)
 
-    s = sub.add_parser("train", parents=[common], help="train the TF-IDF + logistic regression fit model")
-    s.add_argument("--cv", type=int, default=5)
-    s.add_argument("--C", type=float, default=4.0)
+    s = sub.add_parser("train", parents=[common],
+                       help="train a TF-IDF + logistic regression model; it goes live for the next screen at once, "
+                            "with no gate (retrain is the gated path)")
+    s.add_argument("--cv", type=int, default=5,
+                   help="cross-validation folds (default 5); needs at least that many positives and negatives")
+    s.add_argument("--C", type=float, default=4.0,
+                   help="logistic-regression C, inverse regularization; higher fits harder (default 4.0)")
     s.add_argument("--report", action="store_true", help="single-signal and blend AUCs")
     s.add_argument("--lens", choices=["process", "technical", "ai", "required", "bullseye"],
                    help="train one lens's model instead of the overall one; 'required' and 'bullseye' are NOT "
-                        "lenses -- see features.REQUIRED_MODEL / features.BULLSEYE_MODEL, ranking signals only")
+                        "lenses -- see features.REQUIRED_MODEL / features.BULLSEYE_MODEL, ranking signals only; bullseye "
+                        "also runs its acceptance gate (employer-grouped AUC >= 0.78)")
     s.set_defaults(func=cmd_train)
 
     s = sub.add_parser("bullseye-backfill", parents=[common],
-                       help="one-time fit_bullseye UPDATE on the latest screens row of the in-population "
-                            "postings only (no rescreen); run once after `train --lens bullseye` passes its gate")
+                       help="one-time fit_bullseye UPDATE on the latest screens row of non-rejected postings with a "
+                            "lens fit of 0.5 or more and JD text (no rescreen); run once after `train --lens "
+                            "bullseye` passes its gate; exits 1 if the latest bullseye model failed it")
     s.set_defaults(func=cmd_bullseye_backfill)
 
-    s = sub.add_parser("evidence", parents=[common], help="check / embed the evidence manifest")
-    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
-    s.add_argument("--check", action="store_true", help="list sources, unit counts and samples (the default)")
-    s.add_argument("--rebuild", action="store_true", help="embed new units and drop units no longer produced")
+    s = sub.add_parser("evidence", parents=[common],
+                       help="check the evidence manifest (exit 1 if a source is missing) and, with --rebuild, re-embed it")
+    s.add_argument("--manifest", help="manifest path (default $JOBSEARCH_EVIDENCE, else evidence.local.toml)")
+    s.add_argument("--check", action="store_true", help="list sources, unit counts and samples; always runs, so this flag is optional")
+    s.add_argument("--rebuild", action="store_true",
+                   help="after a clean check, embed new units into evidence_units and delete ones no longer "
+                        "produced; refuses if a source with stored units now yields none")
     s.set_defaults(func=cmd_evidence)
 
-    s = sub.add_parser("coverage", parents=[common], help="requirement coverage for screen survivors")
-    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
+    s = sub.add_parser("coverage", parents=[common],
+                       help="requirement coverage for screen survivors; writes coverage and requirement_units, "
+                            "re-syncs evidence first; needs `evidence --rebuild` once")
+    s.add_argument("--manifest", help="manifest path (default $JOBSEARCH_EVIDENCE, else evidence.local.toml)")
     s.add_argument("--all", action="store_true", help="re-cover every survivor, not only new / changed ones")
-    s.add_argument("--limit", type=int)
+    s.add_argument("--limit", type=int, help="cover at most N survivors, best final_score first (default all); "
+                                             "ignored with --posting or --calibrate")
     s.add_argument("--posting", action="append", help="cover this posting id (repeatable)")
-    s.add_argument("--calibrate", action="store_true", help="choose thresholds against hard negatives (§16.1)")
-    s.add_argument("--pseudo", type=int, default=300, help="pseudo-negatives for the sanity AUC (default 300)")
-    s.add_argument("--hard-top", type=int, default=200, help="highest-fit unlabeled postings used as hard negatives")
+    s.add_argument("--calibrate", action="store_true",
+                   help="choose thresholds against hard negatives (§16.1); rewrites hard_negatives and stores a "
+                        "coverage calibration row; ignores --all / --limit / --posting")
+    s.add_argument("--pseudo", type=int, default=300, help="--calibrate: pseudo-negatives for the sanity AUC (default 300)")
+    s.add_argument("--hard-top", type=int, default=200,
+                   help="--calibrate: highest-fit unlabeled postings added as hard negatives (default 200)")
     s.set_defaults(func=cmd_coverage)
 
     s = sub.add_parser("required-embed", parents=[common],
-                       help="the second-layer stacked model (backend/finder/required_embed.py): NOT a lens")
-    s.add_argument("action", choices=["train", "score"])
+                       help="the second-layer stacked Required model (NOT a lens): train it or score postings; "
+                            "writes db/models and the required_embed table")
+    s.add_argument("action", choices=["train", "score"],
+                   help="train = fit the stacked model, saved only if its gate passes; score = write required_embed "
+                        "rows for the lens-surfaced population (no model: logs one line, exits 0)")
     s.add_argument("--report", action="store_true", help="train: print the full metrics dict")
     s.add_argument("--all", action="store_true", help="score: re-score every population row, not only new ones")
     s.set_defaults(func=cmd_required_embed)
 
-    s = sub.add_parser("judge", parents=[common], help="LLM labeling run: export batches, import graded labels")
-    s.add_argument("action", choices=["export", "import", "status", "report", "exclude"])
+    s = sub.add_parser("judge", parents=[common],
+                       help="LLM labeling run (no API call): export batch files, import graded labels, status, "
+                            "report, exclude")
+    s.add_argument("action", choices=["export", "import", "status", "report", "exclude"],
+                   help="export = write batch files to --dir; import = load graded *.result.json into llm_labels; "
+                        "status = batches done / pending; report = judge vs human agreement (+ --csv); "
+                        "exclude = retire --posting ids from training, then auto-exclude thin JDs")
     s.add_argument("--csv", help="report: write every judged posting to this CSV for eyeballing")
-    s.add_argument("--dir", default="db/batches", help="batch directory (gitignored)")
-    s.add_argument("--limit", type=int, help="stop the queue after N postings")
-    s.add_argument("--batch-size", type=int, default=judge_batch_default())
-    s.add_argument("--scorer", default="claude-sonnet-batch")
-    s.add_argument("--reject-content", type=int, default=100, help="rejected on content: measures false negatives")
-    s.add_argument("--reject-logistics", type=int, default=100, help="rejected on location/pay but fit >= 0.5")
+    s.add_argument("--dir", default="db/batches",
+                   help="batch directory for export / import / status (default db/batches, gitignored); export "
+                        "overwrites its manifest, so use a fresh dir per export")
+    s.add_argument("--limit", type=int, help="export: stop the queue after N postings")
+    s.add_argument("--batch-size", type=int, default=judge_batch_default(),
+                   help="export: postings per batch file (default 20)")
+    s.add_argument("--scorer", default="claude-sonnet-batch",
+                   help="import: scorer name stored on each label (default claude-sonnet-batch)")
+    s.add_argument("--reject-content", type=int, default=100,
+                   help="export: postings rejected on content, to measure false negatives (default 100)")
+    s.add_argument("--reject-logistics", type=int, default=100,
+                   help="export: postings rejected on location/pay with fit >= 0.5 (default 100)")
     s.add_argument("--relabel", type=int, nargs="?", const=0, metavar="N",
                    help="re-grade postings that already carry a label (the rubric changed, not the JD): "
                         "bare = all of them, N = about N drawn evenly across the four grades")
-    s.add_argument("--reject-random", type=int, default=50)
+    s.add_argument("--reject-random", type=int, default=50,
+                   help="export: randomly sampled rejected postings to include (default 50)")
     s.add_argument("--expired", action="store_true",
                    help="export: re-grade postings whose judge grade expired when the JD changed (open or closed); "
                         "run `labels --reanchor` first so only real rewrites are queued")
     s.add_argument("--reason", help="exclude: why this posting must never be trained on")
     s.add_argument("--posting", action="append", help="exclude: posting id to retire from training (repeatable)")
-    s.add_argument("--exclude-dir", action="append", help="skip postings already queued in this batch dir (repeatable)")
-    s.add_argument("--pools", help="comma-separated subset of high,low,reject")
+    s.add_argument("--exclude-dir", action="append",
+                   help="export: skip postings already queued in this batch dir (repeatable)")
+    s.add_argument("--pools", help="export: keep only these comma-separated pools: high, low, reject, ai_title "
+                                   "(default all; not validated)")
     s.add_argument("--platform", help="export every active posting from one ATS platform (after an ingest fix)")
     s.set_defaults(func=cmd_judge)
 
     s = sub.add_parser("feedback", parents=[common],
-                       help="load the report_feedback golden-source CSV, check level agreement, re-export")
+                       help="golden-source feedback: --load, --agreement, --export; or a nested action: sheet, "
+                            "sheet-import, ingest (a nested action ignores the three flags)")
     s.add_argument("--load", help="CSV path to upsert into report_feedback")
     s.add_argument("--agreement", action="store_true",
                    help="print the rule's level_fit vs confirmed human rows")
@@ -971,23 +1049,29 @@ def main():
     fsub = s.add_subparsers(dest="feedback_action")
 
     fs = fsub.add_parser("sheet", parents=[common_inner], help="write a blind grading CSV with decoys (sprint plan §26)")
-    fs.add_argument("--n", type=int, default=20)
+    fs.add_argument("--n", type=int, default=20, help="rows in the top / mid / reject mix, before the Jev decoys (default 20)")
     fs.add_argument("--seed", type=int, help="seeds the sample/shuffle for a reproducible sheet")
-    fs.add_argument("--out", help="CSV output path (default db/blind_sheets/blind_sheet_<date>.csv)")
+    fs.add_argument("--out", help="CSV output path, plus a .sidecar.json beside it (default "
+                                  "db/blind_sheets/blind_sheet_<date>.csv; a same-day rerun overwrites both)")
     fs.add_argument("--jev", type=int, default=6, help="Jev-demoted decoys added on top of --n (default 6; 0 = none)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet")
 
-    fs = fsub.add_parser("sheet-import", parents=[common_inner], help="import a graded blind sheet (basis='blind')")
-    fs.add_argument("path")
+    fs = fsub.add_parser("sheet-import", parents=[common_inner],
+                         help="import a graded blind sheet (basis='blind'): writes report_feedback and appends the "
+                              "history file; a bad value stops it before any write")
+    fs.add_argument("path", help="the graded sheet CSV; its .sidecar.json beside it supplies the strata for the scores")
     fs.add_argument("--history", help="history JSONL path (default db/blind_sheet_history.jsonl)")
     fs.set_defaults(func=cmd_feedback, feedback_action="sheet-import")
 
-    fs = fsub.add_parser("ingest", parents=[common_inner], help="ingest gold-standard sheets in any of the vault's header formats")
+    fs = fsub.add_parser("ingest", parents=[common_inner],
+                         help="ingest gold-standard sheets in any of the vault's header formats; a refused file is "
+                              "skipped, the rest are written, exit 1")
     fs.add_argument("paths", nargs="*", metavar="PATH", help="one or more gold-sheet CSVs")
-    fs.add_argument("--manifest", help="a path,basis,notes CSV listing every file to ingest in one run")
+    fs.add_argument("--manifest", help="a path,basis,notes CSV of files to ingest in one run; paths are relative "
+                                       "to the manifest's folder")
     fs.add_argument("--basis", choices=MARK_BASIS_VALUES,
-                    help="required for a narrow (F2/F3) sheet with no basis column of its own, unless the "
-                         "manifest gives that file its own basis")
+                    help="required for a narrow sheet (F2, F3, F4) with no basis column; a manifest row's own "
+                         "basis wins")
     fs.add_argument("--accept-proposed", action="store_true",
                     help="ingest a machine-drafted 'proposed required calls' file (header carries "
                          "proposal_confidence) once the user has reviewed and confirmed it")
@@ -996,16 +1080,21 @@ def main():
     fs.set_defaults(func=cmd_feedback, feedback_action="ingest")
 
     s = sub.add_parser("retrain", parents=[common],
-                       help="the weekly retrain, gated and ledgered (sprint plan §24)")
+                       help="the weekly retrain (sprint plan §24): labels, reanchor, five gated models plus "
+                            "required-embed, ledger in model_runs; a promotion triggers rescreen, coverage and "
+                            "required-embed score. Labels come from $JOBSEARCH_VAULT_DIR; --vault is ignored")
     s.add_argument("--dry-run", action="store_true",
-                   help="train and evaluate every model, write ledger rows (promoted=false, reason "
-                        "'dry-run'), promote and rescreen nothing")
+                   help="train and gate the five TF-IDF models, write ledger rows (promoted=false, reason "
+                        "'dry-run'), promote and rescreen nothing; still rebuilds label_docs, skips required-embed")
     s.add_argument("--history", action="store_true", help="print the model_runs ledger, newest first")
     s.set_defaults(func=cmd_retrain)
 
     s = sub.add_parser("judge2", parents=[common],
                        help="LLM second judge, line-by-line (sprint plan §25/§29); never live without a go")
-    s.add_argument("action", choices=["run", "eval", "status", "rederive"])
+    s.add_argument("action", choices=["run", "eval", "status", "rederive"],
+                   help="run = review postings with the LLM (live only with approval); eval = the acceptance bar "
+                        "and line report, or --compare; status = counts and rates; rederive = recompute "
+                        "required_fit from stored lines, no API call")
     s.add_argument("--top", type=int, default=150, help="run: top N by rank_score (default 150)")
     s.add_argument("--dry-run", action="store_true", help="run: build and print payloads + prompt, call nothing")
     s.add_argument("--show", type=int, default=1, help="run --dry-run: how many full payloads to print")
@@ -1022,10 +1111,12 @@ def main():
     s.add_argument("--posting", action="append",
                    help="run: only this posting id (repeatable); narrows the chosen population")
     s.add_argument("--postings-file", help="run: only the posting ids in this file (one per line)")
-    s.add_argument("--background", choices=["public", "file"], default="public")
+    s.add_argument("--background", choices=["public", "file"], default="public",
+                   help="what background is sent: public = the neutral lens text (default); file = "
+                        "--background-file or $JUDGE2_BACKGROUND_FILE; changes the prompt_version eval looks up")
     s.add_argument("--background-file", help="path for --background file (default $JUDGE2_BACKGROUND_FILE)")
     s.add_argument("--i-have-approval", action="store_true",
-                   help="the other half of the live-call gate, alongside JUDGE2_LIVE_OK=1")
+                   help="run: authorize the live call (or JUDGE2_LIVE_OK=1; either one is enough)")
     s.add_argument("--prompt-version", help="eval: evaluate this stored prompt_version (e.g. a --run-tag "
                                             "repeat, base_pv:TAG) instead of the one the current flags hash to")
     s.add_argument("--compare", nargs=2, metavar=("PROMPT_VERSION_A", "PROMPT_VERSION_B"),
@@ -1034,8 +1125,12 @@ def main():
     s.set_defaults(func=cmd_judge2)
 
     s = sub.add_parser("jev", parents=[common],
-                       help="Jev typed-decision tier (docs/JEV_PLAN.md); reported only, never live without a go")
-    s.add_argument("action", choices=["run", "eval", "status", "rederive", "sentinel"])
+                       help="Jev typed-decision tier (docs/JEV_PLAN.md); never live without a go. Stored reviews "
+                            "can demote rows on the top page; rank_score never changes")
+    s.add_argument("action", choices=["run", "eval", "status", "rederive", "sentinel"],
+                   help="run = review a population (live only with approval); eval = the MSA study, stores "
+                        "jev_evals unless --no-write; status = counts, drift, canary, tokens today vs cap; "
+                        "rederive = recompute from stored lines, no API call; sentinel = pin the sentinel set (--init)")
     pop = s.add_mutually_exclusive_group()
     pop.add_argument("--eval-set", action="store_true",
                      help="run: every blind human-graded gold row (judge2.EVAL_SET_SQL)")
@@ -1048,16 +1143,18 @@ def main():
     pop.add_argument("--sentinel", action="store_true",
                      help="run: the pinned sentinel set (see `jev sentinel --init`); needs --run-tag")
     s.add_argument("--posting", action="append",
-                   help="run: only this posting id (repeatable); narrows the chosen population")
+                   help="run: only this posting id (repeatable); narrows --eval-set or --gated only")
     s.add_argument("--postings-file", help="run: only the posting ids in this file (one per line)")
     s.add_argument("--limit", type=int, help="run --gated: at most N postings")
     s.add_argument("--dry-run", action="store_true", help="run: print request bodies and an estimate, call nothing")
     s.add_argument("--show", type=int, default=1, help="run --dry-run: how many postings' requests to print")
     s.add_argument("--force", action="store_true",
                    help="run: re-review even when cached; sentinel --init: replace the pinned set")
-    s.add_argument("--run-tag", help="run: store a repeat run beside the canonical one (<pv>:TAG), e.g. r2")
+    s.add_argument("--run-tag", help="run: store a repeat run beside the canonical one (<pv>:TAG), e.g. r2; "
+                                     "required with --sentinel; --injection always uses inj")
     s.add_argument("--i-have-approval", action="store_true",
-                   help="run: the live-call approval (or JEV_LIVE_OK=1, which the launch.sh Jev preset sets)")
+                   help="run: the live-call approval (or JEV_LIVE_OK=1, which the launch.sh Jev preset sets); also "
+                        "needs the endpoint's API key; stops at JEV_MAX_CALLS_PER_RUN / JEV_DAILY_TOKEN_CAP")
     s.add_argument("--background-file",
                    help="the fact sheet (default $JUDGE2_BACKGROUND_FILE, else judge2_background.local.md)")
     s.add_argument("--judge2-pv", help="eval: the judge2 prompt_version to compare with (default: the best)")
@@ -1069,10 +1166,20 @@ def main():
     s.add_argument("--n", type=int, default=10, help="sentinel --init: how many gold postings to pin (default 10)")
     s.set_defaults(func=cmd_jev)
 
-    s = sub.add_parser("setup-check", parents=[common], help="personal files, dependencies, manifest, DB")
-    s.add_argument("--manifest", help="manifest path (default evidence.local.toml or $JOBSEARCH_EVIDENCE)")
+    s = sub.add_parser("setup-check", parents=[common],
+                       help="check .env, keys, local files, optional packages, the evidence manifest and gitignore; "
+                            "exit 1 on a blocking issue. Opens (and creates or migrates) the DuckDB first")
+    s.add_argument("--manifest", help="manifest path (default $JOBSEARCH_EVIDENCE, else evidence.local.toml)")
     s.set_defaults(func=cmd_setup_check)
 
+    # argparse shows a subcommand's help= only in the top-level list; copy it into the subcommand's own
+    # --help as its description, and add the DuckDB-lock note every command shares (mark has its own epilog).
+    for subs in (sub, fsub):
+        summaries = {c.dest: c.help for c in subs._choices_actions}
+        for name, p in subs.choices.items():
+            p.description = p.description or summaries.get(name)
+            if p.epilog is None:
+                p.epilog = LOCK_NOTE
     a = ap.parse_args()
     try:
         con = store.connect(a.db or os.environ.get("JOBSEARCH_DB") or None)   # JOBSEARCH_DB: default-path override (tests)

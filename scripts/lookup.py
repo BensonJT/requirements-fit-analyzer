@@ -17,8 +17,10 @@ Options:
     --search RE     case-insensitive regex over title + description; add --all to include closed postings
     --limit N       rows for --search (default 25)
 
-Several matches: an exact title wins; otherwise the matches are listed (exit code 3) and you re-run with an id.
     --db PATH       database (default db/jobsearch.duckdb)
+
+Several matches: an exact title wins; otherwise the matches are listed (exit code 3) and you re-run with an id.
+Exit: 0 ok, 1 no match or database locked, 2 no target, 3 several matches.
 
 What the summary shows, and where it comes from:
     identity     postings (employer, title, url, location, workplace, pay, status, dates)
@@ -27,7 +29,7 @@ What the summary shows, and where it comes from:
     judge        vw_llm_labels_latest_judge: the latest LLM judge grade, required_fit, rationale
     Jev          vw_jev_latest: per-lens grades, required_fit, derive_why (the end-of-pipeline demotion reviewer)
     coverage     vw_coverage_latest: share of Required lines matched to evidence, and the gaps
-    decision     vw_decisions + tracker: build / pass / hold with reason, and any Application_Tracker match
+    decision     vw_decisions + tracker: build / pass / hold with reason, and any tracker match (the DuckDB tracker mirror)
 
 The connection is read_only, so this never migrates or writes. A running sweep holds DuckDB's write lock;
 if the database is locked, wait for the sweep (or overnight run) to finish and retry.
@@ -121,17 +123,18 @@ def search(con, regex, include_closed, limit):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("target", nargs="?")
-    ap.add_argument("--jd", action="store_true")
-    ap.add_argument("--search")
-    ap.add_argument("--all", action="store_true")
-    ap.add_argument("--limit", type=int, default=25)
-    ap.add_argument("--db", default=str(DEFAULT_DB))
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("target", nargs="?", help='posting_id, posting URL, or "employer|title" (same rules as finder.py mark)')
+    ap.add_argument("--jd", action="store_true", help="also print the full job description")
+    ap.add_argument("--search", help="list postings whose title or JD matches this case-insensitive regex, "
+                                     "newest first (overrides target)")
+    ap.add_argument("--all", action="store_true", help="with --search, include closed postings")
+    ap.add_argument("--limit", type=int, default=25, help="rows for --search (default 25)")
+    ap.add_argument("--db", default=str(DEFAULT_DB),
+                    help="DuckDB file, opened read-only (default db/jobsearch.duckdb); exits 1 if a sweep holds the lock")
     a = ap.parse_args()
     if not a.target and not a.search:
         ap.print_help()
-        print(__doc__)
         return 2
     con = connect(a.db)
     if a.search:

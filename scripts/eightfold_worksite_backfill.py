@@ -1,14 +1,16 @@
-"""One-off backfill after the 2026-10-19 Eightfold work-site fix.
+"""One-off backfill after the 2026-10-19 Eightfold work-site fix. Kept for the record.
 
 Microsoft's pcsx list stamped nearly every posting `onsite`, so the screen rejected remote and hybrid
 Microsoft roles as "not remote and outside the commute area". The detail stage now reads the real work
 site from pcsx/position_details, but it only runs on postings that still lack a JD. This refetches the
 work site and travel for every ACTIVE posting on the fixed hosts and updates `workplace_type`,
 `work_site` and `travel` only. It never touches description_text, so no review or Jev result goes
-stale. All network calls happen first; the database is opened for one short write at the end.
+stale. All network calls happen between two opens: the target list is read first (read-only in the dry
+run; read-write via store.connect with --apply), then one short write at the end. A held DuckDB lock
+makes either open fail (duckdb.IOException).
 Run `finder.py rescreen-all` afterwards.
 
-    .venv/bin/python scripts/eightfold_worksite_backfill.py              # dry run: fetch and count
+    .venv/bin/python scripts/eightfold_worksite_backfill.py              # dry run: a live request per posting, counts only
     .venv/bin/python scripts/eightfold_worksite_backfill.py --apply
 """
 import collections
@@ -26,6 +28,9 @@ EMPLOYERS = {"https://apply.careers.microsoft.com": ("Microsoft", "microsoft.com
 
 
 def main(argv=None) -> int:
+    if {"-h", "--help"} & set(argv or sys.argv[1:]):   # --help prints this docstring; it never runs the script
+        print(__doc__)
+        return 0
     apply = "--apply" in (argv or sys.argv[1:])
     con = store.connect() if apply else duckdb.connect(store.DEFAULT_DB_PATH, read_only=True)
     targets = []

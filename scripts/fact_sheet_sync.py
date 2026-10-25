@@ -13,7 +13,8 @@ copy. Jev also parses the sheet into at most 254 facts (jev.py enforces it), so 
 
 Source path: $JUDGE2_BACKGROUND_SOURCE, else $JOBSEARCH_VAULT_DIR/Tools/judge2_background.md
 (JOBSEARCH_VAULT_DIR is the job-search folder the reports are written to). Both may be set in .env.
-Exit code: 0 in sync (or synced), 1 out of sync after a report-only run, 2 setup error.
+Exit code: 0 in sync (or synced); 1 out of sync after a report-only run, a refused --apply (local newer),
+or neither source variable set; 2 a file is missing. --pull without --apply is ignored (report only).
 """
 import filecmp
 import os

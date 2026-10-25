@@ -1,6 +1,6 @@
 """Read-only: how would the ONE rank move if the `bullseye` model weighed more inside rank_lens_best?
 
-`vw_lens_fit.rank_lens_best` (backend/ats/store.py) maps fit_bullseye onto the 0.75-1.0 lens_value scale for a
+`vw_lens_fit.rank_lens_best` (backend/ats/store.py) maps fit_bullseye onto a (1 - w) to 1.0 scale (0.25-1.0 today) for a
 row nobody has judged:  (lens_best + 0.25 + 0.75 * fit_bullseye) / 2.  Generalised to a weight w:
 
     (lens_best + (1 - w) + w * fit_bullseye) / 2        w = 0.75 reproduces today's view exactly (0.25 before 2026-10-19)
@@ -76,9 +76,10 @@ def agreement(rows, w):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--db", default="db/jobsearch.duckdb")
-    ap.add_argument("--weights", default="0.25,0.5,0.75,1.0", help="comma list; CURRENT_W is today's view")
-    ap.add_argument("--top", type=int, default=20)
+    ap.add_argument("--db", default="db/jobsearch.duckdb", help="DuckDB file, opened read-only (default db/jobsearch.duckdb, relative to the current directory); fails if a sweep holds the lock")
+    ap.add_argument("--weights", default="0.25,0.5,0.75,1.0", help="comma list of weights (default 0.25,0.5,0.75,1.0; "
+                                                                   "0.75 is today's view)")
+    ap.add_argument("--top", type=int, default=20, help="rows to list under each weight (default 20)")
     ap.add_argument("--watch", default="", help="comma list of posting_id prefixes to locate under each weight")
     a = ap.parse_args()
     weights = [float(x) for x in a.weights.split(",")]

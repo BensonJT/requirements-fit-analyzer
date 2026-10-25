@@ -1,4 +1,5 @@
 """Re-derive `postings.workplace_type` from the stored platform flag (DEFECT 2026-09-28, docs/STATUS.md).
+One-off fix, kept for the record; safe to re-run (writes only rows whose value changes).
 
 Workday's list feed keeps `remoteType` in `raw_json` ("Office Worker (NOT Remote)", "Virtual Worker", "Field",
 "Hybrid", ...); `normalize.workplace_type` read it wrong until 2026-09-30 and the list adapter ignored it.
@@ -43,8 +44,10 @@ def plan(con) -> list:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--db", default=os.environ.get("JOBSEARCH_DB") or store.DEFAULT_DB_PATH)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default=os.environ.get("JOBSEARCH_DB") or store.DEFAULT_DB_PATH,
+                    help="DuckDB file (default $JOBSEARCH_DB, else db/jobsearch.duckdb); read-only in the dry run, "
+                         "read-write with --apply; a held lock fails the open")
     ap.add_argument("--apply", action="store_true", help="write the changes (default: dry run)")
     a = ap.parse_args(argv)
     con = duckdb.connect(a.db, read_only=not a.apply)

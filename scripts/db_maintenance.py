@@ -4,6 +4,7 @@
     .venv/bin/python scripts/db_maintenance.py compact           # rewrite the file without its free blocks, verified, swapped in
     .venv/bin/python scripts/db_maintenance.py compact --force   # even when free space is under the threshold
     .venv/bin/python scripts/db_maintenance.py snapshot --out F  # consistent compressed copy of the DB (db_maintenance.sh --backup)
+    .venv/bin/python scripts/db_maintenance.py snapshot --remote R  # stream the same copy to an rclone path; nothing written locally
 
 Why a rewrite and not VACUUM. DuckDB has no CLUSTER and its VACUUM reclaims nothing: a
 single-file database only ever grows, because freed blocks are reused but never returned to
@@ -12,15 +13,20 @@ rescreens). The one way to shrink it is to copy every table into a fresh file --
 `COPY FROM DATABASE`, which keeps schema, constraints and indexes -- and swap the files. That
 rewrite also lays each table out contiguously, which is as close to "cluster" as DuckDB gets.
 
-Safety, in order: refuses while any other process holds the database (a live compaction
-would corrupt the run holding it); CHECKPOINTs first so the WAL is folded in; copies into a
+Safety, in order: refuses while a sweep_ats.py, finder.py or judge2 run is running (pgrep; a live
+compaction would corrupt the run holding it). Any other holder of the DuckDB lock (lookup.py,
+pg_snapshot.py, a DuckDB shell) is not caught by that check: `report` and `compact` then fail at open
+with duckdb.IOException, and `snapshot` skips with exit 2. It CHECKPOINTs first so the WAL is folded in; copies into a
 sibling `.compacting` file; verifies every table's row count and that `store.connect` opens
 the copy (views, schema version); only then renames old -> `.precompact`, new -> live; the
 `.precompact` file is deleted after the swap unless --keep-old, because disk space is the
 whole point (the migration backups on the external drive remain the rollback).
 
-`compact` is a no-op below COMPACT_MIN_FREE_FRACTION so the nightly hook (launch.sh `maint`
-step) never rewrites 2 GB for a 2% gain.
+`compact` is a no-op below COMPACT_MIN_FREE_FRACTION (10% of blocks free) so the nightly hook
+(launch.sh `maint` step) never rewrites 2 GB for a 2% gain.
+
+Exit: report 0, or 1 if the file is missing; compact always 0 (REFUSED, skipped and ABORT only print);
+snapshot 0 ok, 1 failed, 2 database busy (skipped), 3 upload failed (--remote).
 """
 import argparse
 import hashlib
@@ -364,11 +370,13 @@ def snapshot_remote(db_path, remote_file, log=print):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["report", "compact", "snapshot"])
-    ap.add_argument("--db", default=DEFAULT_DB)
+    ap.add_argument("cmd", choices=["report", "compact", "snapshot"],
+                    help="report: sizes, free blocks, row counts (read-only); compact: rewrite the file without "
+                         "free blocks (exclusive lock); snapshot: compressed, verified copy to --out or --remote")
+    ap.add_argument("--db", default=DEFAULT_DB, help="DuckDB file (default: the repo's db/jobsearch.duckdb)")
     ap.add_argument("--out", help="snapshot: destination file (a compressed copy, e.g. x.duckdb.zst)")
     ap.add_argument("--remote", help="snapshot: stream to this rclone path instead (Drive; nothing written locally)")
-    ap.add_argument("--force", action="store_true", help="compact even under the free-block threshold")
+    ap.add_argument("--force", action="store_true", help="compact even when under 10%% of blocks are free")
     ap.add_argument("--keep-old", action="store_true", help="keep the pre-compaction file as .precompact")
     a = ap.parse_args(argv)
     if a.cmd == "report":

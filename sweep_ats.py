@@ -12,7 +12,7 @@ Workable, BambooHR, SmartRecruiters). Then query the views:
     SELECT * FROM vw_board_health WHERE NOT ok;
 
 Usage:
-    .venv/bin/python sweep_ats.py                       # everything, 2000 JD fetches
+    .venv/bin/python sweep_ats.py                       # everything: up to 5000 new-posting JDs + 2000 backlog JDs
     .venv/bin/python sweep_ats.py --limit 10            # first 10 boards (smoke test)
     .venv/bin/python sweep_ats.py --employer "capital one"
     .venv/bin/python sweep_ats.py --platform workday --detail-budget 0
@@ -20,6 +20,9 @@ Usage:
     .venv/bin/python sweep_ats.py --skip-sweep --detail-pattern directional --detail-budget 1300 --no-screen
                                                         # fetch the vw_jd_missing 'directional' tier's JDs
     .venv/bin/python sweep_ats.py --no-screen           # skip the finder stage (screen/report/snapshots)
+
+Holds the DuckDB write lock for the whole run. If another process holds it at the start, the sweep stops
+with a message and exits 1 before any network call.
 """
 import argparse
 import sys
@@ -31,7 +34,7 @@ from backend.ats.sweep import run
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--limit", type=int, help="only the first N registered boards")
+    ap.add_argument("--limit", type=int, help="only the first N boards left after the --track / --platform / --employer filters")
     ap.add_argument("--platform", help="one platform only: " + ", ".join(sorted(IMPLEMENTED_PLATFORMS)))
     ap.add_argument("--employer", help="boards whose employer name contains this text")
     ap.add_argument("--workers", type=int, default=8, help="boards pulled in parallel (default 8)")
@@ -44,11 +47,14 @@ def main():
     ap.add_argument("--detail-pattern",
                     help="backlog title pattern for this run: 'directional' (the vw_jd_missing directional tier, "
                          "wider than the prefilter, minus sales/retail) or any regex; default = the prefilter")
-    ap.add_argument("--skip-sweep", action="store_true", help="only run the detail stage")
+    ap.add_argument("--skip-sweep", action="store_true", help="skip the board pulls and new-posting JDs; still runs the backlog JD stage and the "
+                         "finder stage unless --no-screen")
     ap.add_argument("--db", help="override the DuckDB path")
-    ap.add_argument("--no-screen", action="store_true", help="skip the finder stage entirely")
+    ap.add_argument("--no-screen", action="store_true", help="skip the finder stage (reanchor, screen, coverage, required-embed, optional "
+                         "Jev / judge2, report, snapshots)")
     ap.add_argument("--no-report", action="store_true", help="screen and snapshot, but write no Jobs_Found file")
-    ap.add_argument("--llm-top", type=int, default=0, help="LLM-score the top N shortlist rows (Phase 4)")
+    ap.add_argument("--llm-top", type=int, default=0, help="run the judge2 LLM second judge on the top N by rank (default 0 = off); "
+                         "a live API call, skipped unless JUDGE2_LIVE_OK=1")
     ap.add_argument("--full-screen", action="store_true", help="re-screen every active posting, not just new/changed")
     ap.add_argument("--track", choices=("fit", "bridge", "all"), default="all",
                     help="which registry rows to sweep (default all): 'bridge' rows are always place-scoped, "

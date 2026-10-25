@@ -8,7 +8,7 @@ import os
 import runpy
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -352,6 +352,29 @@ def test_rescreen_predicate_selects_only_new_changed_or_version_changed(tmp_path
     monkeypatch.setattr(version, "RULES_CODE_VERSION", "bumped")
     assert set(pipeline.candidate_ids(con, version.rules_version(), "none")) == set(ids.values())
     assert pipeline.candidate_ids(con, rv, "other-model") != []
+
+
+def test_since_window_still_takes_never_screened_rows(tmp_path):
+    """The nightly screen passes the sweep's start as `since`. A row added earlier by a hand-run sweep was never
+    screened, yet sat outside that window, so it waited for a full rescreen (2026-10-22/23: ~11.7K new-board rows
+    unscreened, and the Postgres fit snapshot counted them as fits). A never-screened row is always due; rows
+    already screened stay inside the window rule."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t0 = datetime(2026, 10, 22, 12, 0)
+    ids = _seed(con, when=t0)
+    pipeline.screen(con, log=_quiet)
+    hand = [N.base(req_id="H", title="Process Excellence Manager", location_primary="Remote - USA",
+                   workplace_type="remote", description_text="Lead process excellence.")]
+    store.record_board(con, "Beta", "greenhouse", hand, t0 + timedelta(hours=1))
+    hid = store.posting_id("Beta", "greenhouse", "H")
+    rv, since = version.rules_version(), t0 + timedelta(days=1)
+    assert pipeline.candidate_ids(con, rv, "none", since=since) == [hid]
+    assert ids["A"] not in pipeline.candidate_ids(con, rv, "none", since=since)
+    # The full branch has no screens join, so the never-screened clause must stay out of it (this would raise).
+    # full + since still ANDs the window, which is why daily() drops `since` when full is set.
+    assert pipeline.candidate_ids(con, rv, "none", since=since, full=True) == []
+    pipeline.screen(con, since=since, log=_quiet)
+    assert pipeline.candidate_ids(con, rv, "none", since=since) == []
 
 
 def test_rescreen_predicate_is_null_safe(tmp_path):

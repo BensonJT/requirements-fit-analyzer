@@ -192,7 +192,7 @@ step_backup() {  # $1 = auto|manual, $2 = drive to force Drive. Never fails the 
     fi
   fi
 
-  # No local copy anywhere (the user 2026-10-24: no DuckDB backups on WSL's disk or C:): E: gets the file written
+  # No local copy anywhere (user, 2026-10-24: no DuckDB backups on WSL's disk or C:): E: gets the file written
   # straight to it (<name>.part, renamed after the round-trip check); Drive gets it streamed (rclone rcat).
   local rc=0
   if [ "$to_e" = 1 ]; then

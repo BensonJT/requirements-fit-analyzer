@@ -47,7 +47,13 @@ def _candidate_sql(rv: str, mv: str, since=None, limit=None, full: bool = False,
         sql, params = RESCREEN_SQL, [rv, mv]
     sql = sql.replace("SELECT p.posting_id", f"SELECT {columns}", 1)
     if since is not None:
-        sql += " AND (p.first_seen_at >= ? OR p.description_fetched_at >= ?)"
+        # The sweep window narrows a rescreen to what this sweep touched, but a row with no screen at all is
+        # always due: a hand-run per-employer sweep adds rows outside every nightly window, and before this they
+        # waited for the next full rescreen (2026-10-22/23: ~11.7K new-board rows unscreened for two days).
+        window = "p.first_seen_at >= ? OR p.description_fetched_at >= ?"
+        if not full:  # the full branch has no `s` join, and screens every active row anyway
+            window += " OR s.posting_id IS NULL"
+        sql += f" AND ({window})"
         params += [since, since]
     sql += " ORDER BY p.first_seen_at DESC, p.posting_id"
     if limit:

@@ -390,6 +390,26 @@ def test_rescreen_predicate_is_null_safe(tmp_path):
     assert pipeline.candidate_ids(con, rv, "none") == []          # the real versions still match and skip a rescreen
 
 
+def test_model_fingerprint_makes_rows_due_when_only_a_lens_model_changes(tmp_path):
+    """A retrained lens / required / bullseye model alone now changes screens.model_version, so plain
+    `finder.py screen` re-screens the rows it scored (2026-10-25: only the overall model was compared)."""
+    fp = pipeline.model_fingerprint
+    assert fp() == "none" and fp({"version": "ov1"}) == "ov1"     # no other model: the overall version as before
+    a = fp({"version": "ov1"}, {"process": {"version": "p1"}, "ai": {"version": "a1"}})
+    assert a.startswith("ov1+") and a == fp({"version": "ov1"}, {"ai": {"version": "a1"}, "process": {"version": "p1"}})
+    assert fp({"version": "ov1"}, {"process": {"version": "p2"}, "ai": {"version": "a1"}}) != a   # a lens retrain
+    assert fp({"version": "ov1"}, {"process": {"version": "p1"}, "ai": {"version": "a1"}},
+              bullseye_model={"version": "b1"}) != a                                            # a bullseye model
+    assert fp(None, required_model={"version": "r1"}).startswith("none+")
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    ids = _seed(con)
+    pipeline.screen(con, log=_quiet)                                 # stamped 'none' (no models in this test)
+    rv = version.rules_version()
+    assert pipeline.candidate_ids(con, rv, "none") == []
+    assert set(pipeline.candidate_ids(con, rv, fp(None, {"process": {"version": "p9"}}))) == set(ids.values())
+    con.close()
+
+
 def test_shortlist_excludes_decided_and_tracked(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     extra = [N.base(req_id=r, title="Director of Operational Excellence", workplace_type="remote") for r in ("D", "E")]

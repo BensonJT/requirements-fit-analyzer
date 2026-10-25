@@ -42,7 +42,7 @@ def test_load_csv_counts_and_view_precedence(tmp_path):
     p6 = _seed_posting(con, "P6", now=now, description_hash="hash6")
 
     counts = feedback.load_csv(con, FIXTURE, log=_quiet)
-    assert counts == {"loaded": 6, "skipped_no_posting": 1, "matched_by_url": 1}
+    assert counts == {"loaded": 6, "skipped_no_posting": 1, "matched_by_url": 1, "bridged": 0}
 
     # every loaded row actually landed
     assert con.execute("SELECT count(*) FROM report_feedback").fetchone()[0] == 6
@@ -73,6 +73,41 @@ def test_load_csv_blank_posting_id_no_match_is_skipped(tmp_path):
     assert con.execute("SELECT count(*) FROM report_feedback WHERE report_files IS NULL "
                        "AND human_grade IS NULL AND reason_code = 'function' AND verdict = 'pass'"
                        ).fetchone()[0] == 0
+    con.close()
+
+
+def test_load_csv_bridges_human_required_fit_into_llm_labels(tmp_path):
+    """feedback --load writes a human required_fit to llm_labels like mark / sheet-import / ingest (2026-10-25)."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    now = datetime(2026, 9, 17)
+    p1 = _seed_posting(con, "P1", now=now, description_hash="hash1")
+    p2 = _seed_posting(con, "P2", now=now, description_hash="hash2")
+    p3 = _seed_posting(con, "P3", now=now, description_hash="hash3")
+    p4 = _seed_posting(con, "P4", now=now, description_hash="hash4")
+    rows = [  # posting, hash, human_grade, required_fit, required_unmet
+        (p1, "hash1", "bullseye", "meets", ""),
+        (p2, "hash2", "", "fails", "Active TS/SCI clearance"),
+        (p3, "hash3", "adjacent", "arguable", ""),   # not a human required_fit value: loaded, not bridged
+        (p4, "", "stretch", "fails", ""),            # no description_hash: nothing to anchor the label to
+    ]
+    path = tmp_path / "golden.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=feedback.FEEDBACK_CSV_COLUMNS)
+        w.writeheader()
+        for pid, h, grade, fit, unmet in rows:
+            w.writerow({"posting_id": pid, "description_hash": h, "human_grade": grade, "required_fit": fit,
+                        "required_unmet": unmet, "verdict": "build" if fit == "meets" else "pass", "basis": "jd_read",
+                        "assessor": "user", "assessed_at": "2026-09-19"})
+    counts = feedback.load_csv(con, path, log=_quiet)
+    assert counts["loaded"] == 4 and counts["bridged"] == 2
+    got = {r[0]: r[1:] for r in con.execute(
+        "SELECT posting_id, required_fit, required_unmet, grade, lens_grade_source FROM llm_labels "
+        "WHERE scorer = ?", [feedback.USER_SCORER]).fetchall()}
+    assert got[p1] == ("meets", None, "bullseye", "human")
+    assert got[p2][:2] == ("fails", "Active TS/SCI clearance") and got[p2][3] == "placeholder"
+    assert p3 not in got and p4 not in got
+    assert feedback.load_csv(con, path, log=_quiet)["bridged"] == 2      # reloading the same sheet is idempotent
+    assert con.execute("SELECT count(*) FROM llm_labels WHERE scorer = ?", [feedback.USER_SCORER]).fetchone()[0] == 2
     con.close()
 
 

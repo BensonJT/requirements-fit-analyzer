@@ -87,8 +87,9 @@ above was ingestible before `finder.py feedback ingest PATH [PATH ...] [--manife
 [--dry-run] [--accept-proposed]`. It detects the format from the header (case/whitespace/BOM-insensitive,
 tolerates and logs unknown extra columns), normalizes enum values through a logged alias table (`to_low` ->
 `too_low`, `stretch` -> `stretch_up`, `out_of_range` -> `out_of_reach` for `level_fit`; anything still outside
-the enum rejects that ROW only, with file/line/posting_id/value), and writes through the same
-`feedback.write_records` path the golden CSV and the blind sheet use. A narrow sheet (no `basis` column of
+the enum rejects that ROW only, with file/line/posting_id/value), and makes the same two writes the golden
+CSV (`feedback --load`) and the blind sheet make: the `report_feedback` row, and any human `required_fit`
+bridged into `llm_labels` (`feedback --load` bridges too since 2026-10-25). A narrow sheet (no `basis` column of
 its own) requires `--basis` or a manifest row's own `basis` -- there is no default, because blurring blind vs
 seen would defeat the whole point of the distinction (sprint plan §22.4). `--manifest FILE` reads a
 `path,basis,notes` CSV (paths relative to the manifest's own directory; see `docs/gold_manifest.example.csv`)

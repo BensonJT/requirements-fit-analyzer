@@ -91,9 +91,13 @@ def load_csv(con, path, log=print) -> dict:
     row that matches neither is skipped and counted, never invented. `description_hash` is loaded exactly as
     the CSV says it -- it is the row's own claim about which JD text it was assessed against, and
     `vw_report_feedback_latest` is what decides whether that claim still matches the posting's current text.
+    A row carrying a human `required_fit` (meets / fails) and a description_hash is also bridged into
+    `llm_labels` through `bridge_required_label`, the same as `write_records` (sheet-import, ingest) and
+    `finder.py mark` (2026-10-25: load_csv used to skip the bridge).
 
-    Returns {"loaded", "skipped_no_posting", "matched_by_url"}.
+    Returns {"loaded", "skipped_no_posting", "matched_by_url", "bridged"}.
     """
+    from .blind_sheet import REQUIRED_FIT_VALUES   # imported here: blind_sheet imports this module
     path = Path(path)
     loaded = skipped_no_posting = matched_by_url = 0
     now = _now()
@@ -137,6 +141,7 @@ def load_csv(con, path, log=print) -> dict:
                 now,
             ])
             loaded += 1
+    bridged = 0
     if rows:
         con.executemany("""
             INSERT OR REPLACE INTO report_feedback (
@@ -147,9 +152,18 @@ def load_csv(con, path, log=print) -> dict:
                 required_fit, required_unmet, assessed_at, loaded_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
-    counts = {"loaded": loaded, "skipped_no_posting": skipped_no_posting, "matched_by_url": matched_by_url}
+        for row in rows:
+            pid, description_hash, human_grade = row[0], row[1], row[7]
+            required_fit, required_unmet, assessed_at = row[21], row[22], row[23]
+            if required_fit in REQUIRED_FIT_VALUES and description_hash:
+                bridge_required_label(con, pid, description_hash, human_grade, required_fit, required_unmet,
+                                      assessed_at)
+                bridged += 1
+    counts = {"loaded": loaded, "skipped_no_posting": skipped_no_posting, "matched_by_url": matched_by_url,
+              "bridged": bridged}
     log(f"feedback load: {counts['loaded']} loaded ({counts['matched_by_url']} matched by url), "
-        f"{counts['skipped_no_posting']} skipped (no matching posting)")
+        f"{counts['skipped_no_posting']} skipped (no matching posting), {bridged} required_fit call(s) "
+        f"bridged into llm_labels")
     return counts
 
 
@@ -184,8 +198,8 @@ def _report_feedback_row(rec: dict, now) -> list:
 def write_records(con, records: list, log=print) -> dict:
     """Writes pre-normalized report_feedback rows (dicts; see `_report_feedback_row` for the fields) through
     REPORT_FEEDBACK_INSERT_SQL, then bridges any row that carries a `required_fit` into `llm_labels` via
-    `bridge_required_label`. `load_csv` (the golden-source `feedback --load`) shares the INSERT but does NOT
-    bridge required_fit into llm_labels (checked 2026-10-25). Factored out here so `blind_sheet.import_sheet` and `backend/finder/gold_ingest.py` share them instead of each keeping
+    `bridge_required_label` -- the same two writes `load_csv`'s golden-source import makes. Factored out
+    here so `blind_sheet.import_sheet` and `backend/finder/gold_ingest.py` share them instead of each keeping
     its own copy (blind_sheet used to round-trip through a temp CSV file just to reach `load_csv`; this is
     that same destination without the detour)."""
     now = _now()

@@ -20,7 +20,7 @@ def test_gates_in_report_order():
 
 def test_listed_rows_name_the_cap_or_the_location_gate():
     assert f"below the Top_Jobs cap: Jev reviews only the first {report.TOP_REVIEW_CAP}" in note(listed="judge review")
-    assert "first 100" in note(listed="model apply")
+    assert f"first {report.TOP_APPLY_CAP}" in note(listed="model apply")
     assert note(listed="model review (non-US)").startswith("non-US primary location")
 
 

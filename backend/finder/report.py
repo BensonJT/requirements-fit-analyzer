@@ -476,7 +476,8 @@ def write_lens_lists(con, vault_dir: Optional[str], *, cap: int = LENS_LIST_CAP,
     return path
 
 
-TOP_APPLY_CAP = 100
+# Was 100; raised 2026-10-25 (user's go): 127 gated Apply rows (83 judged + 44 model), so 100 cut 27 of them.
+TOP_APPLY_CAP = 150
 # Was 40; raised 2026-10-25 (user's go): after the gates there were 182 Review rows (140 judged + 42 model), so 40
 # showed under a quarter of them, and 112 judge-Review rows Jev agreed with never appeared.
 TOP_REVIEW_CAP = 200

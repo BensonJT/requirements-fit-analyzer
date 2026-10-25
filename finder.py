@@ -819,8 +819,9 @@ def main():
 
     s = sub.add_parser("screen", parents=[common],
                        help="screen active fit-track rows that are new, have a re-fetched JD, or were screened "
-                            "under another rules or overall-model version; writes screens rows (a retrained "
-                            "lens model alone does not make rows due: use --full)")
+                            "under another rules version or another set of models (overall, lens, required, "
+                            "bullseye); writes screens rows. With --since-hours (the nightly run), only rows in "
+                            "the window or never screened")
     s.add_argument("--full", action="store_true", help="re-screen every active fit-track row (bridge rows are never screened)")
     s.add_argument("--since-hours", type=float,
                    help="only rows first seen or given a JD in the last N hours, plus any row never screened")
@@ -950,8 +951,8 @@ def main():
     s.set_defaults(func=cmd_labels)
 
     s = sub.add_parser("train", parents=[common],
-                       help="train a TF-IDF + logistic regression model; it goes live for the next screen at once, "
-                            "with no gate (retrain is the gated path)")
+                       help="train a TF-IDF + logistic regression model; it goes live at once, with no gate "
+                            "(retrain is the gated path), and the next plain `screen` re-screens every active row")
     s.add_argument("--cv", type=int, default=5,
                    help="cross-validation folds (default 5); needs at least that many positives and negatives")
     s.add_argument("--C", type=float, default=4.0,

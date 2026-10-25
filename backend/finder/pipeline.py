@@ -4,6 +4,7 @@
 `model` (Phase 2, from features.load_latest) adds fit_prob + top_terms. Requirement coverage (Phase 3a) runs after
 the screen on new / changed survivors and is stored and shown only: it carries weight 0 in the score until step 3b.
 """
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,22 @@ ROW_COLUMNS = ("posting_id", "employer", "platform", "req_id", "title", "url", "
                "country", "workplace_type", "employment_type", "job_level", "pay_min", "pay_max", "pay_interval",
                "posted_at", "description_text", "first_seen_at", "description_fetched_at")
 
-# New, JD changed since the last screen, or screened under another rules/model version.
+def model_fingerprint(model=None, lens_models=None, required_model=None, bullseye_model=None) -> str:
+    """The `screens.model_version` stamp: the overall model's version (or 'none'), plus '+' and a short hash
+    of every other model the screen used (the lens models, required, bullseye) when there are any. So a
+    retrained lens, required or bullseye model alone makes rows due again, as a new overall model always did
+    (2026-10-25: before this only the overall model's version was compared)."""
+    base = (model or {}).get("version", "none")
+    others = {name: (m or {}).get("version") for name, m in (lens_models or {}).items()}
+    others["required"] = (required_model or {}).get("version")
+    others["bullseye"] = (bullseye_model or {}).get("version")
+    others = sorted((k, v) for k, v in others.items() if v)
+    if not others:
+        return base
+    return f"{base}+{hashlib.sha1(json.dumps(others).encode()).hexdigest()[:8]}"
+
+
+# New, JD changed since the last screen, or screened under another rules/model version (model_fingerprint).
 # `p.track = 'fit'` (sprint plan §31.5): a bridge (place-scoped retail) posting is never screened,
 # which is what keeps it out of everything downstream that reads vw_screen_latest -- judge/judge2
 # selection, coverage, vw_lens_fit / rank, the report, retrain inputs -- without needing a
@@ -308,7 +324,7 @@ def screen(con, *, since=None, full: bool = False, limit=None, model=None, lens_
     never reaches `content_fit`/`combine` and never moves verdict, tier or final_score. `bullseye_model`
     (features.BULLSEYE_MODEL) adds fit_bullseye, same rules as required_model."""
     t0, started = time.monotonic(), _now()
-    rv, mv = version.rules_version(), (model or {}).get("version", "none")
+    rv, mv = version.rules_version(), model_fingerprint(model, lens_models, required_model, bullseye_model)
     calib = {"fit_weight": (model or {}).get("fit_weight")}
     total = len(candidate_ids(con, rv, mv, since=since, limit=limit, full=full))
     verdicts, bands, done = Counter(), Counter(), 0

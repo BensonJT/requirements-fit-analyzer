@@ -18,7 +18,7 @@
 # called from here because it ends every WSL session, launcher included; this
 # script only measures the slack and says when it is worth running by hand.
 #
-# BACKUPS (travel-safe, 2026-10-24; the E: drive stays home when Jeff travels). `--backup` takes a
+# BACKUPS (travel-safe, 2026-10-24; the E: drive stays home when the user travels). `--backup` takes a
 # consistent, verified, compressed copy of the DuckDB (db_maintenance.py snapshot: exclusive lock +
 # CHECKPOINT, sha256 round trip). No local copy is ever made (not on WSL's disk, not on C:):
 #   E: present (mountpoint -q /mnt/e AND the backup dir already exists) -> the E: backup dir
@@ -192,7 +192,7 @@ step_backup() {  # $1 = auto|manual, $2 = drive to force Drive. Never fails the 
     fi
   fi
 
-  # No local copy anywhere (Jeff 2026-10-24: no DuckDB backups on WSL's disk or C:): E: gets the file written
+  # No local copy anywhere (user, 2026-10-24: no DuckDB backups on WSL's disk or C:): E: gets the file written
   # straight to it (<name>.part, renamed after the round-trip check); Drive gets it streamed (rclone rcat).
   local rc=0
   if [ "$to_e" = 1 ]; then

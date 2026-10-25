@@ -2082,6 +2082,83 @@ def avature_detail(row, posting):
     return _avature_detail_fields(resp.text, posting)
 
 
+# ================================================================ Jibe (iCIMS career sites)
+# A Jibe front end (careers.<company>.com) serves its whole board as JSON at /api/jobs, 1-based pages of
+# up to 100, with `totalCount` on every page and the full JD (description, responsibilities and
+# qualifications as HTML) in the list record, so there is no detail call. The apply button goes to the
+# iCIMS tenant; the posting URL kept here is the career-site page. Verified on Cvent 2026-10-25.
+# Registry: identifier_1 = the career-site host (careers.cvent.com).
+JIBE_PAGE = 100
+# Jibe's country_code is unreliable (Cvent's India rows say "RS"), so the country name maps first.
+_JIBE_COUNTRY = {"united states": "US", "india": "IN", "canada": "CA", "united kingdom": "GB",
+                 "germany": "DE", "singapore": "SG", "australia": "AU", "united arab emirates": "AE"}
+
+
+def _jibe_text(d):
+    """The JD as plain text. Some boards repeat responsibilities and qualifications inside
+    `description`; a field is appended only when its text is not already there."""
+    text = N.html_to_text(d.get("description")) or ""
+    squash = lambda t: re.sub(r"[^a-z0-9]+", "", t.lower())
+    for key in ("responsibilities", "qualifications"):
+        extra = N.html_to_text(d.get(key))
+        if extra and squash(extra)[:200] not in squash(text):
+            text = f"{text}\n\n{extra}" if text else extra
+    return text or None
+
+
+def _jibe_position(host, d):
+    text = _jibe_text(d)
+    loc = d.get("full_location") or d.get("location_name")
+    tags = (d.get("tags3") or []) + (d.get("tags4") or [])
+    pay_min, pay_max = d.get("salary_min_value") or 0, d.get("salary_max_value") or 0
+    pay = (float(pay_min), float(pay_max), "year") if pay_min and pay_max else N.pay_from_text(text)
+    source = ("ats" if pay_min and pay_max else "text") if pay else None
+    country = _JIBE_COUNTRY.get((d.get("country") or "").strip().lower(), d.get("country_code"))
+    lang = d.get("language") or "en-us"
+    return N.base(
+        req_id=str(d.get("req_id") or d.get("slug")),
+        title=d.get("title"),
+        url=f"https://{host}/jobs/{quote(str(d.get('slug') or d.get('req_id')), safe='')}?lang={lang}",
+        location_primary=loc,
+        locations=N.locations_json([loc]),
+        country=country,
+        workplace_type=N.workplace_type(" ".join(tags) or None, loc),
+        employment_type=N.employment_type(d.get("employment_type")),
+        job_family=", ".join(c.get("name") for c in d.get("categories") or [] if c.get("name")) or None,
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source=source,
+        posted_at=N.parse_date(d.get("posted_date")),
+        description_text=text,
+        raw_json=N.raw({k: v for k, v in d.items()
+                        if k not in ("description", "responsibilities", "qualifications")}),
+    )
+
+
+def jibe_jobs(row, max_pages=None):
+    host = row["identifier_1"].strip().removeprefix("https://").strip("/")
+    url = f"https://{host}/api/jobs"
+    out, page, total = [], 1, None
+    with client() as c:
+        while True:
+            data = _request(c, "GET", url, params={"page": page, "limit": JIBE_PAGE},
+                            headers={"Accept": "application/json"}).json()
+            if "jobs" not in data:
+                # Never return []: an unread board must raise, or the close pass would close everything.
+                raise RuntimeError(f"{row['employer']}: no 'jobs' key in {url} page {page}")
+            total = data.get("totalCount") if total is None else total
+            jobs = [j.get("data") or {} for j in data["jobs"]]
+            out.extend(_jibe_position(host, d) for d in jobs)
+            if not jobs or (total is not None and len(out) >= total):
+                break
+            if max_pages and page >= max_pages:
+                return Truncated(out)
+            page += 1
+            time.sleep(PAGE_DELAY)
+    if total is not None and len(out) < total:
+        return Truncated(out)
+    return out
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2099,6 +2176,7 @@ _LIST = {
     "phenom": phenom_jobs,
     "successfactors_rmk": successfactors_rmk_jobs,
     "avature": avature_jobs,
+    "jibe": jibe_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,

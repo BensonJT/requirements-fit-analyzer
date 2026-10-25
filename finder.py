@@ -607,9 +607,9 @@ def _bullseye_gate(con, a, result):
     notes["auc_employer_grouped_passed"] = passed
     con.execute("UPDATE models SET notes = ? WHERE model_version = ?", [json.dumps(notes), result["model_version"]])
     if not passed:
-        print("GATE FAILED: stopping after training. The rank feed reads fit_bullseye only where a rescreen or "
-              "`bullseye-backfill` has written it -- do NOT run `finder.py bullseye-backfill` for this model "
-              "version until a passing retrain replaces it.")
+        print("GATE FAILED: this model is recorded as failing, so screen skips it and keeps using the newest "
+              "bullseye model that did not fail (or none). `bullseye-backfill` refuses until a passing model "
+              "replaces it.")
 
 
 def judge_batch_default() -> int:
@@ -957,7 +957,8 @@ def main():
     s.add_argument("--lens", choices=["process", "technical", "ai", "required", "bullseye"],
                    help="train one lens's model instead of the overall one; 'required' and 'bullseye' are NOT "
                         "lenses -- see features.REQUIRED_MODEL / features.BULLSEYE_MODEL, ranking signals only; bullseye "
-                        "also runs its acceptance gate (employer-grouped AUC >= 0.78)")
+                        "also runs its acceptance gate (employer-grouped AUC >= 0.78), and screen never loads "
+                        "a bullseye model that failed it")
     s.set_defaults(func=cmd_train)
 
     s = sub.add_parser("bullseye-backfill", parents=[common],

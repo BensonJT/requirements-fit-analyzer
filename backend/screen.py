@@ -596,14 +596,17 @@ def _employer_commute_places(company: str) -> list:
 # day a week or less, a question for the user at two days, and a no-go at three or more. office_days() reads
 # the JD's own statement of how many days a week the role sits in an office. It returns the HIGHEST office
 # cadence the text states (the binding requirement), 0.5 for "a few days a month / occasionally", or None when
-# the JD says nothing -- None is never read as a reject.
+# the JD says nothing -- None is never read as a reject. 2026-10-25: "work out of our Springfield office
+# 4x/week" (a real posting) read as None, so "out of our ... office" and "Nx/week" / "N times a week" are read too.
 _WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
 _N = r"(?<![\d.])(\d|one|two|three|four|five)(?:\s*\(\d\))?"
 _OFFICE_W = (r"(?:in[-\s]?(?:the\s+)?office|on[-\s]?site|in[-\s]person|"
-             r"at\s+(?:our|the|an?|one\s+of\s+our)\s+[\w\s,&'-]{0,40}?(?:office|campus|site|location|hub)\b|"
+             r"(?:at|out\s+of)\s+(?:our|the|an?|one\s+of\s+our)\s+[\w\s,&'-]{0,40}?(?:office|campus|site|location|hub)\b|"
              r"report(?:ing)?\s+(?:in|to\s+(?:the|our|an?)\s+[\w\s,'-]{0,30}?office))")
 _REMOTE_W = r"(?:remote(?:ly)?|from\s+home|work[-\s]from[-\s]home|telework(?:ing)?|telecommut\w*|virtual(?:ly)?|wfh)"
-_DAYS_RE = re.compile(_N + r"\s*(?:\+\s*)?days?\b(?:\s+(?:a|per|each)\s+week|\s*/\s*(?:week|wk))?", re.I)
+# "4x/week", "3x a week", "2 times per week" count as days only with the week attached ("2x faster" is not a cadence)
+_DAYS_RE = re.compile(_N + r"\s*(?:\+\s*)?(?:days?\b(?:\s+(?:a|per|each)\s+week|\s*/\s*(?:week|wk))?|"
+                      r"(?:x|times)\s*(?:/\s*(?:week|wk)|(?:a|per|each)\s+(?:week|wk))\b)", re.I)
 _OFFICE_RE = re.compile(_OFFICE_W, re.I)
 _REMOTE_W_RE = re.compile(_REMOTE_W, re.I)
 _ONCE_WEEK_RE = re.compile(r"\b(?:at\s+least\s+)?once\s+(?:a|per|each)\s+week\b", re.I)

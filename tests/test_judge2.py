@@ -448,6 +448,42 @@ def test_model_fallback_on_429(tmp_path, monkeypatch):
     con.close()
 
 
+def _seq_transport(seq, urls):
+    def transport(url, headers=None, json=None):
+        urls.append(url)
+        return seq.pop(0)
+    return transport
+
+
+def test_429_waits_out_the_window_google_names_and_logs_the_quota():
+    """2026-10-25: a 429 is the per-minute token window; retrying after 2 s / 8 s only failed again."""
+    body = {"error": {"code": 429, "details": [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+         "violations": [{"quotaId": "GenerateContentInputTokensPerModelPerMinute-FreeTier"}]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "38s"}]}}
+    ok = _FakeResponse(200, _gemini_body({"lines": []}))
+    sleeps, urls, logs = [], [], []
+    model, data = judge2._call_with_fallback(_seq_transport([_FakeResponse(429, body), ok], urls), sleeps.append,
+                                             ["m1", "m2"], "k", "prompt", log=logs.append)
+    assert model == "m1" and data is not None and sleeps == [39.0]
+    assert any("InputTokensPerModelPerMinute" in line and "waiting 39s" in line for line in logs)
+
+
+def test_429_without_a_delay_waits_a_minute_and_server_errors_keep_the_short_backoff():
+    sleeps, urls = [], []
+    seq = [_FakeResponse(429, {}), _FakeResponse(429, {}), _FakeResponse(429, {}),       # m1: two 60 s waits
+           _FakeResponse(503, {}), _FakeResponse(500, {}), _FakeResponse(200, _gemini_body({"lines": []}))]
+    model, _ = judge2._call_with_fallback(_seq_transport(seq, urls), sleeps.append, ["m1", "m2"], "k", "p",
+                                          log=lambda *_: None)
+    assert model == "m2"
+    assert sleeps == [60.0, 60.0, 2, 8]          # no wait after a model's last failure, none before the next model
+
+
+def test_429_wait_is_capped():
+    body = {"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "3600s"}]}}
+    assert judge2._rate_limit_wait(_FakeResponse(429, body)) == (judge2.RATE_LIMIT_WAIT_MAX_SECONDS, "")
+
+
 def test_already_reviewed_is_skipped_unless_forced(tmp_path, monkeypatch):
     monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
     monkeypatch.setenv("GEMINI_API_MODEL", "m1")

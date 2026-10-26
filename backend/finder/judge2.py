@@ -24,7 +24,7 @@ Sections:
      the verdict to `unclear` rather than being trusted at face value (the fix for the bare `meets` above).
   2b. Derivation (`derive_required_fit`, §29.2) -- a PURE function, no I/O: turns validated per-line verdicts
       into one `required_fit` call and a short `why`. Module-level constants are the only tunables.
-  3. Client (`_call_with_fallback`) -- httpx POST, model fallback, RPM throttle, all injected.
+  3. Client (`_call_with_fallback`) -- httpx POST, model fallback, RPM throttle, 429 waits, all injected.
   4. `run()` -- population, dry-run, the live gate, one review per posting, at most one re-ask.
   5. `evaluate()` -- the §25 acceptance bar against `vw_report_feedback_blind`, storing pass/fail per
      prompt_version so the rank (`vw_lens_fit` in `backend/ats/store.py`) can read it back. Also
@@ -54,7 +54,12 @@ from . import rules
 PROVIDER = "gemini"
 API_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_JD_CAP = 12_000
-BACKOFF_SECONDS = (2, 8)          # §25 / §10: back off, then fall to the next model
+BACKOFF_SECONDS = (2, 8)          # §25 / §10: back off, then fall to the next model (5xx, timeout, exception)
+# 2026-10-25: a 429 is the free tier's per-minute TOKEN window (Gemma 4: 16K TPM; one prompt is ~14-18K tokens),
+# so a retry after 2 s or 8 s re-sends the same prompt into the same window and fails again. On a 429 wait the
+# delay Google names (RetryInfo `retryDelay`, else `Retry-After`), else a full minute, never more than the cap.
+RATE_LIMIT_WAIT_SECONDS = 60.0
+RATE_LIMIT_WAIT_MAX_SECONDS = 90.0
 DEFAULT_RPM = 10                  # sane conservative default when GEMINI_RPM is unset
 DEFAULT_TPM = 12_000               # free tier is ~14K tokens/minute PER MODEL; stay under it (GEMINI_TPM overrides)
 CHARS_PER_TOKEN = 4               # crude estimate ("tokens ~ chars/4"), logging/throttle only
@@ -1029,12 +1034,45 @@ def _log_unparseable_diagnostics(pid: str, response_json, *, log=print) -> None:
     log(f"judge2: {pid} unparseable diagnostics -- finishReason={finish_reason} usageMetadata={counts}")
 
 
+def _duration_seconds(raw) -> Optional[float]:
+    """'38s' / '38.5s' / 38 -> seconds; None when unreadable."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*s?\s*", str(raw)) if raw is not None else None
+    return float(m.group(1)) if m else None
+
+
+def _rate_limit_wait(resp) -> tuple:
+    """(seconds to wait, quota note) for a 429: Google's RetryInfo `retryDelay`, else a `Retry-After` header,
+    else RATE_LIMIT_WAIT_SECONDS; capped at RATE_LIMIT_WAIT_MAX_SECONDS. The note names the quota the reply
+    says was exceeded (QuotaFailure `quotaId`), '' when it names none."""
+    wait, quotas = None, []
+    try:
+        body = resp.json() if hasattr(resp, "json") else {}
+    except Exception:  # noqa: BLE001 -- a 429 with no JSON body still gets the default wait
+        body = {}
+    details = ((body or {}).get("error") or {}).get("details") or [] if isinstance(body, dict) else []
+    for d in details if isinstance(details, list) else []:
+        if not isinstance(d, dict):
+            continue
+        kind = str(d.get("@type", "")).rsplit(".", 1)[-1]
+        if kind == "RetryInfo":
+            wait = _duration_seconds(d.get("retryDelay"))
+        elif kind == "QuotaFailure":
+            quotas += [str(v.get("quotaId") or v.get("quotaMetric") or "?")
+                       for v in d.get("violations") or [] if isinstance(v, dict)]
+    if wait is None:
+        headers = getattr(resp, "headers", None) or {}
+        wait = _duration_seconds(headers.get("retry-after") or headers.get("Retry-After"))
+    wait = RATE_LIMIT_WAIT_SECONDS if wait is None else wait + 1.0   # +1 s: land after the window, not on it
+    return min(wait, RATE_LIMIT_WAIT_MAX_SECONDS), ", ".join(dict.fromkeys(quotas))
+
+
 def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_text: str, *,
                         temperature: float = 0.0, log=print):
-    """Tries each model in order; within a model, up to two retries with the §10/§25 backoff (2s, 8s) on
-    429/5xx/timeout/exception before falling to the next model. Returns (model_name, response_json) or
-    (None, None) if every model failed. Never logs the API key. The request timeout lives on the transport
-    itself (`default_transport()` builds an `httpx.Client(timeout=30.0)`), not here."""
+    """Tries each model in order; within a model, up to two retries before falling to the next model. A 429
+    waits out the rate-limit window (`_rate_limit_wait`: Google's stated delay, else a minute) and logs the
+    quota it names; a 5xx/timeout/exception uses the §10/§25 backoff (2s, 8s). Returns (model_name,
+    response_json) or (None, None) if every model failed. Never logs the API key. The request timeout lives
+    on the transport itself (`default_transport()` builds an `httpx.Client(timeout=30.0)`), not here."""
     headers = {"content-type": "application/json", "x-goog-api-key": api_key}
     body = {"contents": [{"parts": [{"text": prompt_text}]}],
             "generationConfig": {"temperature": temperature, "response_mime_type": "application/json",
@@ -1043,20 +1081,29 @@ def _call_with_fallback(transport, sleep_fn, models: list, api_key: str, prompt_
     last_reason = "no models configured"
     for model in models:
         url = API_URL_TMPL.format(model=model)
-        for backoff in (0,) + BACKOFF_SECONDS:
-            if backoff:
-                sleep_fn(backoff)
+        wait = 0.0
+        for attempt in range(len(BACKOFF_SECONDS) + 1):
+            if attempt:
+                sleep_fn(wait)
+            retries_left = attempt < len(BACKOFF_SECONDS)
+            backoff = BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)]
             try:
                 resp = _post(transport, url, headers, body)
             except Exception as exc:  # noqa: BLE001 -- any transport failure falls through to the next attempt
-                last_reason = f"{type(exc).__name__}: {exc}"
+                last_reason, wait = f"{type(exc).__name__}: {exc}", backoff
                 continue
             status = getattr(resp, "status_code", 200)
             if status == 200:
                 data = resp.json() if hasattr(resp, "json") else resp
                 return model, data
-            last_reason = f"HTTP {status}"
-            if not (status == 429 or status >= 500):
+            last_reason, wait = f"HTTP {status}", backoff
+            if status == 429:
+                wait, quota = _rate_limit_wait(resp)
+                if quota:
+                    last_reason += f" {quota}"
+                if retries_left:
+                    log(f"judge2: model {model} rate-limited ({quota or 'no quota named'}); waiting {wait:.0f}s")
+            elif status < 500:
                 break  # a non-retryable 4xx: stop retrying this model, fall to the next one
         log(f"judge2: model {model} failed ({last_reason}); trying next model")
     log(f"judge2: every model failed ({last_reason}); giving up on this posting")

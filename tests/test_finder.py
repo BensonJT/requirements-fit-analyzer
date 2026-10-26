@@ -1664,6 +1664,13 @@ def test_office_days_reads_the_stated_in_office_cadence():
         "On-site presence Tuesday through Thursday, with remote work available Monday and Friday.": 3,
         "Travel to our DC office a couple of days a month for team meetings.": 0.5,
         "This role is onsite and may have flexibility for some situational remote work days.": 5,
+        # 2026-10-25: a real posting's "4x/week" and "work out of our ... office" read as None before
+        "*Candidates must be willing to work out of our Springfield, IL office 4x/week": 4,
+        "Reporting out of the Peoria office two days a week.": 2,
+        "Hybrid: in the office 3 times per week.": 3,
+        "Work remotely 1x per week, the rest in office.": 4,
+        "Meet 2x per week with stakeholders.": None,
+        "Our model runs 2x faster on site data.": None,
         "Must be available within 30 days of the offer.": None,
         "This is a remote position.": None,
         "The Office of the CFO supports planning as needed.": None,

@@ -8,8 +8,9 @@ touches the pipeline DuckDB: `finder.py apply-queue` writes queued calls into it
 just before the snapshot, or within the hour (scripts/inbox_watch.sh), with the same checks as
 `finder.py mark`. A refused call shows its reason in the queue list; fix it and submit again.
 
-For a posting with a tracker row, the Tracker box changes the application's status through `trk set`
-(immediate: the tracker is Postgres already).
+For a posting with a tracker row, the Tracker box changes the application's status through `trk set`, or,
+with the status left blank, adds the comment as a note through `trk note` (immediate: the tracker is
+Postgres already).
 
 When the window gains focus and the clipboard holds a posting ID, it fills the ID box and looks it up.
 
@@ -119,11 +120,11 @@ class App:
         self.app = ttk.Combobox(t, state="readonly", width=8)
         self.app.grid(row=0, column=1, padx=(4, 12))
         statuses = [r["status"] for r in self.pg.execute("SELECT status FROM tracker.status ORDER BY sort_order")]
-        self.status = ttk.Combobox(t, state="readonly", values=statuses, width=16)
+        self.status = ttk.Combobox(t, state="readonly", values=[""] + statuses, width=16)
         self.status.grid(row=0, column=2, padx=(0, 12))
         self.note = tk.StringVar()
         ttk.Entry(t, textvariable=self.note).grid(row=0, column=3, sticky="ew")
-        ttk.Button(t, text="Set status", command=self.set_status).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(t, text="Save to tracker", command=self.set_status).grid(row=0, column=4, padx=(8, 0))
         self.tracker_box = t
         self.fill_tracker()
 
@@ -294,16 +295,22 @@ class App:
         self.refresh()
 
     def set_status(self):
-        app, status = self.app.get(), self.status.get()
-        if not app or not status:
-            return self.msg.set("Pick an app ID and a status.")
-        cmd = [str(ROOT / "bin" / "trk"), "set", app, status] + (["--note", self.note.get().strip()] if self.note.get().strip() else [])
+        app, status, note = self.app.get(), self.status.get(), self.note.get().strip()
+        if not app:
+            return self.msg.set("Pick an app ID.")
+        if status:      # status change, with the comment logged on it
+            cmd = [str(ROOT / "bin" / "trk"), "set", app, status] + (["--note", note] if note else [])
+        elif note:      # blank status + a comment = a plain note on the application
+            cmd = [str(ROOT / "bin" / "trk"), "note", app, note]
+        else:
+            return self.msg.set("Pick a status, or leave it blank and type a comment to add a note.")
         res = subprocess.run(cmd, capture_output=True, text=True)
         out = (res.stdout + res.stderr).strip().splitlines()
-        self.msg.set(("trk: " + out[-1]) if out else f"trk exited {res.returncode}")
         if res.returncode == 0:
             self.note.set("")
-            self.lookup()
+            self.status.set("")
+            self.lookup()          # refresh the tracker line first: lookup clears the message
+        self.msg.set(("trk: " + out[-1]) if out else f"trk exited {res.returncode}")
 
     def undo(self):
         for item in self.tree.selection():

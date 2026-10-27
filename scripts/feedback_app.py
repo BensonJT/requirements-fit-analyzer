@@ -14,6 +14,8 @@ with the status left blank, adds the comment as a note through `trk note` (immed
 Postgres already).
 
 The contacts on file for the rows found are listed under the Tracker box (double-click a cell to copy it).
+"Offload PDFs to Drive" runs the vault's media_offload.py finalize on the selected row's package folder (after
+a confirmation listing the PDFs): copy to Drive, hash check, delete the local copies.
 "Apply queue + refresh snapshot" runs scripts/refresh_now.sh (apply-queue, pg_snapshot, the report rebuild)
 and stops cleanly when a pipeline run holds the database.
 
@@ -21,17 +23,27 @@ When the window gains focus and the clipboard holds a posting ID, it fills the I
 
     .venv/bin/python scripts/feedback_app.py
 """
+import os
 import re
 import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.tracker import db  # noqa: E402
 from backend.tracker.store import CONTACT_ROLES  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(ROOT / ".env")
+# The vault is three levels above the Job_Search directory ($JOBSEARCH_VAULT_DIR); its media_offload.py moves finals
+# to Google Drive. Tracker folders are relative to Job_Search, e.g. Applications/<Company_Role>.
+JOB_SEARCH = Path(os.environ["JOBSEARCH_VAULT_DIR"]) if os.environ.get("JOBSEARCH_VAULT_DIR") else None
+VAULT = JOB_SEARCH.parents[2] if JOB_SEARCH else None
+OFFLOAD = VAULT / "System" / "Context" / "Skills" / "scripts" / "media_offload.py" if VAULT else None
+SCRATCH = Path(os.environ.get("KEYSTONE_SCRATCH") or Path.home() / "share" / "work")
 
 POSTING_RE = re.compile(r"^[0-9a-f]{20}$")
 # finder.py PASS_REASON_CODES, most used first, with what each feeds (finder.py mark --help).
@@ -155,6 +167,13 @@ class App:
         ttk.Entry(c, textvariable=self.cv["linkedin"]).grid(row=3, column=1, columnspan=2, sticky="ew", pady=2)
         ttk.Button(c, text="Add contact", command=self.add_contact).grid(row=3, column=3, sticky="e", pady=2)
         self.contact_box = c
+        # After applying: move the package's PDFs (vault folder and its scratch twin) to the parallel Drive folder.
+        o = ttk.Frame(t)
+        o.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        self.offload_btn = ttk.Button(o, text="Offload PDFs to Drive", command=self.offload_pdfs)
+        self.offload_btn.pack(side="left")
+        ttk.Label(o, text="after you've attached them: copies to Drive, checks the hash, then deletes the local copies",
+                  foreground="#666").pack(side="left", padx=(8, 0))
 
         # Contacts already on file for the rows found: a read-only list; double-click a cell to copy it.
         k = ttk.LabelFrame(f, text="Contacts on file (double-click a cell to copy it)", padding=6)
@@ -399,6 +418,50 @@ class App:
                 self.cv[k].set("")
             self.lookup()        # shows the new contact in the lookup line; lookup clears the message
         self.msg.set(("trk: " + out[0]) if out else f"trk exited {res.returncode}")
+
+    def offload_pdfs(self):
+        """media_offload.py finalize on the selected row's package folder, in a background thread."""
+        app = self.app.get()
+        if not app:
+            return self.msg.set("Look up a tracked application first.")
+        if not OFFLOAD or not OFFLOAD.exists():
+            return self.msg.set("Can't find media_offload.py: JOBSEARCH_VAULT_DIR in ~/jobsearch/.env must point at the vault's Job_Search folder.")
+        r = self.pg.execute("SELECT company, role, folder FROM tracker.application WHERE app_id = %s", [int(app)]).fetchone()
+        if not r or not r["folder"]:
+            return self.msg.set(f"#{app} has no package folder.")
+        rel = (JOB_SEARCH / r["folder"]).relative_to(VAULT).as_posix()
+        pdfs = sorted({p.name: p for d in (VAULT / rel, SCRATCH / rel) if d.is_dir() for p in d.glob("*.pdf")}.values())
+        if not pdfs:
+            return self.msg.set(f"No PDFs in {r['folder']} or its scratch twin; nothing to offload.")
+        names = "\n".join(f"  {p.name}  ({p.stat().st_size // 1024} KB)" for p in pdfs)
+        if not messagebox.askyesno("Offload PDFs to Drive",
+                                   f"#{app} {r['company']}: {r['role']}\n\n{names}\n\nCopy these to Google Drive, verify the hash, "
+                                   "then delete the local copies?\n\nOnly do this after you've attached them to the application."):
+            return
+        import threading
+        self.offload_btn.configure(state="disabled")
+        self.msg.set(f"Offloading {len(pdfs)} PDF(s) to Drive...")
+        self._offload_result = None
+
+        def work():
+            res = subprocess.run(["python3", str(OFFLOAD), "finalize", rel], cwd=str(VAULT), capture_output=True, text=True)
+            self._offload_result = (res.returncode, [l for l in (res.stdout + res.stderr).splitlines() if l.strip()])
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(1000, self.poll_offload)
+
+    def poll_offload(self):
+        if self._offload_result is None:
+            self.root.after(1000, self.poll_offload)
+            return
+        rc, lines = self._offload_result
+        self.offload_btn.configure(state="normal")
+        if rc == 0:
+            done = next((l for l in lines if l.startswith("finals:")), lines[-1] if lines else "done")
+            self.msg.set("Offloaded: " + done.replace("finals: ", ""))
+        elif rc == 2:
+            self.msg.set("Not now: " + (lines[-1] if lines else "another offload or backup holds the lock") + " Try again in a minute.")
+        else:
+            self.msg.set("Offload stopped, nothing deleted: " + (lines[-1] if lines else f"exit {rc}"))
 
     def undo(self):
         for item in self.tree.selection():

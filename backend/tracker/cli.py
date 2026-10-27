@@ -124,7 +124,7 @@ def cmd_show(conn, a):
             print(f"{k.ljust(w)}  {'' if v is None else v}")
     print("\nContacts")
     for c in row["contacts"] or []:
-        bits = [c["name"], f"({c['role']})"] + [str(c[k]) for k in ("title", "company", "email", "phone", "linkedin") if c[k]]
+        bits = [f"#{c['contact_id']}", " ".join(c["name"].split()), f"({c['role']})"] + [str(c[k]) for k in ("title", "company", "email", "phone", "linkedin") if c[k]]
         print("  " + "  ".join(bits))
     if not row["contacts"]:
         print("  (none)")
@@ -158,6 +158,13 @@ def cmd_contact(conn, a):
         extra["company"] = a.company
     c = store.add_contact(conn, a.app_id, a.name, actor(), role=a.role, **extra)
     print(f"{'added' if c['created'] else 'linked existing'} contact {c['name']} ({c['role']}) on #{a.app_id}")
+    rerender(conn, a)
+
+
+def cmd_contact_remove(conn, a):
+    r = store.remove_contact(conn, a.app_id, a.contact_id, actor(), role=a.role)
+    print(f"removed contact {r['name']} ({', '.join(r['roles'])}) from #{a.app_id}"
+          + ("; contact deleted (no other application links it)" if r["deleted"] else "; still linked elsewhere"))
     rerender(conn, a)
 
 
@@ -378,6 +385,7 @@ everyday use:
   trk note 330 "phone screen booked for Friday"
   trk contact 330 "Pat Lee" --role recruiter --email pat@acme.com
                                        roles: recruiter, hiring_manager, panelist, referral, staffing, other
+  trk contact-remove 330 42            unlink contact #42 (ids in trk show); deleted if no other row links it
   trk edit 330 --follow-up 2026-11-03 --next-action "email recruiter"
                                        fields: --next-action --follow-up --closes --role --company --req
                                        --posting --location --pay --close-reason --applied --source
@@ -458,6 +466,14 @@ def build_parser():
     for k in ("email", "phone", "linkedin", "title", "company"):
         p.add_argument(f"--{k}", help=f"the contact's {k}")
     p.set_defaults(fn=cmd_contact)
+
+    p = sub.add_parser("contact-remove", parents=[nr], help="unlink a contact from an application",
+                       description="Unlink a contact (its #id is in `trk show`) from an application and log it. "
+                                   "The contact itself is deleted only when no other application links it.")
+    p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")
+    p.add_argument("contact_id", type=int, help="the contact's #id, as `trk show` prints it")
+    p.add_argument("--role", choices=store.CONTACT_ROLES, help="remove only this role (default: every role it holds on this row)")
+    p.set_defaults(fn=cmd_contact_remove)
 
     p = sub.add_parser("edit", parents=[nr], help="edit fields (empty string clears; --posting none)")
     p.add_argument("app_id", type=int, help="the tracker row's ID (trk ls / trk find)")

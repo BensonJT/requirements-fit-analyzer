@@ -159,6 +159,11 @@ def sweep(con, rows, workers=8, max_pages=None, log=print):
             flag = "  [TRUNCATED, no close-pass]" if truncated else ""
             log(f"  [{done}/{len(rows)}] {employer} ({platform}): {seen} live, {new} new, "
                 f"{reopened} reopened, {closed} taken down — {elapsed:.1f}s{flag}")
+            if not truncated and seen:
+                moved = store.close_moved_board_postings(con, employer, platform, now)
+                for old, n in sorted(moved.items()):
+                    stats["closed"] += n
+                    log(f"      {employer}: closed {n} posting(s) left on its old {old} board (now on {platform})")
 
     expired = store.close_expired_postings(con, store.CLOSE_BY_DATE_PLATFORMS, _now())
     if expired:

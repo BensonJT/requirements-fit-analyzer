@@ -6,7 +6,8 @@ Lifecycle (DESIGN_ats_registry.md §13a):
   bumped, status forced back to 'active'. Nothing is ever re-ingested as a new row.
 - A req is closed (status='closed', closed_at stamped) the first run it is missing
   from a board that was pulled cleanly and completely. A failed or truncated pull
-  never closes anything.
+  never closes anything. The same clean pull also closes the employer's active rows on
+  any OTHER platform: a board it moved off (close_moved_board_postings).
 - Nothing is ever deleted: description_text accumulates as a corpus.
 
 Performance: the DB file lives on the external drive behind WSL's 9p mount, where
@@ -2169,6 +2170,24 @@ def close_expired_postings(con, platforms, now):
         WHERE platform IN (SELECT unnest(?::VARCHAR[])) AND status = 'active'
           AND posting_end_at IS NOT NULL AND posting_end_at < ?
     """, [now, list(platforms), now.date()]).fetchone()[0]
+
+
+def close_moved_board_postings(con, employer, platform, now, track="fit"):
+    """Closes `employer`'s active postings on any platform OTHER than `platform`, the board it was
+    just pulled from. The registry keeps one board per employer, so a row left on another platform
+    is from a board the employer moved off (Spring Health, Greenhouse -> Ashby on 2026-10-22): no
+    pull ever covers that board again, so record_board's close-pass can never reach it and 71 of
+    its postings sat 'active' for weeks. Call only after a clean, complete pull of `platform` that
+    saw at least one posting. Returns {old_platform: n_closed}."""
+    rows = con.execute("""
+        UPDATE postings SET status = 'closed', closed_at = ?
+        WHERE employer = ? AND track = ? AND platform <> ? AND status = 'active'
+        RETURNING platform
+    """, [now, employer, track, platform]).fetchall()
+    out = {}
+    for (p,) in rows:
+        out[p] = out.get(p, 0) + 1
+    return out
 
 
 # ---------------------------------------------------------------- the Jev tier (v23, docs/JEV_PLAN.md §3)

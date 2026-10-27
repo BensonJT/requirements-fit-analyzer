@@ -8,7 +8,8 @@ touches the pipeline DuckDB: `finder.py apply-queue` writes queued calls into it
 just before the snapshot, or within the hour (scripts/inbox_watch.sh), with the same checks as
 `finder.py mark`. A refused call shows its reason in the queue list; fix it and submit again.
 
-For a posting with a tracker row, the Tracker box changes the application's status through `trk set`, or,
+For a posting with a tracker row, the Tracker box links a contact (name, role, title, company, email,
+phone, LinkedIn URL) through `trk contact`, and the Tracker box changes the application's status through `trk set`, or,
 with the status left blank, adds the comment as a note through `trk note` (immediate: the tracker is
 Postgres already).
 
@@ -26,6 +27,7 @@ from tkinter import ttk
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from backend.tracker import db  # noqa: E402
+from backend.tracker.store import CONTACT_ROLES  # noqa: E402
 
 POSTING_RE = re.compile(r"^[0-9a-f]{20}$")
 # finder.py PASS_REASON_CODES, most used first, with what each feeds (finder.py mark --help).
@@ -56,7 +58,7 @@ class App:
         self.pid = self.app_ids = None
         self.last_clip = ""
         root.title("Job feedback")
-        root.minsize(760, 560)
+        root.minsize(780, 720)
         f = ttk.Frame(root, padding=10)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
@@ -126,6 +128,28 @@ class App:
         ttk.Entry(t, textvariable=self.note).grid(row=0, column=3, sticky="ew")
         ttk.Button(t, text="Save to tracker", command=self.set_status).grid(row=0, column=4, padx=(8, 0))
         self.tracker_box = t
+
+        # Contact fields sit inside the Tracker box, under the status row (trk contact on the same app ID).
+        ttk.Separator(t).grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 4))
+        c = ttk.Frame(t)
+        c.grid(row=2, column=0, columnspan=5, sticky="ew")
+        c.columnconfigure(1, weight=1)
+        c.columnconfigure(3, weight=1)
+        self.cv = {k: tk.StringVar() for k in ("name", "title", "company", "email", "phone", "linkedin")}
+        for row, pair in enumerate(((("Name", "name"), ("Title", "title")), (("Email", "email"), ("Phone", "phone")))):
+            for col, (label, key) in enumerate(pair):
+                ttk.Label(c, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 10, 4), pady=2)
+                ttk.Entry(c, textvariable=self.cv[key]).grid(row=row, column=col * 2 + 1, sticky="ew", pady=2)
+        ttk.Label(c, text="Company").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(c, textvariable=self.cv["company"]).grid(row=2, column=1, sticky="ew", pady=2)
+        ttk.Label(c, text="Role").grid(row=2, column=2, sticky="w", padx=(10, 4), pady=2)
+        self.c_role = ttk.Combobox(c, state="readonly", values=list(CONTACT_ROLES), width=16)
+        self.c_role.set("hiring_manager")
+        self.c_role.grid(row=2, column=3, sticky="w", pady=2)
+        ttk.Label(c, text="LinkedIn URL").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(c, textvariable=self.cv["linkedin"]).grid(row=3, column=1, columnspan=2, sticky="ew", pady=2)
+        ttk.Button(c, text="Add contact", command=self.add_contact).grid(row=3, column=3, sticky="e", pady=2)
+        self.contact_box = c
         self.fill_tracker()
 
         self.msg = tk.StringVar()
@@ -178,7 +202,7 @@ class App:
             if not r["posting_id"]:
                 self.fill_tracker()
                 return self.show(f"Tracker #{text}: {r['company']} | {r['role']} ({r['status']}). No posting linked, "
-                                 "so only the Tracker box applies.")
+                                 "so only the Tracker box applies." + self.contacts_text())
             self.pid = r["posting_id"]
         elif text.startswith("http"):
             r = pg.execute("SELECT posting_id FROM jobs.fit_snapshot WHERE url = %s OR url = %s LIMIT 1",
@@ -206,6 +230,8 @@ class App:
             base.append("tracker: " + ", ".join(f"#{r['app_id']} {r['status']}" for r in tracked))
         if pending:
             base.append(f"{pending} call(s) already pending")
+        if self.contacts_text():
+            base.append(self.contacts_text().strip(" ·"))
         self.found_parts = (base, machine)
         self.render_found()
 
@@ -217,17 +243,33 @@ class App:
         hidden = self.basis.get() == "blind"
         self.show("  ·  ".join(base + ([] if hidden else machine)) + ("  ·  (Blind: machine calls hidden)" if hidden and machine else ""))
 
+    def contacts_text(self):
+        """'  ·  contacts: Name (role), ...' for the rows found, or ''."""
+        if not self.app_ids:
+            return ""
+        rows = self.pg.execute("SELECT DISTINCT c.name, ac.role FROM tracker.app_contact ac JOIN tracker.contact c "
+                               "USING (contact_id) WHERE ac.app_id = ANY(%s) ORDER BY c.name", [list(self.app_ids)]).fetchall()
+        return ("  ·  contacts: " + ", ".join(f"{r['name']} ({r['role']})" for r in rows)) if rows else ""
+
     def fill_tracker(self):
         ids = [str(i) for i in self.app_ids or []]
         self.app.configure(values=ids)
         self.app.set(ids[0] if ids else "")
-        # No tracker row: grey the box out so it doesn't look usable (a pass needs no tracker row).
-        for w in self.tracker_box.winfo_children():
-            try:
-                w.configure(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if ids else "disabled")
-            except tk.TclError:
-                pass
-        self.tracker_box.configure(text="Tracker (immediate, through trk)" if ids else "Tracker (no tracker row for this posting)")
+        # No tracker row: grey the box (status row and contact fields) out so it doesn't look usable.
+        def walk(w):
+            for ch in w.winfo_children():
+                try:
+                    ch.configure(state=("readonly" if isinstance(ch, ttk.Combobox) else "normal") if ids else "disabled")
+                except tk.TclError:
+                    pass
+                walk(ch)
+        walk(self.tracker_box)
+        self.tracker_box.configure(text="Tracker: status, note and contacts (immediate, through trk)" if ids
+                                   else "Tracker (no tracker row for this posting)")
+        if getattr(self, "cv", None):
+            if ids and not self.cv["company"].get():
+                r = self.pg.execute("SELECT company FROM tracker.application WHERE app_id = %s", [int(ids[0])]).fetchone()
+                self.cv["company"].set(r["company"] if r else "")
 
     def show(self, text, ok=False):
         self.found.set(text)
@@ -311,6 +353,28 @@ class App:
             self.status.set("")
             self.lookup()          # refresh the tracker line first: lookup clears the message
         self.msg.set(("trk: " + out[-1]) if out else f"trk exited {res.returncode}")
+
+    def add_contact(self):
+        app, v = self.app.get(), {k: s.get().strip() for k, s in self.cv.items()}
+        if not app:
+            return self.msg.set("Look up a tracked application first (the contact is linked to its app ID).")
+        if not v["name"]:
+            return self.msg.set("A contact needs a name.")
+        if v["email"] and "@" not in v["email"]:
+            return self.msg.set("That email has no @.")
+        if v["linkedin"] and "linkedin.com/" not in v["linkedin"]:
+            return self.msg.set("The LinkedIn URL should contain linkedin.com/ (paste the profile link).")
+        cmd = [str(ROOT / "bin" / "trk"), "contact", app, v["name"], "--role", self.c_role.get() or "recruiter"]
+        for k in ("title", "company", "email", "phone", "linkedin"):
+            if v[k]:
+                cmd += [f"--{k}", v[k]]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        out = (res.stdout + res.stderr).strip().splitlines()
+        if res.returncode == 0:
+            for k in ("name", "title", "email", "phone", "linkedin"):
+                self.cv[k].set("")
+            self.lookup()        # shows the new contact in the lookup line; lookup clears the message
+        self.msg.set(("trk: " + out[0]) if out else f"trk exited {res.returncode}")
 
     def undo(self):
         for item in self.tree.selection():

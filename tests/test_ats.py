@@ -101,6 +101,51 @@ def test_truncated_pull_never_closes(tmp_path):
     assert con.execute("SELECT count(*) FROM postings WHERE status = 'active'").fetchone()[0] == 2
 
 
+def test_close_moved_board_postings_closes_only_the_old_board(tmp_path):
+    """Spring Health moved Greenhouse -> Ashby: its Greenhouse rows must close, its Ashby rows,
+    another employer's Greenhouse rows and its own bridge rows must not."""
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t1, t2 = datetime(2026, 9, 14), datetime(2026, 10, 22)
+    store.record_board(con, "Spring Health", "greenhouse", [_job("G1"), _job("G2")], t1)
+    store.record_board(con, "Other", "greenhouse", [_job("O1")], t1)
+    store.record_board(con, "Spring Health", "ashby", [_job("A1")], t2)
+    moved = store.close_moved_board_postings(con, "Spring Health", "ashby", t2)
+    assert moved == {"greenhouse": 2}
+    rows = {(r[0], r[1]): r[2] for r in con.execute("SELECT employer, req_id, status FROM postings").fetchall()}
+    assert rows == {("Spring Health", "G1"): "closed", ("Spring Health", "G2"): "closed",
+                    ("Other", "O1"): "active", ("Spring Health", "A1"): "active"}
+    assert store.close_moved_board_postings(con, "Spring Health", "ashby", t2) == {}  # idempotent
+
+
+def _sweep_with(monkeypatch, con, row, jobs):
+    from backend.ats import adapters as A
+    from backend.ats import sweep as ats_sweep
+    monkeypatch.setattr(A, "list_jobs", lambda r, max_pages=None, scope=None: jobs)
+    logged = []
+    stats = ats_sweep.sweep(con, [row], workers=1, log=logged.append)
+    return stats, logged
+
+
+def test_sweep_closes_an_employers_old_board_after_a_clean_pull(tmp_path, monkeypatch):
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    store.record_board(con, "Spring Health", "greenhouse", [_job("G1")], datetime(2026, 9, 14))
+    row = {"employer": "Spring Health", "platform": "ashby"}
+    stats, logged = _sweep_with(monkeypatch, con, row, [_job("A1")])
+    assert con.execute("SELECT status FROM postings WHERE req_id = 'G1'").fetchone()[0] == "closed"
+    assert stats["closed"] == 1
+    assert any("old greenhouse board" in line for line in logged)
+
+
+def test_sweep_never_closes_an_old_board_on_a_truncated_or_empty_pull(tmp_path, monkeypatch):
+    from backend.ats import adapters as A
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    store.record_board(con, "Spring Health", "greenhouse", [_job("G1")], datetime(2026, 9, 14))
+    row = {"employer": "Spring Health", "platform": "ashby"}
+    _sweep_with(monkeypatch, con, row, [])                                   # clean but empty
+    _sweep_with(monkeypatch, con, row, A.Truncated([_job("A1")]))            # truncated
+    assert con.execute("SELECT status FROM postings WHERE req_id = 'G1'").fetchone()[0] == "active"
+
+
 def test_description_is_never_blanked_by_a_thin_list_pull(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     t1, t2 = datetime(2026, 9, 14), datetime(2026, 9, 15)

@@ -121,6 +121,7 @@ class App:
         ttk.Label(t, text="App ID").grid(row=0, column=0, sticky="w")
         self.app = ttk.Combobox(t, state="readonly", width=8)
         self.app.grid(row=0, column=1, padx=(4, 12))
+        self.app.bind("<<ComboboxSelected>>", self.sync_company)
         statuses = [r["status"] for r in self.pg.execute("SELECT status FROM tracker.status ORDER BY sort_order")]
         self.status = ttk.Combobox(t, state="readonly", values=[""] + statuses, width=16)
         self.status.grid(row=0, column=2, padx=(0, 12))
@@ -267,9 +268,13 @@ class App:
         self.tracker_box.configure(text="Tracker: status, note and contacts (immediate, through trk)" if ids
                                    else "Tracker (no tracker row for this posting)")
         if getattr(self, "cv", None):
-            if ids and not self.cv["company"].get():
-                r = self.pg.execute("SELECT company FROM tracker.application WHERE app_id = %s", [int(ids[0])]).fetchone()
-                self.cv["company"].set(r["company"] if r else "")
+            self.sync_company()
+
+    def sync_company(self, _e=None):
+        """Company always follows the selected tracker row (a new lookup or another App ID), never the last entry."""
+        app = self.app.get()
+        r = self.pg.execute("SELECT company FROM tracker.application WHERE app_id = %s", [int(app)]).fetchone() if app else None
+        self.cv["company"].set(r["company"] if r else "")
 
     def show(self, text, ok=False):
         self.found.set(text)

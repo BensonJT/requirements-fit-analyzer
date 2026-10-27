@@ -9,3 +9,6 @@ cd "$(dirname "$0")/.." || exit 1
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 mkdir -p logs
 { echo "== $(date '+%F %T')"; .venv/bin/python -m backend.inbox_watch run; } >> logs/inbox_watch.log 2>&1
+# Same hourly slot: apply decisions queued by the feedback applet (jobs.decision_queue). While a pipeline run
+# holds the DuckDB it exits 1 and the rows wait for the run's own apply points. Log: logs/apply_queue.log.
+{ echo "== $(date '+%F %T')"; .venv/bin/python finder.py apply-queue; } >> logs/apply_queue.log 2>&1

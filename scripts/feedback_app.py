@@ -94,17 +94,20 @@ class App:
         ttk.Label(d, text="Unmet JD line").grid(row=3, column=0, sticky="w", pady=3)
         self.unmet = tk.StringVar()
         self.unmet_entry = ttk.Entry(d, textvariable=self.unmet)
-        self.unmet_entry.grid(row=3, column=1, sticky="ew", pady=3)
-        ttk.Label(d, text="Lens grades (optional)").grid(row=4, column=0, sticky="w", pady=3)
+        self.unmet_entry.grid(row=3, column=1, sticky="ew", pady=(3, 0))
+        self.unmet_hint = tk.StringVar()
+        ttk.Label(d, textvariable=self.unmet_hint, foreground="#666", font=("TkDefaultFont", 9), wraplength=600).grid(
+            row=4, column=1, sticky="w", pady=(0, 3))
+        ttk.Label(d, text="Lens grades (optional)").grid(row=5, column=0, sticky="w", pady=3)
         lf = ttk.Frame(d)
-        lf.grid(row=4, column=1, sticky="w", pady=3)
+        lf.grid(row=5, column=1, sticky="w", pady=3)
         self.lens = {}
         for k, label in (("process", "Process"), ("technical", "Technical"), ("ai", "AI")):
             ttk.Label(lf, text=label).pack(side="left", padx=(0, 4))
             self.lens[k] = ttk.Combobox(lf, state="readonly", values=GRADES, width=10)
             self.lens[k].pack(side="left", padx=(0, 14))
         self.reason.bind("<<ComboboxSelected>>", lambda _e: self.sync_fields())
-        ttk.Button(d, text="Submit decision", command=self.submit).grid(row=5, column=1, sticky="e", pady=(6, 0))
+        ttk.Button(d, text="Submit decision", command=self.submit).grid(row=6, column=1, sticky="e", pady=(6, 0))
 
         t = ttk.LabelFrame(f, text="Tracker (immediate, through trk)", padding=8)
         t.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -232,6 +235,17 @@ class App:
         code = self.reason.get().split(":")[0]
         wants_unmet = self.decision.get() == "build" or (is_pass and code == "requirement")
         self.unmet_entry.configure(state="normal" if wants_unmet else "disabled")
+        decision = self.decision.get()
+        if decision == "build":
+            hint = ("Optional: a Required line you do NOT meet but are applying anyway, pasted word for word. "
+                    "Blank means you meet every Required line. A partial weak spot goes in Comment. Several: join with ||")
+        elif wants_unmet:
+            hint = "The Required line you don't meet, pasted word for word from the posting. Several: join with ||"
+        elif is_pass:
+            hint = "Only for a pass with reason 'requirement'; other reasons say nothing about the Required block."
+        else:
+            hint = "Not used for Hold or Grades only: they make no Required-block claim."
+        self.unmet_hint.set(hint)
 
     # ---------------------------------------------------------------- writes
     def submit(self):

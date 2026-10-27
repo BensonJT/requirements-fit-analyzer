@@ -74,7 +74,7 @@ class App:
         self.pid = self.app_ids = None
         self.last_clip = ""
         root.title("Job feedback")
-        root.minsize(820, 860)
+        root.minsize(820, 640)
         root.option_add("*Dialog.msg.font", "TkDefaultFont 10")   # the X11 messagebox default is oversized
         f = ttk.Frame(root, padding=10)
         f.pack(fill="both", expand=True)
@@ -532,7 +532,18 @@ class App:
 
 
 def main():
+    # One copy at a time: a second launch (a double-click on the shortcut) exits instead of stacking windows.
+    import fcntl
+    lock = open(Path.home() / ".cache" / "feedback_app.lock", "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("feedback_app is already open")
+        return
     root = tk.Tk()
+    # Open at the top-left of the desktop: with two monitors WSLg once placed it where neither monitor shows.
+    h = min(960, root.winfo_screenheight() - 120)
+    root.geometry(f"1060x{h}+40+40")
     App(root)
     root.mainloop()
 

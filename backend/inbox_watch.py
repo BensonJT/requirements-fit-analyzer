@@ -231,8 +231,16 @@ def _match(cls: dict, m: dict, body: str, rows: list[dict]) -> tuple[dict | None
             return in_text[0], "req id in text"
         return None, "several:" + ",".join(str(r["app_id"]) for r in in_text)
     name, addr = sender(m)
-    blob = compact(" ".join([cls.get("company") or "", name, addr, m.get("subject") or ""]))
-    by_co = [r for r in rows if any(k in blob for k in company_keys(r["company"]))]
+    # The classifier's company and the sender may match on any key; the subject only on a full company name,
+    # because a first-word key can be an ordinary role word ('forward' in "Forward Deployed Engineer" once
+    # matched a company named for that word).
+    who = compact(" ".join([cls.get("company") or "", name, addr]))
+    subj = compact(m.get("subject") or "")
+    def names_it(r: dict) -> bool:
+        keys = company_keys(r["company"])
+        return any(k in who for k in keys) or any(k == compact(s) and k in subj
+                                                  for s in r["company"].split("/") for k in keys)
+    by_co = [r for r in rows if names_it(r)]
     if not by_co:
         return None, "no tracker row for this company"
     if len(by_co) == 1:

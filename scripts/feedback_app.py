@@ -106,6 +106,7 @@ class App:
         ttk.Entry(t, textvariable=self.note).grid(row=0, column=3, sticky="ew")
         ttk.Button(t, text="Set status", command=self.set_status).grid(row=0, column=4, padx=(8, 0))
         self.tracker_box = t
+        self.fill_tracker()
 
         self.msg = tk.StringVar()
         ttk.Label(f, textvariable=self.msg, foreground="#933", wraplength=700).grid(row=4, column=0, columnspan=3, sticky="w", pady=6)
@@ -115,7 +116,7 @@ class App:
         f.rowconfigure(5, weight=1)
         cols = ("id", "sub", "role", "decision", "reason", "state")
         self.tree = ttk.Treeview(q, columns=cols, show="headings", height=8)
-        for c, w in zip(cols, (50, 90, 260, 60, 220, 200)):
+        for c, w in zip(cols, (50, 100, 260, 80, 220, 200)):
             self.tree.heading(c, text=c.capitalize() if c != "sub" else "Submitted")
             self.tree.column(c, width=w, stretch=c in ("role", "reason", "state"))
         self.tree.pack(fill="both", expand=True)
@@ -190,6 +191,13 @@ class App:
         ids = [str(i) for i in self.app_ids or []]
         self.app.configure(values=ids)
         self.app.set(ids[0] if ids else "")
+        # No tracker row: grey the box out so it doesn't look usable (a pass needs no tracker row).
+        for w in self.tracker_box.winfo_children():
+            try:
+                w.configure(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if ids else "disabled")
+            except tk.TclError:
+                pass
+        self.tracker_box.configure(text="Tracker (immediate, through trk)" if ids else "Tracker (no tracker row for this posting)")
 
     def show(self, text, ok=False):
         self.found.set(text)

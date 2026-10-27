@@ -86,7 +86,7 @@ class App:
         for v, label in (("seen", "Seen"), ("blind", "Blind")):
             ttk.Radiobutton(rb, text=label, value=v, variable=self.basis, command=self.render_found).pack(side="left", padx=(4, 6))
         ttk.Label(d, text="Reason").grid(row=1, column=0, sticky="w", pady=3)
-        self.reason = ttk.Combobox(d, state="readonly", values=[f"{c}: {t}" for c, t in REASONS])
+        self.reason = ttk.Combobox(d, state="readonly", values=[""] + [f"{c}: {t}" for c, t in REASONS])
         self.reason.grid(row=1, column=1, sticky="ew", pady=3)
         ttk.Label(d, text="Comment").grid(row=2, column=0, sticky="w", pady=3)
         self.comment = tk.StringVar()
@@ -107,7 +107,10 @@ class App:
             self.lens[k] = ttk.Combobox(lf, state="readonly", values=GRADES, width=10)
             self.lens[k].pack(side="left", padx=(0, 14))
         self.reason.bind("<<ComboboxSelected>>", lambda _e: self.sync_fields())
-        ttk.Button(d, text="Submit decision", command=self.submit).grid(row=6, column=1, sticky="e", pady=(6, 0))
+        btns = ttk.Frame(d)
+        btns.grid(row=6, column=1, sticky="e", pady=(6, 0))
+        ttk.Button(btns, text="Clear", command=self.clear_form).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Submit decision", command=self.submit).pack(side="left")
 
         t = ttk.LabelFrame(f, text="Tracker (immediate, through trk)", padding=8)
         t.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -231,9 +234,13 @@ class App:
 
     def sync_fields(self):
         is_pass = self.decision.get() == "pass"   # a reason only for a pass; Grades only takes no reason or unmet
+        if not is_pass:
+            self.reason.set("")                    # a leftover pass reason must not ride along greyed out
         self.reason.configure(state="readonly" if is_pass else "disabled")
         code = self.reason.get().split(":")[0]
         wants_unmet = self.decision.get() == "build" or (is_pass and code == "requirement")
+        if not wants_unmet:
+            self.unmet.set("")
         self.unmet_entry.configure(state="normal" if wants_unmet else "disabled")
         decision = self.decision.get()
         if decision == "build":
@@ -246,6 +253,17 @@ class App:
         else:
             hint = "Not used for Hold or Grades only: they make no Required-block claim."
         self.unmet_hint.set(hint)
+
+    def clear_form(self):
+        """Back to a fresh form: Pass, no reason, no comment, unmet or lens grades. Keeps the posting and Basis."""
+        self.decision.set("pass")
+        self.reason.set("")
+        self.comment.set("")
+        self.unmet.set("")
+        for c in self.lens.values():
+            c.set("")
+        self.msg.set("")
+        self.sync_fields()
 
     # ---------------------------------------------------------------- writes
     def submit(self):
@@ -271,10 +289,8 @@ class App:
                             "grade_technical, grade_ai) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING queue_id",
                             [self.pid, decision, reason, unmet or None, self.basis.get(), *lens]).fetchone()
         self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))
-        self.comment.set("")
-        self.unmet.set("")
-        for c in self.lens.values():
-            c.set("")
+        self.clear_form()
+        self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))
         self.refresh()
 
     def set_status(self):

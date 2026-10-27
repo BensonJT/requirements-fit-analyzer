@@ -13,6 +13,10 @@ phone, LinkedIn URL) through `trk contact`, and the Tracker box changes the appl
 with the status left blank, adds the comment as a note through `trk note` (immediate: the tracker is
 Postgres already).
 
+The contacts on file for the rows found are listed under the Tracker box (double-click a cell to copy it).
+"Apply queue + refresh snapshot" runs scripts/refresh_now.sh (apply-queue, pg_snapshot, the report rebuild)
+and stops cleanly when a pipeline run holds the database.
+
 When the window gains focus and the clipboard holds a posting ID, it fills the ID box and looks it up.
 
     .venv/bin/python scripts/feedback_app.py
@@ -58,7 +62,7 @@ class App:
         self.pid = self.app_ids = None
         self.last_clip = ""
         root.title("Job feedback")
-        root.minsize(780, 720)
+        root.minsize(820, 860)
         f = ttk.Frame(root, padding=10)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
@@ -151,14 +155,25 @@ class App:
         ttk.Entry(c, textvariable=self.cv["linkedin"]).grid(row=3, column=1, columnspan=2, sticky="ew", pady=2)
         ttk.Button(c, text="Add contact", command=self.add_contact).grid(row=3, column=3, sticky="e", pady=2)
         self.contact_box = c
+
+        # Contacts already on file for the rows found: a read-only list; double-click a cell to copy it.
+        k = ttk.LabelFrame(f, text="Contacts on file (double-click a cell to copy it)", padding=6)
+        k.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ccols = ("id", "app", "name", "role", "title", "email", "phone", "linkedin")
+        self.ctree = ttk.Treeview(k, columns=ccols, show="headings", height=4)
+        for col, w in zip(ccols, (40, 50, 140, 100, 180, 190, 100, 220)):
+            self.ctree.heading(col, text="#" if col == "id" else col.capitalize())
+            self.ctree.column(col, width=w, stretch=col in ("title", "email", "linkedin"))
+        self.ctree.pack(fill="x")
+        self.ctree.bind("<Double-1>", self.copy_cell)
         self.fill_tracker()
 
         self.msg = tk.StringVar()
-        ttk.Label(f, textvariable=self.msg, foreground="#933", wraplength=700).grid(row=4, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Label(f, textvariable=self.msg, foreground="#933", wraplength=760).grid(row=5, column=0, columnspan=3, sticky="w", pady=6)
 
         q = ttk.LabelFrame(f, text="Recent queued decisions", padding=6)
-        q.grid(row=5, column=0, columnspan=3, sticky="nsew")
-        f.rowconfigure(5, weight=1)
+        q.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        f.rowconfigure(6, weight=1)
         cols = ("id", "sub", "role", "decision", "reason", "state")
         self.tree = ttk.Treeview(q, columns=cols, show="headings", height=8)
         for c, w in zip(cols, (50, 100, 260, 100, 220, 200)):
@@ -168,6 +183,8 @@ class App:
         bar = ttk.Frame(q)
         bar.pack(fill="x", pady=(4, 0))
         ttk.Button(bar, text="Undo selected (pending only)", command=self.undo).pack(side="left")
+        self.refresh_btn = ttk.Button(bar, text="Apply queue + refresh snapshot", command=self.run_refresh)
+        self.refresh_btn.pack(side="left", padx=(10, 0))
         self.on_top = tk.BooleanVar()
         ttk.Checkbutton(bar, text="Keep on top", variable=self.on_top,
                         command=lambda: root.attributes("-topmost", self.on_top.get())).pack(side="right")
@@ -265,6 +282,8 @@ class App:
                     pass
                 walk(ch)
         walk(self.tracker_box)
+        if getattr(self, "ctree", None):
+            self.fill_contacts()
         self.tracker_box.configure(text="Tracker: status, note and contacts (immediate, through trk)" if ids
                                    else "Tracker (no tracker row for this posting)")
         if getattr(self, "cv", None):
@@ -393,6 +412,54 @@ class App:
         self.tree.delete(*self.tree.get_children())
         for r in self.pg.execute(QUEUE_SQL):
             self.tree.insert("", "end", values=(r["queue_id"], r["sub"], r["role"], r["decision"], r["reason"], r["state"]))
+
+    def fill_contacts(self):
+        self.ctree.delete(*self.ctree.get_children())
+        if not self.app_ids:
+            return
+        for r in self.pg.execute(
+                "SELECT c.contact_id, ac.app_id, c.name, ac.role, c.title, c.email, c.phone, c.linkedin "
+                "FROM tracker.app_contact ac JOIN tracker.contact c USING (contact_id) WHERE ac.app_id = ANY(%s) "
+                "ORDER BY ac.app_id, c.name", [list(self.app_ids)]):
+            self.ctree.insert("", "end", values=[" ".join(str(r[k] or "").split()) for k in
+                                                 ("contact_id", "app_id", "name", "role", "title", "email", "phone", "linkedin")])
+
+    def copy_cell(self, e):
+        row, col = self.ctree.identify_row(e.y), self.ctree.identify_column(e.x)
+        if not row or not col:
+            return
+        val = self.ctree.item(row, "values")[int(col[1:]) - 1]
+        if val:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(val)
+            self.last_clip = val          # so the clipboard watcher doesn't treat it as a new posting ID
+            self.msg.set(f"Copied: {val}")
+
+    # ---------------------------------------------------------------- on-demand refresh
+    def run_refresh(self):
+        """scripts/refresh_now.sh in a background thread: apply the queue, snapshot, rebuild the report.
+        It stops cleanly (exit 2) when a pipeline run holds the database."""
+        import threading
+        self.refresh_btn.configure(state="disabled")
+        self.msg.set("Refreshing: applying the queue, taking a snapshot, rebuilding the report (a minute or two)...")
+        self._refresh_result = None
+
+        def work():
+            res = subprocess.run([str(ROOT / "scripts" / "refresh_now.sh")], capture_output=True, text=True)
+            lines = [l for l in (res.stdout + res.stderr).splitlines() if l.strip()]
+            self._refresh_result = (res.returncode, lines)
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(1000, self.poll_refresh)
+
+    def poll_refresh(self):
+        if self._refresh_result is None:
+            self.root.after(1000, self.poll_refresh)
+            return
+        rc, lines = self._refresh_result
+        final = next((l for l in reversed(lines) if l.startswith(("DONE", "LOCKED", "FAILED"))), lines[-1] if lines else "")
+        self.msg.set(final + ("" if rc in (0, 2) else "  (log: logs/refresh_now.log)"))
+        self.refresh_btn.configure(state="normal")
+        self.refresh()
 
     def tick(self):
         """Refresh the queue list every minute, so applied / refused states show up on their own."""

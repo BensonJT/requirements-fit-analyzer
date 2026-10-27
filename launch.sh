@@ -286,6 +286,7 @@ preflight() {
 echo
 echo "───────────────────────────────────────────────────────────────────────"
 for s in "${STEPS[@]}"; do echo "  step    : $(step_cmd "$s")"; done
+echo "  step    : $PY -u finder.py apply-queue   (first, and again before the snapshot; non-fatal)"
 echo "  step    : $PY -u scripts/pg_snapshot.py   (always last, non-fatal)"
 [ "$USES_JUDGE" = true ] && echo "  judge   : Gemma second judge ON, fact sheet $(basename "$JUDGE_BG")"
 [ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); jevtop = the demotion pass over Apply / Review"
@@ -370,6 +371,14 @@ export PYTHONUNBUFFERED=1
 
 RUN_STARTED=$(date +%s)
 STATUS=0
+# Decisions queued in Postgres while the DuckDB was locked (feedback applet): apply them before the run reads
+# decisions, and again before the snapshot. Non-fatal; a refused row keeps its apply_error for the user.
+apply_queue() {
+  echo
+  echo "════ $(date '+%H:%M:%S')  $PY -u finder.py apply-queue"
+  "$PY" -u finder.py apply-queue || echo "launch: apply-queue failed (non-fatal; the rows wait for the next try)"
+}
+apply_queue
 for s in "${STEPS[@]}"; do
   CMD="$(step_cmd "$s")"
   echo
@@ -385,6 +394,8 @@ for s in "${STEPS[@]}"; do
     [ "$s" = "top" ] || [ "$s" = "jevtop" ] || echo "launch: step failed -- continuing so the report is still written"
   fi
 done
+
+apply_queue
 
 # Last step, non-fatal: snapshot the fit population into Postgres (jobs.fit_snapshot, DESIGN_tracker_db.md s7).
 # A failure only warns; STATUS (and so the run's exit code and timings line) is left as the steps set it.

@@ -261,7 +261,7 @@ CREATE TABLE IF NOT EXISTS tracker (
 
 CREATE TABLE IF NOT EXISTS decisions (
     posting_id VARCHAR NOT NULL, decision VARCHAR NOT NULL,   -- build | pass | hold
-    reason VARCHAR, source VARCHAR NOT NULL,                  -- file | cli | tracker
+    reason VARCHAR, source VARCHAR NOT NULL,                  -- file | cli | tracker | queue
     source_ref VARCHAR, decided_at TIMESTAMP NOT NULL,
     PRIMARY KEY (posting_id, source, decided_at)
 );

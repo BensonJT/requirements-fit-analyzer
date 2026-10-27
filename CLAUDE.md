@@ -32,7 +32,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
 - `backend/ats/normalize.py` — one shape for every platform's fields
 - `backend/ats/store.py` — DuckDB schema v3 (finder tables added), transactional upsert/close, views + macros
 - `backend/ats/sweep.py` — orchestration (concurrent pulls, detail budget, then the finder stage)
-- **`finder.py`** — finder CLI: screen, rescreen-all, report, top, mark, sync, shortlist, labels, train, evidence, coverage, setup-check.
+- **`finder.py`** — finder CLI: screen, rescreen-all, report, top, mark, apply-queue, sync, shortlist, labels, train, evidence, coverage, setup-check.
   `mark`'s `--unmet "<JD line>"` (repeatable, with `--reason "requirement: ..."` or `"clearance: ..."`) records a
   human Required-block miss that outranks the judge everywhere; `mark <target> build` defaults to Required
   `meets` unless `--unmet` says otherwise. `--grade bullseye|adjacent|stretch|wrong` + `--basis blind|seen`
@@ -45,6 +45,7 @@ Two sweeps. `sweep_ats.py` reads employer ATS boards into DuckDB (the main engin
   later scoring. `feedback sheet-import PATH` writes the graded rows back as `basis='blind'` through the
   same path the golden-source CSV import uses, and prints precision at the top / the 200-600 miss rate /
   the false-reject rate per rule bucket, appended to `db/blind_sheet_history.jsonl`.
+- **Decision queue** (`db/pg/005_decision_queue.sql`, `jobs.decision_queue`): build / pass / hold calls made while a run holds the DuckDB. `scripts/feedback_app.py` (tkinter; `scripts/feedback_app.vbs` launches it from Windows) queues them and changes tracker status through `trk set`; `finder.py apply-queue` replays them with `mark`'s checks (decided_at = submitted_at, source `queue`), run by `launch.sh` at the start and before the snapshot and hourly by `scripts/inbox_watch.sh`. Rows are kept: applied_at / apply_error / cancelled_at.
 - `backend/tracker/`: the application tracker in PostgreSQL (`resume` DB, schemas `tracker` + `jobs`). `store` is the only writer and logs one event per write; `render` writes the markdown view; `gsheet` writes the one-way Google Sheet view; `cli` is `bin/trk` (`trk --help` is the command reference). The design lives in the user's vault.
 - `backend/finder/` — rules (JD-text rules on top of `screen.py`), pipeline (screen + combine + daily), tracker_sync, report (Jobs_Found + snapshots + decision read-back), labels (vault label loaders → `label_docs`), features (TF-IDF + logistic regression fit model; `db/models/`, gitignored), evidence (manifest `evidence.local.toml` → `evidence_units`), requirements (JD → requirement units), embed (bge-small encoder), coverage (requirement coverage + calibration; Phase 3a = stored and shown, weight 0), required_embed (the "second layer" stacked model: TF-IDF + bge-base Required-block embedding + per-line roll-up -> `embed_required`, own `required_embed` table, NOT a lens), blind_sheet (the monthly blind sheet with decoys, §26), setup_check. scikit-learn and the embedding libraries are optional and imported lazily. Context setup for any user: `docs/SETUP_CONTEXT.md`
 - `tests/test_ats.py`, `tests/test_finder.py`, `tests/test_blind_sheet.py` — run with `.venv/bin/python -m pytest -q`

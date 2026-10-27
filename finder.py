@@ -15,6 +15,7 @@ Usage:
         --unmet "Active TS/SCI clearance required" --basis blind
     .venv/bin/python finder.py mark <target> build --grade bullseye --basis blind
     .venv/bin/python finder.py mark --from-file decisions.csv   # one row per reviewed posting
+    .venv/bin/python finder.py apply-queue [--dry-run]          # apply jobs.decision_queue (feedback applet)
     .venv/bin/python finder.py shortlist --days 7 --n 30
     .venv/bin/python finder.py labels --report                # rebuild label_docs from the vault
     .venv/bin/python finder.py labels --reanchor [--dry-run]  # recover judge labels a re-fetched JD expired
@@ -380,7 +381,9 @@ examples:
 
 DuckDB lock:
   mark writes to the pipeline DuckDB. While a sweep or launch.sh run holds it, mark stops with a
-  message and writes nothing; run it again when the run finishes.
+  message and writes nothing; run it again when the run finishes. To decide during a run, submit the
+  call to the Postgres queue instead (scripts/feedback_app.py, table jobs.decision_queue); apply-queue
+  writes it here at the next launch start, just before the snapshot, or within the hour.
 """
 
 
@@ -446,8 +449,8 @@ def _prepare_mark(con, pid: str, decision: str, reason, unmet: list, grade, basi
            "description_hash": description_hash}
 
 
-def _apply_mark(con, pid: str, decision: str, prep: dict, now) -> None:
-    con.execute("INSERT INTO decisions VALUES (?, ?, ?, 'cli', NULL, ?)", [pid, decision, prep["reason"], now])
+def _apply_mark(con, pid: str, decision: str, prep: dict, now, source: str = "cli", source_ref=None) -> None:
+    con.execute("INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?)", [pid, decision, prep["reason"], source, source_ref, now])
     if prep["required_fit"] is not None or prep["grade"] is not None:
         from backend.finder import feedback
         feedback.record_mark(con, pid, prep["description_hash"], decision, reason_code=prep["reason_code"],
@@ -520,6 +523,58 @@ def cmd_mark_from_file(con, a):
     by_decision = Counter(row["decision"] for row in parsed)
     print(f"mark --from-file: applied {len(parsed)} decisions from {len(raw_rows)} rows "
          f"({', '.join(f'{k}={v}' for k, v in sorted(by_decision.items()))})")
+
+
+QUEUE_PENDING_SQL = """SELECT queue_id, posting_id, decision, reason, unmet, grade, basis, submitted_at FROM jobs.decision_queue
+WHERE applied_at IS NULL AND cancelled_at IS NULL AND apply_error IS NULL ORDER BY submitted_at, queue_id"""
+
+
+def cmd_apply_queue(con, a):
+    """`finder.py apply-queue`: replay pending jobs.decision_queue rows (Postgres) as marks. Each row goes
+    through the same resolve + _prepare_mark validation as `mark`; a valid row is written to `decisions`
+    (source 'queue', source_ref 'queue:<id>', decided_at = submitted_at) and stamped applied_at, a refused one gets apply_error and is
+    left for the user to fix and resubmit. Rows are never deleted (the queue is the audit trail)."""
+    import psycopg
+    from backend.tracker import db as pgdb
+    try:
+        pg = pgdb.connect()
+    except psycopg.OperationalError as e:
+        sys.exit(f"apply-queue: Postgres is unreachable; nothing applied ({str(e).splitlines()[0]})")
+    with pg:
+        rows = pg.execute(QUEUE_PENDING_SQL).fetchall()
+        if not rows:
+            print("apply-queue: nothing pending")
+            return
+        done = Counter()
+        for r in rows:
+            qid = r["queue_id"]
+            # Dated when the user made the call, not when the queue drained: keeps "latest mark wins" true to
+            # the order of submission, and two calls on one posting can't collide on decisions' primary key.
+            decided_at = r["submitted_at"].astimezone(timezone.utc).replace(tzinfo=None)
+            try:
+                hits = resolve_posting(con, r["posting_id"])
+                if len(hits) != 1:
+                    raise ValueError(f"posting {r['posting_id']!r} matched {len(hits)} postings, need exactly one")
+                pid, employer, title, _ = hits[0]
+                unmet = [u.strip() for u in (r["unmet"] or "").split("||") if u.strip()]
+                prep = _prepare_mark(con, pid, r["decision"], r["reason"], unmet, r["grade"], r["basis"])
+            except ValueError as e:
+                done["refused"] += 1
+                print(f"  queue {qid}: refused: {e}")
+                if not a.dry_run:
+                    pg.execute("UPDATE jobs.decision_queue SET apply_error = %s WHERE queue_id = %s", [str(e), qid])
+                continue
+            done[r["decision"]] += 1
+            print(f"  queue {qid}: {r['decision']}: {pid}  {employer} | {title}")
+            if a.dry_run:
+                continue
+            con.execute("BEGIN")
+            _apply_mark(con, pid, r["decision"], prep, decided_at, source="queue", source_ref=f"queue:{qid}")
+            con.execute("COMMIT")
+            # DuckDB first: if this stamp fails the row is replayed next time, and the latest mark wins anyway.
+            pg.execute("UPDATE jobs.decision_queue SET applied_at = now() WHERE queue_id = %s", [qid])
+    print(f"apply-queue: {'checked' if a.dry_run else 'applied'} {sum(done.values())} queued row(s) "
+          f"({', '.join(f'{k}={v}' for k, v in sorted(done.items()))})" + (" -- dry run, nothing written" if a.dry_run else ""))
 
 
 def cmd_sync(con, a):
@@ -919,6 +974,16 @@ def main():
     s.add_argument("--from-file", help="apply a whole review session at once -- CSV columns: "
                                        "posting,decision,reason,unmet,grade,basis (unmet ' || '-joined)")
     s.set_defaults(func=cmd_mark)
+
+    s = sub.add_parser("apply-queue", parents=[common],
+                       help="apply pending build / pass / hold calls from the Postgres queue (jobs.decision_queue, "
+                            "written by scripts/feedback_app.py) with the same checks as mark",
+                       epilog="Each pending row is validated like `mark`: applied rows are stamped applied_at, refused "
+                              "ones get apply_error (shown in the applet) and are not retried. launch.sh runs it at the "
+                              "start and just before the snapshot; scripts/inbox_watch.sh runs it hourly. While a run "
+                              "holds the DuckDB it exits 1 and the rows wait. Postgres down: exits 1, nothing applied.")
+    s.add_argument("--dry-run", action="store_true", help="validate and list the pending rows; write nothing to either database")
+    s.set_defaults(func=cmd_apply_queue)
 
     s = sub.add_parser("sync", parents=[common],
                        help="rebuild the DuckDB tracker table from $TRACKER_SOURCE (postgres: tracker.application, "

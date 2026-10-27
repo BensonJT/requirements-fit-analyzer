@@ -2,7 +2,8 @@
 """Feedback applet: record a build / pass / hold call on a posting without waiting for the DuckDB lock.
 
 A small desktop window (tkinter). Paste a posting ID (20 hex), a tracker app ID, or a posting URL; the
-window shows the employer and title, then queues the call in Postgres (jobs.decision_queue). Nothing here
+window shows the employer and title, then queues the call (with optional Process / Technical / AI lens
+grades, which train the lens models) in Postgres (jobs.decision_queue). Nothing here
 touches the pipeline DuckDB: `finder.py apply-queue` writes queued calls into it at the next launch start,
 just before the snapshot, or within the hour (scripts/inbox_watch.sh), with the same checks as
 `finder.py mark`. A refused call shows its reason in the queue list; fix it and submit again.
@@ -38,7 +39,8 @@ NEEDS_COMMENT = {"nuance", "other"}
 GRADES = ["", "bullseye", "adjacent", "stretch", "wrong"]
 QUEUE_SQL = """
 SELECT q.queue_id, to_char(q.submitted_at, 'MM-DD HH24:MI') AS sub,
-       coalesce(f.employer || ' | ' || f.title, q.posting_id) AS role, q.decision, coalesce(q.reason, '') AS reason,
+       coalesce(f.employer || ' | ' || f.title, q.posting_id) AS role, q.decision || CASE WHEN q.basis = 'blind' THEN ' (blind)' ELSE '' END AS decision,
+       concat_ws('  ·  ', q.reason, 'P ' || q.grade_process, 'T ' || q.grade_technical, 'AI ' || q.grade_ai) AS reason,
        CASE WHEN q.cancelled_at IS NOT NULL THEN 'undone'
             WHEN q.applied_at IS NOT NULL THEN 'applied ' || to_char(q.applied_at, 'MM-DD HH24:MI')
             WHEN q.apply_error IS NOT NULL THEN 'REFUSED: ' || q.apply_error
@@ -75,8 +77,14 @@ class App:
         self.decision = tk.StringVar(value="pass")
         rb = ttk.Frame(d)
         rb.grid(row=0, column=0, columnspan=2, sticky="w")
-        for v, label in (("pass", "Pass"), ("build", "Build"), ("hold", "Hold")):
+        for v, label in (("pass", "Pass"), ("build", "Build"), ("hold", "Hold"), ("grade", "Grades only")):
             ttk.Radiobutton(rb, text=label, value=v, variable=self.decision, command=self.sync_fields).pack(side="left", padx=(0, 14))
+        # Blind = graded from the posting alone, before any score, rank, Jev call or opinion was seen. Blind grades
+        # can measure the models; seen ones only train them. Blind mode hides the machine's calls in the lookup.
+        self.basis = tk.StringVar(value="seen")
+        ttk.Label(rb, text="   Basis:").pack(side="left")
+        for v, label in (("seen", "Seen"), ("blind", "Blind")):
+            ttk.Radiobutton(rb, text=label, value=v, variable=self.basis, command=self.render_found).pack(side="left", padx=(4, 6))
         ttk.Label(d, text="Reason").grid(row=1, column=0, sticky="w", pady=3)
         self.reason = ttk.Combobox(d, state="readonly", values=[f"{c}: {t}" for c, t in REASONS])
         self.reason.grid(row=1, column=1, sticky="ew", pady=3)
@@ -87,9 +95,14 @@ class App:
         self.unmet = tk.StringVar()
         self.unmet_entry = ttk.Entry(d, textvariable=self.unmet)
         self.unmet_entry.grid(row=3, column=1, sticky="ew", pady=3)
-        ttk.Label(d, text="Lane grade (optional)").grid(row=4, column=0, sticky="w", pady=3)
-        self.grade = ttk.Combobox(d, state="readonly", values=GRADES, width=12)
-        self.grade.grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Label(d, text="Lens grades (optional)").grid(row=4, column=0, sticky="w", pady=3)
+        lf = ttk.Frame(d)
+        lf.grid(row=4, column=1, sticky="w", pady=3)
+        self.lens = {}
+        for k, label in (("process", "Process"), ("technical", "Technical"), ("ai", "AI")):
+            ttk.Label(lf, text=label).pack(side="left", padx=(0, 4))
+            self.lens[k] = ttk.Combobox(lf, state="readonly", values=GRADES, width=10)
+            self.lens[k].pack(side="left", padx=(0, 14))
         self.reason.bind("<<ComboboxSelected>>", lambda _e: self.sync_fields())
         ttk.Button(d, text="Submit decision", command=self.submit).grid(row=5, column=1, sticky="e", pady=(6, 0))
 
@@ -116,7 +129,7 @@ class App:
         f.rowconfigure(5, weight=1)
         cols = ("id", "sub", "role", "decision", "reason", "state")
         self.tree = ttk.Treeview(q, columns=cols, show="headings", height=8)
-        for c, w in zip(cols, (50, 100, 260, 80, 220, 200)):
+        for c, w in zip(cols, (50, 100, 260, 100, 220, 200)):
             self.tree.heading(c, text=c.capitalize() if c != "sub" else "Submitted")
             self.tree.column(c, width=w, stretch=c in ("role", "reason", "state"))
         self.tree.pack(fill="both", expand=True)
@@ -144,7 +157,7 @@ class App:
 
     def lookup(self):
         text = self.ident.get().strip()
-        self.pid, self.app_ids = None, []
+        self.pid, self.app_ids, self.found_parts = None, [], None
         if not text:
             return
         pg = self.pg
@@ -177,15 +190,25 @@ class App:
                              "AND cancelled_at IS NULL AND apply_error IS NULL", [self.pid]).fetchone()["n"]
         self.fill_tracker()
         if f:
-            parts = [f"{f['employer']} | {f['title']}", f"{f['location_primary'] or '?'} ({f['workplace_type'] or 'not stated'})",
-                     f"decision on record: {f['latest_decision'] or 'none'}", f"Jev: {f['jev_result'] or '-'}"]
+            base = [f"{f['employer']} | {f['title']}", f"{f['location_primary'] or '?'} ({f['workplace_type'] or 'not stated'})"]
+            machine = [f"decision on record: {f['latest_decision'] or 'none'}", f"Jev: {f['jev_result'] or '-'}"]
         else:
-            parts = [f"{self.pid}: not in the Postgres snapshot (it may still be in the pipeline; apply-queue will check)"]
+            base = [f"{self.pid}: not in the Postgres snapshot (it may still be in the pipeline; apply-queue will check)"]
+            machine = []
         if tracked:
-            parts.append("tracker: " + ", ".join(f"#{r['app_id']} {r['status']}" for r in tracked))
+            base.append("tracker: " + ", ".join(f"#{r['app_id']} {r['status']}" for r in tracked))
         if pending:
-            parts.append(f"{pending} call(s) already pending")
-        self.show("  ·  ".join(parts), ok=True)
+            base.append(f"{pending} call(s) already pending")
+        self.found_parts = (base, machine)
+        self.render_found()
+
+    def render_found(self):
+        """The lookup line; in Blind mode the machine's calls (decision on record, Jev) stay hidden."""
+        base, machine = getattr(self, "found_parts", None) or ([], [])
+        if not base:
+            return
+        hidden = self.basis.get() == "blind"
+        self.show("  ·  ".join(base + ([] if hidden else machine)) + ("  ·  (Blind: machine calls hidden)" if hidden and machine else ""))
 
     def fill_tracker(self):
         ids = [str(i) for i in self.app_ids or []]
@@ -204,7 +227,7 @@ class App:
         self.msg.set("")
 
     def sync_fields(self):
-        is_pass = self.decision.get() == "pass"
+        is_pass = self.decision.get() == "pass"   # a reason only for a pass; Grades only takes no reason or unmet
         self.reason.configure(state="readonly" if is_pass else "disabled")
         code = self.reason.get().split(":")[0]
         wants_unmet = self.decision.get() == "build" or (is_pass and code == "requirement")
@@ -226,14 +249,18 @@ class App:
             reason = f"{code}: {comment}" if comment else code
         elif comment:
             reason = comment
+        lens = [self.lens[k].get() or None for k in ("process", "technical", "ai")]
+        if decision == "grade" and not any(lens):
+            return self.msg.set("Grades only needs at least one lens grade.")
         unmet = self.unmet.get().strip() if str(self.unmet_entry.cget("state")) == "normal" else ""
-        r = self.pg.execute("INSERT INTO jobs.decision_queue (posting_id, decision, reason, unmet, grade) "
-                            "VALUES (%s, %s, %s, %s, %s) RETURNING queue_id",
-                            [self.pid, decision, reason, unmet or None, self.grade.get() or None]).fetchone()
-        self.msg.set(f"Queued #{r['queue_id']}: {decision} {self.pid}" + (f" ({reason})" if reason else ""))
+        r = self.pg.execute("INSERT INTO jobs.decision_queue (posting_id, decision, reason, unmet, basis, grade_process, "
+                            "grade_technical, grade_ai) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING queue_id",
+                            [self.pid, decision, reason, unmet or None, self.basis.get(), *lens]).fetchone()
+        self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))
         self.comment.set("")
         self.unmet.set("")
-        self.grade.set("")
+        for c in self.lens.values():
+            c.set("")
         self.refresh()
 
     def set_status(self):

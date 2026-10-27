@@ -106,3 +106,52 @@ def test_rows_apply_in_submission_order_so_the_latest_call_wins(pgc, duck):
     _queue(pgc, pid, "pass", "level: too junior")
     finder.cmd_apply_queue(con, Namespace(dry_run=False))
     assert con.execute("SELECT decision FROM decisions ORDER BY rowid").fetchall() == [("hold",), ("pass",)]
+
+
+def _with_jd(con, pid):
+    con.execute("UPDATE postings SET description_text = 'Lead process work.', description_hash = 'h1' WHERE posting_id = ?", [pid])
+
+
+def test_lens_grades_land_in_human_lens_grades(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    qid = _queue(pgc, pid, "build", grade_process="adjacent", grade_technical="bullseye")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert sorted(con.execute("SELECT lens, grade, basis, source_file FROM human_lens_grades").fetchall()) == [
+        ("process", "adjacent", "seen", f"queue:{qid}"), ("technical", "bullseye", "seen", f"queue:{qid}")]
+    assert con.execute("SELECT decision FROM decisions").fetchall() == [("build",)]
+    assert _row(pgc, qid)["applied_at"] is not None
+
+
+def test_lens_grades_without_jd_refuse_the_whole_call(pgc, duck):
+    con, pid = duck                      # no JD text: lens grades cannot be anchored to a description
+    qid = _queue(pgc, pid, "pass", "logistics: far", grade_ai="wrong")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+    assert "no JD text" in _row(pgc, qid)["apply_error"]
+
+
+def test_bad_lens_grade_is_refused(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    qid = _queue(pgc, pid, "hold", grade_ai="great")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "lens grade must be one of" in _row(pgc, qid)["apply_error"]
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+
+
+def test_grade_only_row_writes_lens_grades_and_no_decision(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    qid = _queue(pgc, pid, "grade", basis="blind", grade_ai="stretch")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+    assert con.execute("SELECT lens, grade, basis FROM human_lens_grades").fetchall() == [("ai", "stretch", "blind")]
+    assert _row(pgc, qid)["applied_at"] is not None
+
+
+def test_grade_only_row_without_grades_is_refused(pgc, duck):
+    con, pid = duck
+    qid = _queue(pgc, pid, "grade")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "needs at least one lens grade" in _row(pgc, qid)["apply_error"]

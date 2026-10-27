@@ -525,7 +525,8 @@ def cmd_mark_from_file(con, a):
          f"({', '.join(f'{k}={v}' for k, v in sorted(by_decision.items()))})")
 
 
-QUEUE_PENDING_SQL = """SELECT queue_id, posting_id, decision, reason, unmet, grade, basis, submitted_at FROM jobs.decision_queue
+QUEUE_PENDING_SQL = """SELECT queue_id, posting_id, decision, reason, unmet, grade, basis, submitted_at,
+       grade_process, grade_technical, grade_ai FROM jobs.decision_queue
 WHERE applied_at IS NULL AND cancelled_at IS NULL AND apply_error IS NULL ORDER BY submitted_at, queue_id"""
 
 
@@ -533,8 +534,11 @@ def cmd_apply_queue(con, a):
     """`finder.py apply-queue`: replay pending jobs.decision_queue rows (Postgres) as marks. Each row goes
     through the same resolve + _prepare_mark validation as `mark`; a valid row is written to `decisions`
     (source 'queue', source_ref 'queue:<id>', decided_at = submitted_at) and stamped applied_at, a refused one gets apply_error and is
-    left for the user to fix and resubmit. Rows are never deleted (the queue is the audit trail)."""
+    left for the user to fix and resubmit. Rows are never deleted (the queue is the audit trail).
+    Per-lens grades (grade_process / grade_technical / grade_ai) go to human_lens_grades through gold_ingest's
+    lens-sheet path, in the same DuckDB transaction as the decision: both land, or neither does."""
     import psycopg
+    from backend.finder import gold_ingest
     from backend.tracker import db as pgdb
     try:
         pg = pgdb.connect()
@@ -557,7 +561,19 @@ def cmd_apply_queue(con, a):
                     raise ValueError(f"posting {r['posting_id']!r} matched {len(hits)} postings, need exactly one")
                 pid, employer, title, _ = hits[0]
                 unmet = [u.strip() for u in (r["unmet"] or "").split("||") if u.strip()]
-                prep = _prepare_mark(con, pid, r["decision"], r["reason"], unmet, r["grade"], r["basis"])
+                lenses = {k: r[f"grade_{k}"] for k in gold_ingest.F4_LENS_COLUMNS if r[f"grade_{k}"]}
+                if r["decision"] == "grade":   # grades only: no decision, so nothing for _prepare_mark to check
+                    if not lenses:
+                        raise ValueError("a grades-only row needs at least one lens grade")
+                    prep = None
+                else:
+                    prep = _prepare_mark(con, pid, r["decision"], r["reason"], unmet, r["grade"], r["basis"])
+                bad = [f"{k}={g}" for k, g in lenses.items() if g not in rubric.GRADES]
+                if bad:
+                    raise ValueError(f"lens grade must be one of {', '.join(rubric.GRADES)}: {', '.join(bad)}")
+                if lenses and not con.execute("SELECT description_hash FROM postings WHERE posting_id = ?",
+                                              [pid]).fetchone()[0]:
+                    raise ValueError(f"{pid} has no JD text yet, so lens grades cannot be recorded against it")
             except ValueError as e:
                 done["refused"] += 1
                 print(f"  queue {qid}: refused: {e}")
@@ -569,7 +585,25 @@ def cmd_apply_queue(con, a):
             if a.dry_run:
                 continue
             con.execute("BEGIN")
-            _apply_mark(con, pid, r["decision"], prep, decided_at, source="queue", source_ref=f"queue:{qid}")
+            try:
+                if prep is not None:
+                    _apply_mark(con, pid, r["decision"], prep, decided_at, source="queue", source_ref=f"queue:{qid}")
+                if lenses:
+                    acc, fr = {}, gold_ingest.FileReport(f"queue:{qid}")
+                    raw = {"posting_id": pid, "note": r["reason"],
+                           **{gold_ingest.F4_LENS_COLUMNS[k]: g for k, g in lenses.items()}}
+                    gold_ingest.ingest_f4(con, fr, [(qid, raw)], r["basis"], f"queue:{qid}", acc)
+                    if fr.rejected or fr.skipped_no_posting or not acc:
+                        raise ValueError(f"lens grades not accepted: {fr.rejected or 'no posting / JD'}")
+                    gold_ingest._write_human_lens_grades(con, acc)
+                    print(f"    lens grades: {', '.join(f'{k}={g}' for k, g in lenses.items())}")
+            except (ValueError, duckdb.Error) as e:
+                con.execute("ROLLBACK")       # the decision and its lens grades land together or not at all
+                done[r["decision"]] -= 1
+                done["refused"] += 1
+                print(f"  queue {qid}: refused: {e}")
+                pg.execute("UPDATE jobs.decision_queue SET apply_error = %s WHERE queue_id = %s", [str(e), qid])
+                continue
             con.execute("COMMIT")
             # DuckDB first: if this stamp fails the row is replayed next time, and the latest mark wins anyway.
             pg.execute("UPDATE jobs.decision_queue SET applied_at = now() WHERE queue_id = %s", [qid])
@@ -976,9 +1010,11 @@ def main():
     s.set_defaults(func=cmd_mark)
 
     s = sub.add_parser("apply-queue", parents=[common],
-                       help="apply pending build / pass / hold calls from the Postgres queue (jobs.decision_queue, "
-                            "written by scripts/feedback_app.py) with the same checks as mark",
-                       epilog="Each pending row is validated like `mark`: applied rows are stamped applied_at, refused "
+                       help="apply pending build / pass / hold calls and lens grades from the Postgres queue "
+                            "(jobs.decision_queue, written by scripts/feedback_app.py) with the same checks as mark",
+                       epilog="Each pending row is validated like `mark`; per-lens grades go to human_lens_grades (as a lens "
+                              "sheet would) in the same transaction, and a 'grade' row carries grades with no decision. "
+                              "Applied rows are stamped applied_at, refused "
                               "ones get apply_error (shown in the applet) and are not retried. launch.sh runs it at the "
                               "start and just before the snapshot; scripts/inbox_watch.sh runs it hourly. While a run "
                               "holds the DuckDB it exits 1 and the rows wait. Postgres down: exits 1, nothing applied.")

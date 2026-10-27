@@ -183,6 +183,17 @@ def test_one_alert_per_topic_and_no_cold_alert_for_tracked_row(env):
     assert "Tailspin" in text.split("## What")[0] and "Contoso" not in text.split("## What")[0]
 
 
+def test_role_word_in_subject_is_not_a_company():
+    rows = [{"app_id": 293, "company": "Forward Contoso", "role": "Program Manager", "req": "",
+             "status": "applied"}]
+    m = msg(1, "inmail-hit-reply@linkedin.com", "AI Transformation Leader/Forward Deployed Engineer- Tailspin")
+    row, why = iw.match_row(ans(1, ["cold-inbound"], company="Tailspin"), m, "", rows)
+    assert row is None and why == "no tracker row for this company"
+    # the full company name in the subject still counts
+    m2 = msg(2, "inmail-hit-reply@linkedin.com", "Forward Contoso: next steps")
+    assert iw.match_row(ans(2, ["screen"]), m2, "", rows)[0]["app_id"] == 293
+
+
 def test_tie_prefers_the_single_open_row():
     rows = [{"app_id": 1, "company": "Acme", "role": "Analyst", "req": "R12345", "status": "rejected"},
             {"app_id": 2, "company": "Acme", "role": "Analyst", "req": "R12345", "status": "applied"}]

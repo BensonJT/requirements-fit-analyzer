@@ -192,6 +192,34 @@ def add_contact(conn, app_id, name, actor, role="recruiter", **fields):
     return {**c, "role": role, "created": created}
 
 
+def remove_contact(conn, app_id, contact_id, actor, role=None):
+    """Unlink a contact from an application (one role, or every role it holds there), logging a 'contact'
+    event. The contact row itself is deleted only when no other application still links it, so a person
+    shared across applications keeps their details. Returns {'name', 'roles', 'deleted'}."""
+    if role is not None and role not in CONTACT_ROLES:
+        raise TrackerError(f"unknown contact role {role!r}; allowed: {', '.join(CONTACT_ROLES)}")
+    with conn.transaction():
+        _require_app(conn, app_id, lock=True)
+        c = conn.execute("SELECT * FROM tracker.contact WHERE contact_id = %s", [contact_id]).fetchone()
+        if c is None:
+            raise TrackerError(f"no contact with contact_id {contact_id}")
+        roles = [r["role"] for r in conn.execute(
+            "DELETE FROM tracker.app_contact WHERE app_id = %s AND contact_id = %s AND (%s::text IS NULL OR role = %s) "
+            "RETURNING role", [app_id, contact_id, role, role]).fetchall()]
+        if not roles:
+            raise TrackerError(f"contact {contact_id} is not linked to #{app_id}" + (f" as {role}" if role else ""))
+        name = " ".join(c["name"].split())       # one line in the event even if the stored name has line breaks
+        deleted = conn.execute("SELECT 1 FROM tracker.app_contact WHERE contact_id = %s LIMIT 1",
+                               [contact_id]).fetchone() is None
+        if deleted:
+            conn.execute("DELETE FROM tracker.contact WHERE contact_id = %s", [contact_id])
+        conn.execute("UPDATE tracker.application SET updated_at = now() WHERE app_id = %s", [app_id])
+        _event(conn, app_id, "contact", actor, old_value=name,
+               note=f"removed {', '.join(roles)}: {name} (contact {contact_id}"
+                    + (", deleted: no other application links it)" if deleted else ", still linked elsewhere)"))
+    return {"name": name, "roles": roles, "deleted": deleted}
+
+
 def normalize_folder(value):
     """A folder value for `application.folder`: a relative path inside the Job_Search directory
     (forward slashes, no `..`, not absolute). 'none' / empty -> None (clears it)."""

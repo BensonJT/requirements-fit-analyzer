@@ -75,6 +75,7 @@ class App:
         self.last_clip = ""
         root.title("Job feedback")
         root.minsize(820, 860)
+        root.option_add("*Dialog.msg.font", "TkDefaultFont 10")   # the X11 messagebox default is oversized
         f = ttk.Frame(root, padding=10)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)

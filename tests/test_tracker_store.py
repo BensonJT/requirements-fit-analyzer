@@ -42,7 +42,9 @@ def _events(conn, app_id):
 def test_migrate_idempotent(conn):
     first = db.migrate(conn)
     second = db.migrate(conn)
-    assert first == second == ["001_tracker.sql", "002_jobs.sql", "003_roles.sql", "004_jev_status.sql"]
+    assert first == second == ["001_tracker.sql", "002_jobs.sql", "003_roles.sql", "004_jev_status.sql",
+                              "005_decision_queue.sql", "006_decision_queue_lenses.sql",
+                              "007_decision_queue_grade_only.sql"]
     n = conn.execute("SELECT count(*) AS n FROM tracker.status").fetchone()["n"]
     assert n == 12
     assert conn.execute("SELECT count(*) AS n FROM pg_roles WHERE rolname = 'claude_ro'").fetchone()["n"] == 1

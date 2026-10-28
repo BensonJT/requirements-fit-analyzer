@@ -127,3 +127,6 @@ class RunSummary:
     canary_flags: int = 0        # reviews with injection_p >= CANARY_FLAG_AT
     stopped_by_cap: Optional[str] = None   # "max_calls_per_run" | "daily_token_cap" | None
     dry_run: bool = False
+    # 2026-10-28: an account-level failure (out of credits, bad key) that stopped the run at its first
+    # occurrence, e.g. "HTTP 402 billing_error"; None when the run was not stopped that way
+    stopped_by_error: Optional[str] = None

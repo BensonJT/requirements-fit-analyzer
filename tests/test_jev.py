@@ -725,3 +725,60 @@ def test_grey_question_is_in_the_prompt_version():
         assert jev.prompt_version(facts, "typesafe") != before
     finally:
         Q.GREY_AT = original
+
+
+# ---------------------------------------------------------------- 2026-10-28: account errors + billing probe
+_NO_CREDITS = {"detail": {"error_type": "billing_error",
+                          "message": "Your organization has no available TypeSafe API credits."}}
+
+
+def test_run_stops_at_the_first_account_error(key_env):
+    """10/28: every request came back 402 and the run still made 300 calls; now it stops after the first."""
+    calls = []
+
+    def transport(url, headers=None, json=None):
+        calls.append(1)
+        return _FakeResponse(402, _NO_CREDITS)
+
+    s = _run([_posting("P1"), _posting("P2"), _posting("P3")], transport=transport)
+    assert len(calls) == 1 and s.errors == 1 and s.reviewed == 0
+    assert s.stopped_by_error == "HTTP 402 billing_error" and s.stopped_by_cap is None
+
+
+def test_a_posting_level_error_does_not_stop_the_run(key_env):
+    """A 400 (a bad request for one posting) is still counted and skipped, never a run stop."""
+    def transport(url, headers=None, json=None):
+        if "posting" in json["state"] and json["state"]["title"] == "Bad":
+            return _FakeResponse(400, {"detail": "bad request"})
+        return fake_transport()(url, headers=headers, json=json)
+
+    s = _run([_posting("P1", title="Bad"), _posting("P2")], transport=transport)
+    assert s.errors == 1 and s.reviewed == 1 and s.stopped_by_error is None
+
+
+def test_account_error_names_status_and_error_type():
+    assert jev.account_error(jev.JevAPIError(402, "r", json.dumps(_NO_CREDITS))) == "HTTP 402 billing_error"
+    assert jev.account_error(jev.JevAPIError(401, "r", "unauthorized")) == "HTTP 401"
+    assert jev.account_error(jev.JevAPIError(400, "r", "bad")) is None
+    assert jev.account_error(ValueError("x")) is None
+
+
+def test_billing_probe_ok_and_out_of_credits(key_env):
+    sent = []
+
+    def ok(url, headers=None, json=None):
+        sent.append(json)
+        return _FakeResponse(200, {"answers": {}})
+
+    assert jev.billing_probe(endpoint="typesafe", transport=ok) == (True, "POST 200")
+    assert set(sent[0]["state"]) == {"text"} and sent[0]["model"] == Q.PINNED_MODEL   # no personal data
+    ok_, msg = jev.billing_probe(endpoint="typesafe", transport=lambda u, headers=None, json=None:
+                                 _FakeResponse(402, _NO_CREDITS))
+    assert ok_ is False and msg.startswith("HTTP 402 billing_error") and "add credits" in msg
+    assert "fake-test-key" not in msg
+
+
+def test_billing_probe_without_a_key_never_calls(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    assert jev.billing_probe(endpoint="typesafe", transport=_ExplodingTransport()) == \
+        (False, "TYPESAFE_API_KEY is not set")

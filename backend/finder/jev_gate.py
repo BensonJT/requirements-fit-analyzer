@@ -22,7 +22,7 @@ from typing import Optional
 
 from . import report
 from . import jev_questions as Q
-from .jev_types import Posting
+from .jev_types import Posting, RunSummary
 
 DEMOTE_REQUIRED = ("fails",)
 LENS_WRONG = "wrong"
@@ -131,6 +131,25 @@ def limit_new(con, rows: list, *, facts=None, limit: int = JEV_MAX_NEW_PER_RUN, 
     return keep, held
 
 
+def reusable_ids(con, wanted: dict, pv: str) -> set:
+    """Rows in `wanted` ({pid: tier}) whose stored review is kept instead of re-sent under `pv`.
+    2026-10-28 (user's call): a fact-sheet edit re-keys prompt_version, which made every stored review look stale
+    (527 re-reviews queued, ~$0.95). A review of the same JD under an OLDER prompt_version with a passed required
+    bar stays in force -- except the rows it demotes or sends to check: a fact change can only rescue those, so
+    they are reviewed again, and only once `pv` has passed its own bar (until then a new review could not
+    demote, and would silently undo a demotion that still stands)."""
+    if not wanted:
+        return set()
+    older = {r[0] for r in con.execute("""
+        SELECT j.posting_id FROM vw_jev_latest j JOIN vw_jev_bar b ON b.prompt_version = j.prompt_version
+        WHERE b.required_passed AND j.prompt_version <> ? AND j.posting_id IN (SELECT unnest(?::VARCHAR[]))""",
+        [pv, list(wanted)]).fetchall()}
+    current = con.execute("SELECT required_passed FROM vw_jev_bar WHERE prompt_version = ?", [pv]).fetchone()
+    if older and current and current[0]:
+        older -= set(demotions(con, {pid: wanted[pid] for pid in older}))
+    return older
+
+
 def subset_postings(con, ids: list) -> list:
     """Posting objects for `ids` (order kept) that have a JD; adjudicated rows are left out by the caller."""
     if not ids:
@@ -150,14 +169,18 @@ def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, slee
     reviews are skipped by `jev.run` itself; a cap stop or an error is logged and the caller still writes the
     report. Returns the RunSummary, or None when nothing was sent."""
     from . import jev
+    facts = facts if facts is not None else jev.load_facts()
     ensure_required_bar(con, facts=facts, live_ok=live_ok, transport=transport, sleep_fn=sleep_fn, log=log)
     wanted = review_subset_ids(con, **top_kw)
     exempt = adjudicated_ids(con, list(wanted))
-    rows = subset_postings(con, [pid for pid in wanted if pid not in exempt])
+    reused = reusable_ids(con, {pid: t for pid, t in wanted.items() if pid not in exempt},
+                          jev.prompt_version(facts, jev.endpoint_from_env()))
+    rows = subset_postings(con, [pid for pid in wanted if pid not in exempt and pid not in reused])
     rows, held = limit_new(con, rows, facts=facts)
     log(f"Jev gate: {len(wanted)} row(s) in the review set ({sum(1 for t in wanted.values() if t == 'apply')} "
         f"apply / {sum(1 for t in wanted.values() if t == 'review')} review / "
         f"{sum(1 for t in wanted.values() if t == 'eligible')} other eligible), {len(exempt)} adjudicated exempt, "
+        f"{len(reused)} kept from an earlier passed prompt_version, "
         f"{len(rows)} with a JD to send or skip as cached, {len(held)} held for the next run "
         f"(over {JEV_MAX_NEW_PER_RUN} new reviews)")
     if not rows:
@@ -167,10 +190,27 @@ def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, slee
         summary = jev.run(con, rows, live_ok=live_ok, facts=facts, transport=transport, sleep_fn=sleep_fn, log=log)
     except Exception as exc:  # logged, never fatal: the report is written from what is stored
         log(f"Jev gate: run failed ({type(exc).__name__}: {exc}); the report uses the stored reviews")
-        return None
+        return RunSummary(considered=len(rows), stopped_by_error=f"run failed ({type(exc).__name__})")
     log(f"Jev gate: {summary.reviewed} reviewed, {summary.skipped_cached} cached, {summary.errors} error(s), "
         f"{summary.input_tokens} tokens ({time.monotonic() - t:.1f}s)")
     return summary
+
+
+def run_warning(summary) -> Optional[str]:
+    """One line naming this run's Jev problem, or None. 2026-10-28: Jev's errors were logged and never fatal,
+    so a night with 300 failed calls (no credits) ended "status 0" and Top_Jobs looked normal. cmd_top prints
+    this with a `!!! JEV` prefix (launch.sh repeats those lines in its final summary) and the report header
+    carries it."""
+    if summary is None:
+        return None
+    if summary.stopped_by_error:
+        return (f"stopped at the first account error ({summary.stopped_by_error}); {summary.reviewed} reviewed, "
+                f"{summary.errors} failed -- the page uses the stored reviews")
+    if summary.errors:
+        return f"{summary.errors} of {summary.considered - summary.skipped_cached} review(s) failed"
+    if summary.stopped_by_cap:
+        return f"stopped at {summary.stopped_by_cap} after {summary.reviewed} review(s); the rest wait for the next run"
+    return None
 
 
 def run_gemma_on_demoted(con, *, background_path=None, live_ok: bool = False, log=print, **top_kw):
@@ -292,19 +332,29 @@ def ensure_required_bar(con, *, facts=None, live_ok: bool = False, transport=Non
     from . import jev, jev_eval
     from datetime import datetime, timezone
     pv = jev.prompt_version(facts if facts is not None else jev.load_facts(), jev.endpoint_from_env())
-    done = con.execute("SELECT passed FROM vw_jev_eval_latest WHERE prompt_version = ? AND family = 'required'",
-                       [pv]).fetchone()
-    if done is not None:
+    done = con.execute("SELECT passed, reason FROM vw_jev_eval_latest WHERE prompt_version = ? "
+                       "AND family = 'required'", [pv]).fetchone()
+    # 2026-10-28: an "insufficient data" result means the gold set was not reviewed (10/27: the daily token cap
+    # stopped it at 0 of 121), not that Jev failed the bar -- so it counts as unmeasured and is measured again.
+    # Before this, that one row blocked every later measurement and the gate never demoted under this version.
+    retry = done is not None and not done[0] and str(done[1] or "").startswith("insufficient data")
+    if done is not None and not retry:
         if not done[0]:
             log(f"Jev gate: required bar at {pv} was measured and NOT passed -- its reviews will not demote")
         return None
     if not live_ok:
         log(f"Jev gate: prompt_version {pv} has no required bar yet; not live, so it was not measured")
         return None
-    log(f"Jev gate: prompt_version {pv} has no required bar yet -- reviewing the gold set and scoring it")
+    log(f"Jev gate: prompt_version {pv} "
+        + ("had too little data last time" if retry else "has no required bar yet")
+        + " -- reviewing the gold set and scoring it")
     try:
-        jev.run(con, jev.eval_set_postings(con), live_ok=True, facts=facts, transport=transport, sleep_fn=sleep_fn,
-                log=log)
+        gold = jev.run(con, jev.eval_set_postings(con), live_ok=True, facts=facts, transport=transport,
+                       sleep_fn=sleep_fn, log=log)
+        stopped = gold.stopped_by_error or gold.stopped_by_cap
+        if stopped:   # a part-reviewed gold set is not scored; the next run measures it again
+            log(f"Jev gate: gold set stopped early ({stopped}); required bar at {pv} not measured this run")
+            return None
         run_id = datetime.now(timezone.utc).strftime("jev-gate-%Y%m%dT%H%M%SZ")
         res = jev_eval.evaluate_required(con, pv, run_id=run_id, write=True)
     except Exception as exc:

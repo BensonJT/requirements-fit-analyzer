@@ -313,12 +313,17 @@ def cmd_top(con, a):
     the stored reviews unless --no-jev-gate."""
     if not a.out and not a.vault and not a.stdout:
         sys.exit("top: set JOBSEARCH_VAULT_DIR, or pass --out or --stdout")
+    jev_warning = None
     if a.jev:
         from backend.finder import jev_cli, jev_gate
         try:
             facts = jev_cli.load_facts(a.background_file)
-            jev_gate.run_over_top(con, facts=facts, live_ok=jev_cli.live_ok(a.i_have_approval),
-                                  include_decided=a.include_decided, apply_cap=a.apply_cap, review_cap=a.review_cap)
+            summary = jev_gate.run_over_top(con, facts=facts, live_ok=jev_cli.live_ok(a.i_have_approval),
+                                            include_decided=a.include_decided, apply_cap=a.apply_cap,
+                                            review_cap=a.review_cap)
+            jev_warning = jev_gate.run_warning(summary)
+            if jev_warning:
+                print(f"!!! JEV: {jev_warning}")
             # Gemma second-reads ONLY what Jev demoted (user's call 2026-09-30); live gate = JUDGE2_LIVE_OK=1,
             # which launch.sh's judge_env exports for every jevtop preset.
             jev_gate.run_gemma_on_demoted(con, background_path=jev_cli.background_path(a.background_file),
@@ -327,16 +332,19 @@ def cmd_top(con, a):
                                           review_cap=a.review_cap)
         except jev_cli.JevCliError as exc:
             print(f"top --jev: {exc}; writing the report from the stored reviews")
+            jev_warning = f"not run ({exc})"
+            print(f"!!! JEV: {jev_warning}")
     if a.stdout:
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = report.write_top_jobs(con, a.vault, out_path=tmp, apply_cap=a.apply_cap,
                                          review_cap=a.review_cap, include_decided=a.include_decided,
-                                         jev_gate_on=not a.no_jev_gate)
+                                         jev_gate_on=not a.no_jev_gate, jev_warning=jev_warning)
             print(path.read_text(encoding="utf-8"))
         return
     path = report.write_top_jobs(con, a.vault, out_path=a.out, apply_cap=a.apply_cap, review_cap=a.review_cap,
-                                 include_decided=a.include_decided, jev_gate_on=not a.no_jev_gate)
+                                 include_decided=a.include_decided, jev_gate_on=not a.no_jev_gate,
+                                 jev_warning=jev_warning)
     print(path)
 
 

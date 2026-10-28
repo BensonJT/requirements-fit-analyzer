@@ -39,6 +39,10 @@ MAX_FACTS = 254                 # a Choice allows 255 options, one of which is "
 LENS_NAMES = ("process", "technical", "ai")
 REQUEST_ID_HEADER = "x-typesafe-request-id"
 RETRY_AFTER_CAP_S = 60.0
+# 2026-10-28: account-level statuses (bad key, out of credits, forbidden). Every later posting would fail the
+# same way, so the run stops at the first one instead of sending the rest (10/28: 300 calls, all 402).
+ACCOUNT_STATUSES = (401, 402, 403)
+_ERROR_TYPE_RE = re.compile(r'"error_type"\s*:\s*"([^"]+)"')
 _BULLET_RE = re.compile(r"^\s*(?:[-*+•·▪◦●○■□➢►✓–—]|\d{1,3}[.)])\s+")   # a marker, then whitespace
 _WORD_RE = re.compile(r"\w")
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)   # Markdown/HTML comments (edit notes) are never facts
@@ -416,6 +420,41 @@ def _tokens_used(data: dict, body: dict) -> int:
     return int(tokens) if _is_num(tokens) else plan_tokens(body)
 
 
+def account_error(exc) -> Optional[str]:
+    """"HTTP <status> <error_type>" when `exc` is an account-level JevAPIError (ACCOUNT_STATUSES), else None."""
+    if not isinstance(exc, JevAPIError) or exc.status not in ACCOUNT_STATUSES:
+        return None
+    m = _ERROR_TYPE_RE.search(exc.body_snippet or "")
+    return f"HTTP {exc.status}" + (f" {m.group(1)}" if m else "")
+
+
+PROBE_QUESTION = {"probe": {"type": "noul", "instructions": "`text` is the single word ping.",
+                            "criteria": {"true": "It is.", "false": "It is not."}}}
+
+
+def billing_probe(*, endpoint: Optional[str] = None, transport=None) -> tuple:
+    """(ok, message): one tiny live request (a few dozen tokens, far under a cent) for the launch pre-flight.
+    GET /v1/models answers 200 even with no credits left (10/28), so only a real request shows the account
+    can pay. No personal data is sent; the key is never logged. Never raises."""
+    endpoint = endpoint or endpoint_from_env()
+    key = api_key(endpoint)
+    if not key:
+        return False, f"{Q.KEY_ENV[endpoint]} is not set"
+    body = {"state": {"text": "ping"}, "model": model_for(endpoint), "questions": copy.deepcopy(PROBE_QUESTION)}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    try:
+        resp = _post(transport if transport is not None else default_transport(), Q.ENDPOINTS[endpoint],
+                     headers, body)
+    except Exception as exc:  # noqa: BLE001 -- the pre-flight reports, never raises
+        return False, f"request failed ({type(exc).__name__})"
+    status = getattr(resp, "status_code", 200)
+    if 200 <= status < 300:
+        return True, f"POST {status}"
+    reason = account_error(JevAPIError(status, _header(resp, REQUEST_ID_HEADER), _snippet(resp))) or f"HTTP {status}"
+    hint = " (out of credits: add credits in the TypeSafe console)" if status == 402 else ""
+    return False, reason + hint
+
+
 def call_with_retry(transport, sleep_fn, url: str, key: str, body: dict, *, log=print,
                     meter: Optional[_Meter] = None) -> dict:
     """POSTs `body` and returns the response JSON. Retries RETRY_STATUSES, any 5xx and transport exceptions
@@ -601,6 +640,11 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
         except Exception as exc:  # noqa: BLE001 -- logged and counted, never fatal
             summary.errors += 1
             log(f"jev: {p.posting_id} failed ({type(exc).__name__}: {exc})")
+            reason = account_error(exc)
+            if reason:
+                summary.stopped_by_error = reason
+                log(f"jev: stopping, {reason} is an account problem, so every remaining posting would fail too")
+                break
             continue
         summary.reviewed += 1
         if record.version_drift:

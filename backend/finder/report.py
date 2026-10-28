@@ -694,8 +694,11 @@ def _broken_boards_block(con) -> list:
 
 def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: int = TOP_APPLY_CAP,
                    review_cap: int = TOP_REVIEW_CAP, include_decided: bool = False, levels=TOP_LEVELS,
-                   unclear_cap: int = TOP_UNCLEAR_CAP, jev_gate_on: bool = True) -> Path:
+                   unclear_cap: int = TOP_UNCLEAR_CAP, jev_gate_on: bool = True,
+                   jev_warning: Optional[str] = None) -> Path:
     """Writes Top_Jobs_YYYYMMDD.md: the end-of-pipeline list.
+    `jev_warning` (2026-10-28, jev_gate.run_warning): this run's Jev problem, printed in the header so a failed
+    Jev pass never reads as a quiet night.
 
     Jev's demotion pass (backend/finder/jev_gate.py, stage 2, user's go 2026-09-30) runs last: a row Jev's
     canonical review fails on required fit, or grades wrong on every lens, leaves Apply / Review for a visible
@@ -762,6 +765,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         check_rows = [r for r in apply_rows + review_rows if r[0] in checks]
         apply_rows = [r for r in apply_rows if r[0] not in flagged]
         review_rows = [r for r in review_rows if r[0] not in flagged]
+    if jev_warning:
+        jev_status += f" — **JEV PROBLEM THIS RUN: {jev_warning}**"
     shown_ids = [r[0] for r in apply_rows[:apply_cap]] + [r[0] for r in review_rows[:review_cap]] + \
                 [r[0] for r in unclear[:unclear_cap]] + list(demoted) + list(checks)
     far = _long_commute_sites(con, shown_ids)

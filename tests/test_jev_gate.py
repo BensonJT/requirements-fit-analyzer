@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from backend.ats import store  # noqa: E402
 from backend.finder import jev_gate, report  # noqa: E402
-from backend.finder.jev_types import LineRecord, ReviewRecord  # noqa: E402
+from backend.finder.jev_types import LineRecord, ReviewRecord, RunSummary  # noqa: E402
 
 NOW = datetime(2026, 9, 28, 12, 0)
 REVIEWED_AT = "2026-09-28T12:00:00+00:00"
@@ -194,12 +194,15 @@ def test_run_over_top_sends_the_subset_minus_adjudicated_and_never_fails_the_rep
     monkeypatch.setattr(jev, "run", fake_run)
     monkeypatch.setattr(jev_gate, "ensure_required_bar", lambda *a, **k: None)
     logs = []
-    assert jev_gate.run_over_top(con, facts=[], live_ok=True, log=logs.append) is None
-    assert set(sent) == {"keep-meets", "demote-fails", "demote-all-wrong", "keep-unevaluated-pv", "keep-no-review",
-                         "review-demote"}
+    summary = jev_gate.run_over_top(con, facts=[], live_ok=True, log=logs.append)
+    assert summary.stopped_by_error == "run failed (RuntimeError)"     # 2026-10-28: reported, still never raised
+    # 2026-10-28: the four rows reviewed under the older passed PV are kept, not re-sent (the current
+    # prompt_version has no passed bar, so not even their demotions are re-reviewed)
+    assert set(sent) == {"keep-unevaluated-pv", "keep-no-review"}
     assert "exempt-human" not in sent
     assert any("7 row(s) in the review set (6 apply / 1 review / 0 other eligible), 1 adjudicated exempt, "
-               "6 with a JD to send or skip as cached, 0 held" in l for l in logs)
+               "4 kept from an earlier passed prompt_version, 2 with a JD to send or skip as cached, 0 held" in l
+               for l in logs)
     assert any("run failed (RuntimeError: cap reached)" in l for l in logs)
     con.close()
 
@@ -231,7 +234,7 @@ def test_ensure_required_bar_measures_only_an_unmeasured_current_pv_and_only_liv
     calls = []
     monkeypatch.setattr(jev, "prompt_version", lambda facts, endpoint: "pv-new")
     monkeypatch.setattr(jev, "eval_set_postings", lambda con_: ["gold"])
-    monkeypatch.setattr(jev, "run", lambda con_, rows, **kw: calls.append(("run", rows)))
+    monkeypatch.setattr(jev, "run", lambda con_, rows, **kw: calls.append(("run", rows)) or RunSummary())
 
     def fake_eval(con_, pv, *, run_id, write):
         calls.append(("eval", pv))
@@ -337,4 +340,89 @@ def test_review_subset_puts_top_jobs_rows_first(tmp_path, monkeypatch):
     top = jev_gate.top_subset_ids(con)
     assert list(out)[:len(top)] == list(top)                          # Top Jobs order kept, first
     assert out["extra-strong"] == "eligible" and out["keep-meets"] == top["keep-meets"]
+    con.close()
+
+
+# ---------------------------------------------------------------- 2026-10-28: stuck bar, reuse, warnings
+def _bar_fixture(tmp_path, monkeypatch, gold_summary):
+    from backend.finder import jev, jev_eval
+    con = _fixture(tmp_path)
+    calls = []
+    monkeypatch.setattr(jev, "prompt_version", lambda facts, endpoint: "pv-new")
+    monkeypatch.setattr(jev, "eval_set_postings", lambda con_: ["gold"])
+    monkeypatch.setattr(jev, "run", lambda con_, rows, **kw: calls.append(("run", rows)) or gold_summary)
+
+    def fake_eval(con_, pv, *, run_id, write):
+        calls.append(("eval", pv))
+        return {"passed": True, "reason": "test"}
+
+    monkeypatch.setattr(jev_eval, "evaluate_required", fake_eval)
+    return con, calls
+
+
+def test_ensure_required_bar_measures_again_after_insufficient_data(tmp_path, monkeypatch):
+    """10/27: the cap stopped the gold set at 0 of 121, an "insufficient data" row was written, and that row
+    blocked every later measurement. It now counts as unmeasured."""
+    con, calls = _bar_fixture(tmp_path, monkeypatch, RunSummary())
+    store.insert_jev_eval(con, run_id="r0", prompt_version="pv-new", family="required", n=121, metrics={},
+                          passed=False, reason="insufficient data: unjudged=121 of 121")
+    logs = []
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append)["passed"]
+    assert calls == [("run", ["gold"]), ("eval", "pv-new")]
+    assert any("had too little data last time" in l for l in logs)
+    con.close()
+
+
+def test_ensure_required_bar_keeps_a_real_failure(tmp_path, monkeypatch):
+    con, calls = _bar_fixture(tmp_path, monkeypatch, RunSummary())
+    store.insert_jev_eval(con, run_id="r0", prompt_version="pv-new", family="required", n=121, metrics={},
+                          passed=False, reason="catch_rate=0.5 (bar 0.7)")
+    logs = []
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append) is None
+    assert calls == [] and any("measured and NOT passed" in l for l in logs)
+    con.close()
+
+
+@pytest.mark.parametrize("summary", [RunSummary(stopped_by_cap="daily_token_cap"),
+                                     RunSummary(stopped_by_error="HTTP 402 billing_error")])
+def test_ensure_required_bar_does_not_score_a_gold_set_that_stopped_early(tmp_path, monkeypatch, summary):
+    con, calls = _bar_fixture(tmp_path, monkeypatch, summary)
+    logs = []
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append) is None
+    assert calls == [("run", ["gold"])]                        # no eval row, so the next run measures again
+    assert any("gold set stopped early" in l for l in logs)
+    con.close()
+
+
+def test_reusable_ids_keeps_older_passed_reviews_and_resends_their_demotions_once_the_bar_passes(tmp_path):
+    con = _fixture(tmp_path)
+    wanted = {pid: t for pid, t in jev_gate.review_subset_ids(con).items() if pid != "exempt-human"}
+    # the current prompt_version has no passed bar: every older passed review is kept, demotions included
+    assert jev_gate.reusable_ids(con, wanted, "pv-current") == {"keep-meets", "demote-fails", "demote-all-wrong",
+                                                                "review-demote"}
+    # once it passes, the rows the older reviews demote are reviewed again; the rest stay kept
+    store.insert_jev_eval(con, run_id="r2", prompt_version="pv-current", family="required", n=115, metrics={},
+                          passed=True, reason="test")
+    assert jev_gate.reusable_ids(con, wanted, "pv-current") == {"keep-meets"}
+    # a review under the current prompt_version is never "reused": jev.run's own cache skips it
+    assert jev_gate.reusable_ids(con, wanted, PV) == set()
+    assert jev_gate.reusable_ids(con, {}, "pv-current") == set()
+    con.close()
+
+
+def test_run_warning():
+    assert jev_gate.run_warning(None) is None
+    assert jev_gate.run_warning(RunSummary(considered=5, reviewed=5)) is None
+    w = jev_gate.run_warning(RunSummary(considered=300, errors=1, stopped_by_error="HTTP 402 billing_error"))
+    assert "HTTP 402 billing_error" in w and "stored reviews" in w
+    assert jev_gate.run_warning(RunSummary(considered=10, skipped_cached=4, errors=2)) == "2 of 6 review(s) failed"
+    assert "daily_token_cap" in jev_gate.run_warning(RunSummary(reviewed=3, stopped_by_cap="daily_token_cap"))
+
+
+def test_write_top_jobs_header_carries_the_jev_warning(tmp_path):
+    con = _fixture(tmp_path)
+    text = report.write_top_jobs(con, None, out_path=str(tmp_path / "out"),
+                                 jev_warning="stopped at the first account error (HTTP 402)").read_text(encoding="utf-8")
+    assert "**JEV PROBLEM THIS RUN: stopped at the first account error (HTTP 402)**" in text
+    assert "JEV PROBLEM" not in report.write_top_jobs(con, None, out_path=str(tmp_path / "o2")).read_text(encoding="utf-8")
     con.close()

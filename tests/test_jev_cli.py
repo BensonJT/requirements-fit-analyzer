@@ -540,7 +540,12 @@ def test_launch_jev_preflight_fails_fast_without_a_key(tmp_path):
     stub.mkdir()
     (stub / "curl").write_text("#!/bin/bash\necho CURL_CALLED >&2\nexit 99\n")
     (stub / "curl").chmod(0o755)
-    script = f'JUDGE_BG={bg}\n' + _launch_functions("jev_preflight") + '\njev_preflight; echo "rc=$?"\n'
+    # PY is a stub for the billing probe (jev.billing_probe): it prints its message and exits 0 or 1
+    py = stub / "py"
+    py.write_text("#!/bin/bash\necho \"${PROBE_MSG:-POST 200}\"\nexit ${PROBE_RC:-0}\n")
+    py.chmod(0o755)
+    script = (f'JUDGE_BG={bg}; PY={py}\n' + _launch_functions("jev_preflight", "jev_billing_preflight")
+              + '\njev_preflight; echo "rc=$?"\n')
     env = {"PATH": f"{stub}:{os.environ['PATH']}"}
     res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env)
     assert "FAIL  TYPESAFE_API_KEY is not set" in res.stdout and "rc=1" in res.stdout
@@ -562,6 +567,13 @@ def test_launch_jev_preflight_fails_fast_without_a_key(tmp_path):
     res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
                          env=dict(env, TYPESAFE_API_KEY="sk-test-not-real"))
     assert "rc=0" in res.stdout and "GET /v1/models 200" in res.stdout
+    assert "Jev account can pay (probe POST 200)" in res.stdout
+
+    # 2026-10-28: /v1/models answers 200 with no credits left; the billing probe is what fails the pre-flight
+    res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                         env=dict(env, TYPESAFE_API_KEY="sk-test-not-real", PROBE_RC="1",
+                                  PROBE_MSG="HTTP 402 billing_error (out of credits: add credits in the TypeSafe console)"))
+    assert "rc=1" in res.stdout and "FAIL  Jev probe: HTTP 402 billing_error" in res.stdout
 
 
 def test_lens_set_population_is_blind_human_lens_graded_postings(tmp_path):

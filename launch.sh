@@ -238,14 +238,16 @@ jev_env() {
   export JEV_LIVE_OK=1 JUDGE2_BACKGROUND_FILE="$JUDGE_BG"
 }
 
-# Jev pre-flight: the key must be set and GET /v1/models must answer 200. The key goes to curl on stdin as a
+# Jev pre-flight: the key must be set, GET /v1/models must answer 200 and a tiny paid request must succeed
+# (jev_billing_preflight). The key goes to curl on stdin as a
 # header (-H @-), so it is never echoed, logged, or visible in the process list.
 jev_preflight() {
   local ok=0 code endpoint="${JEV_ENDPOINT:-typesafe}"
   if [ -r "$JUDGE_BG" ]; then echo "  ok    Jev fact sheet ($(basename "$JUDGE_BG"))"; else echo "  FAIL  Jev fact sheet missing: $JUDGE_BG"; ok=1; fi
   if [ "$endpoint" = "vercel" ]; then
-    if [ -n "${AI_GATEWAY_API_KEY:-}" ]; then echo "  ok    AI_GATEWAY_API_KEY set (JEV_ENDPOINT=vercel; no endpoint probe)"
+    if [ -n "${AI_GATEWAY_API_KEY:-}" ]; then echo "  ok    AI_GATEWAY_API_KEY set (JEV_ENDPOINT=vercel)"
     else echo "  FAIL  AI_GATEWAY_API_KEY is not set in .env (JEV_ENDPOINT=vercel)"; ok=1; fi
+    [ "$ok" = 0 ] && { jev_billing_preflight || ok=1; }
     return $ok
   fi
   if [ -z "${TYPESAFE_API_KEY:-}" ]; then
@@ -256,7 +258,18 @@ jev_preflight() {
     --max-time 20 -H @- https://api.typesafe.ai/v1/models 2>/dev/null)"
   if [ "$code" = "200" ]; then echo "  ok    TypeSafe API reachable (GET /v1/models 200)"
   else echo "  FAIL  TypeSafe API returned HTTP ${code:-none} for GET /v1/models (key revoked? VPN on?)"; ok=1; fi
+  [ "$ok" = 0 ] && { jev_billing_preflight || ok=1; }
   return $ok
+}
+
+# 2026-10-28: GET /v1/models answered 200 with no credits left, and the run then made 300 calls that all came
+# back 402. One tiny real request (a few dozen tokens) shows the account can pay; jev.billing_probe never logs
+# the key.
+jev_billing_preflight() {
+  local out
+  out="$("$PY" -c 'from backend.finder import jev; ok, msg = jev.billing_probe(); print(msg); raise SystemExit(0 if ok else 1)' 2>&1)"
+  if [ $? -eq 0 ]; then echo "  ok    Jev account can pay (probe ${out})"
+  else echo "  FAIL  Jev probe: ${out}"; return 1; fi
 }
 
 # ── pre-flight ─────────────────────────────────────────────────────────────
@@ -420,6 +433,13 @@ timeout 300 "$PY" -u -m backend.tracker.gsheet || echo "launch: WARNING tracker 
 SECS=$(( $(date +%s) - RUN_STARTED ))
 echo
 echo "launch: finished $(date '+%Y-%m-%d %H:%M:%S') after $((SECS / 3600))h $((SECS % 3600 / 60))m, status $STATUS"
+# 2026-10-28: Jev's errors never fail a step (the page is written from the stored reviews), so 10/28's 300
+# failed calls hid behind "status 0". cmd_top prints each problem as a "!!! JEV" line; repeat them here.
+JEV_ALERTS="$(grep -a '^!!! JEV' "$LOG" 2>/dev/null)"
+if [ -n "$JEV_ALERTS" ]; then
+  echo "launch: WARNING -- Jev had a problem this run (the Top_Jobs header says so too):"
+  echo "$JEV_ALERTS"
+fi
 NEWEST="$(ls -t "${JOBSEARCH_VAULT_DIR:-/nonexistent}"/Search_Results/Top_Jobs_*.md 2>/dev/null | head -1)"
 [ -n "$NEWEST" ] && echo "launch: newest report: $NEWEST"
 echo "launch: full log: $ROOT/$LOG"

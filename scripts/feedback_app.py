@@ -3,10 +3,17 @@
 
 A small desktop window (tkinter). Paste a posting ID (20 hex), a tracker app ID, or a posting URL; the
 window shows the employer and title, then queues the call (with optional Process / Technical / AI lens
-grades, which train the lens models) in Postgres (jobs.decision_queue). Nothing here
+grades, which train the lens models, and an optional Overall grade) in Postgres (jobs.decision_queue). Nothing here
 touches the pipeline DuckDB: `finder.py apply-queue` writes queued calls into it at the next launch start,
 just before the snapshot, or within the hour (scripts/inbox_watch.sh), with the same checks as
 `finder.py mark`. A refused call shows its reason in the queue list; fix it and submit again.
+
+What a call feeds (finder.py mark --help): a build or pass is a `decisions` row, which reaches the fit and lens
+models through vw_decisions (a logistics or comp pass is left out); a hold is not a label. report_feedback, the
+human-call table the gold set reads, is written only when the call carries a Required call (a build, a
+'requirement' pass, or Grades only with Required fit) or an Overall grade. "Grades only" makes no decision:
+lens grades, Overall grade and Required fit (meets / fails, with the unmet lines for fails). With Basis Blind,
+a Required fit makes it a gold row: the judge2 and Jev bars are measured on those.
 
 For a posting with a tracker row, the Tracker box links a contact (name, role, title, company, email,
 phone, LinkedIn URL) through `trk contact`, and the Tracker box changes the application's status through `trk set`, or,
@@ -33,6 +40,7 @@ from tkinter import messagebox, ttk
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from backend.finder import rubric  # noqa: E402
 from backend.tracker import db  # noqa: E402
 from backend.tracker.store import CONTACT_ROLES  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -55,11 +63,13 @@ REASONS = [("logistics", "Location, commute, travel, schedule (not a training la
            ("nuance", "A judgment call the others don't cover"),
            ("other", "Something else")]
 NEEDS_COMMENT = {"nuance", "other"}
-GRADES = ["", "bullseye", "adjacent", "stretch", "wrong"]
+GRADES = [""] + list(rubric.GRADES)
+REQUIRED_FITS = ["", "meets", "fails"]   # a human Required call has two values (finder.py QUEUE_REQUIRED_FITS)
 QUEUE_SQL = """
 SELECT q.queue_id, to_char(q.submitted_at, 'MM-DD HH24:MI') AS sub,
        coalesce(f.employer || ' | ' || f.title, q.posting_id) AS role, q.decision || CASE WHEN q.basis = 'blind' THEN ' (blind)' ELSE '' END AS decision,
-       concat_ws('  ·  ', q.reason, 'P ' || q.grade_process, 'T ' || q.grade_technical, 'AI ' || q.grade_ai) AS reason,
+       concat_ws('  ·  ', q.reason, 'Overall ' || q.grade, 'Req ' || q.required_fit, 'P ' || q.grade_process,
+                 'T ' || q.grade_technical, 'AI ' || q.grade_ai) AS reason,
        CASE WHEN q.cancelled_at IS NOT NULL THEN 'undone'
             WHEN q.applied_at IS NOT NULL THEN 'applied ' || to_char(q.applied_at, 'MM-DD HH24:MI')
             WHEN q.apply_error IS NOT NULL THEN 'REFUSED: ' || q.apply_error
@@ -104,7 +114,8 @@ class App:
         self.basis = tk.StringVar(value="seen")
         ttk.Label(rb, text="   Basis:").pack(side="left")
         for v, label in (("seen", "Seen"), ("blind", "Blind")):
-            ttk.Radiobutton(rb, text=label, value=v, variable=self.basis, command=self.render_found).pack(side="left", padx=(4, 6))
+            ttk.Radiobutton(rb, text=label, value=v, variable=self.basis,
+                            command=lambda: (self.render_found(), self.sync_fields())).pack(side="left", padx=(4, 6))
         ttk.Label(d, text="Reason").grid(row=1, column=0, sticky="w", pady=3)
         self.reason = ttk.Combobox(d, state="readonly", values=[""] + [f"{c}: {t}" for c, t in REASONS])
         self.reason.grid(row=1, column=1, sticky="ew", pady=3)
@@ -126,9 +137,23 @@ class App:
             ttk.Label(lf, text=label).pack(side="left", padx=(0, 4))
             self.lens[k] = ttk.Combobox(lf, state="readonly", values=GRADES, width=10)
             self.lens[k].pack(side="left", padx=(0, 14))
+        # Overall lane grade for any call; Required fit only for Grades only (a build or pass implies its own).
+        ttk.Label(d, text="Overall / Required").grid(row=6, column=0, sticky="w", pady=3)
+        of = ttk.Frame(d)
+        of.grid(row=6, column=1, sticky="w", pady=3)
+        ttk.Label(of, text="Overall grade").pack(side="left", padx=(0, 4))
+        self.overall = ttk.Combobox(of, state="readonly", values=GRADES, width=10)
+        self.overall.pack(side="left", padx=(0, 14))
+        ttk.Label(of, text="Required fit").pack(side="left", padx=(0, 4))
+        self.required = ttk.Combobox(of, state="readonly", values=REQUIRED_FITS, width=8)
+        self.required.pack(side="left")
+        self.gold_hint = tk.StringVar()
+        ttk.Label(d, textvariable=self.gold_hint, foreground="#666", font=("TkDefaultFont", 9), wraplength=600).grid(
+            row=7, column=1, sticky="w")
         self.reason.bind("<<ComboboxSelected>>", lambda _e: self.sync_fields())
+        self.required.bind("<<ComboboxSelected>>", lambda _e: self.sync_fields())
         btns = ttk.Frame(d)
-        btns.grid(row=6, column=1, sticky="e", pady=(6, 0))
+        btns.grid(row=8, column=1, sticky="e", pady=(6, 0))
         ttk.Button(btns, text="Clear", command=self.clear_form).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Submit decision", command=self.submit).pack(side="left")
 
@@ -320,35 +345,48 @@ class App:
         self.msg.set("")
 
     def sync_fields(self):
-        is_pass = self.decision.get() == "pass"   # a reason only for a pass; Grades only takes no reason or unmet
+        is_pass = self.decision.get() == "pass"   # a reason only for a pass
         if not is_pass:
             self.reason.set("")                    # a leftover pass reason must not ride along greyed out
         self.reason.configure(state="readonly" if is_pass else "disabled")
         code = self.reason.get().split(":")[0]
-        wants_unmet = self.decision.get() == "build" or (is_pass and code == "requirement")
+        decision = self.decision.get()
+        if decision != "grade":                    # a build or pass implies its own Required call
+            self.required.set("")
+        self.required.configure(state="readonly" if decision == "grade" else "disabled")
+        grade_fails = decision == "grade" and self.required.get() == "fails"
+        wants_unmet = decision == "build" or (is_pass and code == "requirement") or grade_fails
         if not wants_unmet:
             self.unmet.set("")
         self.unmet_entry.configure(state="normal" if wants_unmet else "disabled")
-        decision = self.decision.get()
-        if decision == "build":
+        if grade_fails:
+            hint = "The Required line(s) you don't meet, pasted word for word from the posting. Several: join with ||"
+        elif decision == "build":
             hint = ("Optional: a Required line you do NOT meet but are applying anyway, pasted word for word. "
                     "Blank means you meet every Required line. A partial weak spot goes in Comment. Several: join with ||")
         elif wants_unmet:
             hint = "The Required line you don't meet, pasted word for word from the posting. Several: join with ||"
         elif is_pass:
             hint = "Only for a pass with reason 'requirement'; other reasons say nothing about the Required block."
+        elif decision == "grade":
+            hint = "Only for Grades only with Required fit 'fails'."
         else:
-            hint = "Not used for Hold or Grades only: they make no Required-block claim."
+            hint = "Not used for Hold: it makes no Required-block claim."
         self.unmet_hint.set(hint)
+        blind_no_call = decision == "grade" and self.basis.get() == "blind" and not self.required.get()
+        self.gold_hint.set("A Required fit (meets / fails) makes this blind call a gold row for the judge2 and Jev bars."
+                           if blind_no_call else "")
 
     def clear_form(self):
-        """Back to a fresh form: Pass, no reason, no comment, unmet or lens grades. Keeps the posting and Basis."""
+        """Back to a fresh form: Pass, no reason, comment, unmet, grades or Required fit. Keeps the posting and Basis."""
         self.decision.set("pass")
         self.reason.set("")
         self.comment.set("")
         self.unmet.set("")
         for c in self.lens.values():
             c.set("")
+        self.overall.set("")
+        self.required.set("")
         self.msg.set("")
         self.sync_fields()
 
@@ -369,12 +407,15 @@ class App:
         elif comment:
             reason = comment
         lens = [self.lens[k].get() or None for k in ("process", "technical", "ai")]
-        if decision == "grade" and not any(lens):
-            return self.msg.set("Grades only needs at least one lens grade.")
+        overall = self.overall.get() or None
+        required = (self.required.get() or None) if decision == "grade" else None
+        if decision == "grade" and not (any(lens) or overall or required):
+            return self.msg.set("Grades only needs a lens grade, an Overall grade or a Required fit.")
         unmet = self.unmet.get().strip() if str(self.unmet_entry.cget("state")) == "normal" else ""
-        r = self.pg.execute("INSERT INTO jobs.decision_queue (posting_id, decision, reason, unmet, basis, grade_process, "
-                            "grade_technical, grade_ai) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING queue_id",
-                            [self.pid, decision, reason, unmet or None, self.basis.get(), *lens]).fetchone()
+        r = self.pg.execute("INSERT INTO jobs.decision_queue (posting_id, decision, reason, unmet, grade, required_fit, basis, "
+                            "grade_process, grade_technical, grade_ai) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                            "RETURNING queue_id",
+                            [self.pid, decision, reason, unmet or None, overall, required, self.basis.get(), *lens]).fetchone()
         self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))
         self.clear_form()
         self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))

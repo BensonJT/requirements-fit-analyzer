@@ -1,6 +1,9 @@
-"""Mirrors the vault's Application_Tracker.md into the `tracker` table and matches rows to postings.
+"""Mirrors the application tracker into the `tracker` table and matches rows to postings.
 
-The markdown stays the source of truth; this module only reads it. A matched tracker row
+The tracker lives in PostgreSQL (tracker.application, written only through `trk`); `.env` sets
+TRACKER_SOURCE=postgres for that (exact posting matching). The code default, `markdown`, reads the vault's
+Application_Tracker.md with fuzzy matching and is kept as the fallback. This module only reads either
+source. A matched tracker row
 also records a `decisions` row (source 'tracker'). Only an application is a `build` (a positive
 label for every lens model); a package built but not sent is a `hold`, and an explicit
 not-applied status a `pass` (user ruling 2026-10-20: Claude recommends and builds packages, so

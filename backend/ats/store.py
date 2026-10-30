@@ -254,7 +254,8 @@ CREATE TABLE IF NOT EXISTS screens (
     PRIMARY KEY (posting_id, rules_version, model_version)
 );
 
--- Mirror of the vault's Application_Tracker.md, rebuilt every run (the markdown stays the source of truth).
+-- Mirror of the application tracker, rebuilt every run by tracker_sync: read from PostgreSQL (TRACKER_SOURCE=postgres,
+-- the live setting) or, as the fallback, the vault's Application_Tracker.md. This table is never the source.
 CREATE TABLE IF NOT EXISTS tracker (
     section VARCHAR NOT NULL, date_applied VARCHAR, company VARCHAR NOT NULL, role VARCHAR NOT NULL,
     status VARCHAR, posting_id VARCHAR, matched_posting_id VARCHAR, match_kind VARCHAR, synced_at TIMESTAMP NOT NULL

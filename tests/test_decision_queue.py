@@ -155,3 +155,97 @@ def test_grade_only_row_without_grades_is_refused(pgc, duck):
     qid = _queue(pgc, pid, "grade")
     finder.cmd_apply_queue(con, Namespace(dry_run=False))
     assert "needs at least one lens grade" in _row(pgc, qid)["apply_error"]
+
+
+# ---------------------------------------------------------------- Grades only: overall grade + Required fit
+def _feedback(con):
+    return con.execute("SELECT human_grade, verdict, basis, required_fit, required_unmet, reason_code "
+                       "FROM report_feedback").fetchall()
+
+
+def test_blind_grade_only_required_call_becomes_a_gold_row(pgc, duck):
+    from backend.finder import judge2
+    con, pid = duck
+    _with_jd(con, pid)
+    qid = _queue(pgc, pid, "grade", basis="blind", required_fit="fails", unmet="Line A || Line B")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert _row(pgc, qid)["applied_at"] is not None
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0     # no build / pass / hold label
+    assert con.execute("SELECT required_fit, required_unmet FROM vw_report_feedback_blind").fetchall() == [
+        ("fails", "Line A ; Line B")]
+    assert [r[0] for r in con.execute(judge2.EVAL_SET_SQL).fetchall()] == [pid]
+    assert con.execute("SELECT scorer, required_fit FROM llm_labels").fetchall() == [("user-adjudicated", "fails")]
+    assert _feedback(con)[0][1] == "consider"                                  # neutral verdict, as a blind sheet
+
+
+def test_grade_only_overall_grade_alone(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    qid = _queue(pgc, pid, "grade", grade="adjacent")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert _row(pgc, qid)["applied_at"] is not None
+    assert _feedback(con) == [("adjacent", "consider", "seen", None, None, None)]
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM llm_labels").fetchone()[0] == 0   # no Required call, no bridge
+    assert con.execute("SELECT count(*) FROM human_lens_grades").fetchone()[0] == 0
+
+
+def test_grade_only_rolls_back_when_lens_grades_are_rejected(pgc, duck, monkeypatch):
+    from backend.finder import gold_ingest
+    con, pid = duck
+    _with_jd(con, pid)
+
+    def reject(con_, fr, rows, *a, **k):
+        fr.rejected.append({"line": 1, "posting_id": pid, "field": "x", "value": "y"})
+    monkeypatch.setattr(gold_ingest, "ingest_f4", reject)
+    qid = _queue(pgc, pid, "grade", basis="blind", required_fit="meets", grade_ai="adjacent")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "lens grades not accepted" in _row(pgc, qid)["apply_error"]
+    for table in ("report_feedback", "llm_labels", "human_lens_grades", "decisions"):
+        assert con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
+
+
+def test_grade_only_overall_or_required_needs_jd(pgc, duck):
+    con, pid = duck                      # no JD text
+    qid = _queue(pgc, pid, "grade", required_fit="meets")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "no JD text" in _row(pgc, qid)["apply_error"]
+
+
+def test_grade_only_keeps_an_earlier_required_call_it_leaves_blank(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    _queue(pgc, pid, "grade", basis="blind", required_fit="fails", unmet="Line A")
+    _queue(pgc, pid, "grade", basis="blind", grade="stretch")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert _feedback(con) == [("stretch", "consider", "blind", "fails", "Line A", None)]
+
+
+def test_grade_only_basis_mismatch_is_refused(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    _queue(pgc, pid, "grade", basis="blind", required_fit="meets")
+    qid = _queue(pgc, pid, "grade", basis="seen", required_fit="fails")    # a seen call must not replace gold
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "already has a blind human call" in _row(pgc, qid)["apply_error"]
+    assert con.execute("SELECT required_fit FROM vw_report_feedback_blind").fetchall() == [("meets",)]
+
+
+def test_unmet_without_fails_and_required_fit_on_a_build_are_refused(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    q1 = _queue(pgc, pid, "grade", required_fit="meets", unmet="Line A")
+    q2 = _queue(pgc, pid, "build", required_fit="fails")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert "only go with a Required fit of 'fails'" in _row(pgc, q1)["apply_error"]
+    assert "read only on a Grades only row" in _row(pgc, q2)["apply_error"]
+    assert con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+
+
+def test_build_with_overall_grade_writes_feedback_through_mark(pgc, duck):
+    con, pid = duck
+    _with_jd(con, pid)
+    _queue(pgc, pid, "build", grade="bullseye")
+    finder.cmd_apply_queue(con, Namespace(dry_run=False))
+    assert con.execute("SELECT decision FROM decisions").fetchall() == [("build",)]
+    assert _feedback(con) == [("bullseye", "build", "seen", "meets", None, None)]

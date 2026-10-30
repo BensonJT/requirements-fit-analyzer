@@ -65,7 +65,7 @@ fi
 #                      required-embed, [Gemma judge if --llm-top N], Jobs_Found, snapshots
 #                      (with --skip-sweep --no-screen it is only a JD fetch: the directional backfill preset;
 #                      the next FULL run screens those rows because their JD is newer than their screen)
-#   sync               finder.py sync (mirror Application_Tracker.md)
+#   sync               finder.py sync (mirror the tracker: Postgres, or the markdown fallback per TRACKER_SOURCE)
 #   top                finder.py top (the END-of-pipeline Top_Jobs file)
 #   jevtop             finder.py top --jev: Jev reviews the Apply / Review subset first (stage 2, user's go 2026-09-30;
 #                      cached rows free, ~$0.15-0.20 a night), then the page is written with the demotion pass --

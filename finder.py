@@ -358,11 +358,13 @@ targets:
   (fuzzy on both, active postings preferred). Several matches print the candidates and write nothing.
 
 what each decision feeds:
-  build   decided (leaves the lists); a positive training label for the fit models; records a human
-          required_fit of 'meets' unless --unmet names a line that is not met
-  pass    decided; a negative training label, except logistics and comp passes, which say nothing
-          about fit and are left out of training
+  build   decided (leaves the lists); a 1 label for the fit and lens models through vw_decisions; records a
+          human required_fit of 'meets' unless --unmet names a line that is not met
+  pass    decided; a `decisions` row, which reaches the fit and lens models as a 0 label through
+          vw_decisions; logistics and comp passes are left out (they say nothing about fit)
   hold    not decided: the posting keeps surfacing on the lists, marked held; not a training label
+  A mark writes report_feedback (the human-call table the gold set reads) only when it carries a
+  required_fit (a build, a requirement pass) or --grade; a plain pass or hold does not.
   The latest mark on a posting wins, so a second mark replaces the first.
 
 pass reason codes (the word before the colon):
@@ -386,6 +388,11 @@ examples:
   finder.py mark --from-file decisions.csv
                 columns posting,decision,reason,unmet,grade,basis (several unmet lines joined with ' || ');
                 every row is checked first, and one bad row writes nothing
+
+queued calls (scripts/feedback_app.py -> apply-queue):
+  the same build / pass / hold, plus "Grades only": lens grades, an overall grade and a Required fit
+  (meets | fails, with its unmet lines) and no decision. Its overall grade and Required fit go to
+  report_feedback like --grade, so a blind Required call is a gold row; no `decisions` row is written.
 
 DuckDB lock:
   mark writes to the pipeline DuckDB. While a sweep or launch.sh run holds it, mark stops with a
@@ -534,8 +541,61 @@ def cmd_mark_from_file(con, a):
 
 
 QUEUE_PENDING_SQL = """SELECT queue_id, posting_id, decision, reason, unmet, grade, basis, submitted_at,
-       grade_process, grade_technical, grade_ai FROM jobs.decision_queue
+       grade_process, grade_technical, grade_ai, required_fit FROM jobs.decision_queue
 WHERE applied_at IS NULL AND cancelled_at IS NULL AND apply_error IS NULL ORDER BY submitted_at, queue_id"""
+
+
+# A human Required call has two values (blind_sheet.REQUIRED_FIT_VALUES; judge2.evaluate scores only these).
+QUEUE_REQUIRED_FITS = ("meets", "fails")
+# report_feedback.verdict back to the `decision` argument record_mark maps it from (feedback.DECISION_VERDICT).
+_VERDICT_DECISION = {"build": "build", "pass": "pass", "consider": "hold"}
+
+
+def _prepare_grade_only(con, pid: str, r, lenses: dict, description_hash):
+    """A 'grade' (grades-only) queue row: validates it and returns the record_mark arguments its overall grade /
+    Required call imply, or None when it carries lens grades only. Raises ValueError naming what's wrong.
+
+    No `decisions` row: record_mark writes report_feedback (and bridges a required_fit into llm_labels) only.
+    Its `decision` argument just sets report_feedback.verdict, which no view or training set reads; it keeps
+    the verdict of an earlier human row on the same JD text, else 'hold' -> 'consider', the neutral verdict
+    the blind-sheet import also writes for a grade. Fields this row leaves blank keep that earlier row's values
+    (gold_ingest._merge's rule: a later row without a required_fit never erases one). A basis mismatch with an
+    earlier human call is refused, as gold_ingest reports it: a seen call must not replace a blind gold row,
+    and a posting already graded with machine calls in view cannot become a blind one."""
+    grade, fit, basis = r["grade"] or None, r["required_fit"] or None, r["basis"] or "seen"
+    unmet = [u.strip() for u in (r["unmet"] or "").split("||") if u.strip()]
+    if not (lenses or grade or fit):
+        raise ValueError("a grades-only row needs at least one lens grade, an overall grade or a Required fit")
+    if grade and grade not in rubric.GRADES:
+        raise ValueError(f"grade {grade!r} must be one of {', '.join(rubric.GRADES)}")
+    if fit and fit not in QUEUE_REQUIRED_FITS:
+        raise ValueError(f"required_fit {fit!r} must be one of {', '.join(QUEUE_REQUIRED_FITS)}")
+    if unmet and fit != "fails":
+        raise ValueError("unmet lines only go with a Required fit of 'fails'")
+    if not (grade or fit):
+        return None
+    if not description_hash:
+        raise ValueError(f"{pid} has no JD text yet, so an overall grade or Required call cannot be recorded against it")
+    prior = con.execute("""SELECT basis, verdict, reason_code, reason_detail, human_grade, required_fit, required_unmet
+                           FROM report_feedback WHERE posting_id = ? AND description_hash = ? AND assessor = 'user'""",
+                        [pid, description_hash]).fetchone()
+    prior_basis = None if not prior else "blind" if prior[0] == "blind" else "seen"   # older rows: jd_read etc.
+    if prior and prior_basis != basis:
+        raise ValueError(f"this posting already has a {prior_basis} human call on this JD text; submit again with "
+                         f"Basis {prior_basis.capitalize()}")
+    if not prior and basis == "blind" and con.execute(
+            "SELECT count(*) FROM report_feedback WHERE posting_id = ? AND assessor IN ('user', 'human-override') "
+            "AND basis != 'blind'", [pid]).fetchone()[0]:
+        raise ValueError("this posting was already graded seen, so a later call on it cannot be blind; submit "
+                         "again with Basis Seen")
+    p_verdict, p_code, p_detail, p_grade, p_fit, p_unmet = prior[1:] if prior else (None,) * 6
+    if fit:   # mark's shapes: 'fails' carries its lines (" ; "-joined, '' when none named), 'meets' none
+        unmet_text = " ; ".join(unmet) if fit == "fails" else None
+    else:
+        fit, unmet_text = p_fit, p_unmet
+    return {"description_hash": description_hash, "decision": _VERDICT_DECISION.get(p_verdict, "hold"),
+            "reason_code": p_code, "reason_detail": p_detail, "human_grade": grade or p_grade,
+            "required_fit": fit, "required_unmet": unmet_text, "basis": basis}
 
 
 def cmd_apply_queue(con, a):
@@ -544,9 +604,13 @@ def cmd_apply_queue(con, a):
     (source 'queue', source_ref 'queue:<id>', decided_at = submitted_at) and stamped applied_at, a refused one gets apply_error and is
     left for the user to fix and resubmit. Rows are never deleted (the queue is the audit trail).
     Per-lens grades (grade_process / grade_technical / grade_ai) go to human_lens_grades through gold_ingest's
-    lens-sheet path, in the same DuckDB transaction as the decision: both land, or neither does."""
+    lens-sheet path, in the same DuckDB transaction as the decision: both land, or neither does.
+    A 'grade' row writes no decision; its overall `grade` and `required_fit` go to report_feedback through
+    feedback.record_mark (_prepare_grade_only), in that same transaction, so a blind Required call is a gold
+    row (vw_report_feedback_blind). On a build / pass / hold row `required_fit` is refused: the Required call
+    there comes from the decision itself (unmet lines, a 'requirement' pass), exactly as in `mark`."""
     import psycopg
-    from backend.finder import gold_ingest
+    from backend.finder import feedback, gold_ingest
     from backend.tracker import db as pgdb
     try:
         pg = pgdb.connect()
@@ -570,17 +634,20 @@ def cmd_apply_queue(con, a):
                 pid, employer, title, _ = hits[0]
                 unmet = [u.strip() for u in (r["unmet"] or "").split("||") if u.strip()]
                 lenses = {k: r[f"grade_{k}"] for k in gold_ingest.F4_LENS_COLUMNS if r[f"grade_{k}"]}
-                if r["decision"] == "grade":   # grades only: no decision, so nothing for _prepare_mark to check
-                    if not lenses:
-                        raise ValueError("a grades-only row needs at least one lens grade")
-                    prep = None
+                description_hash = con.execute("SELECT description_hash FROM postings WHERE posting_id = ?",
+                                               [pid]).fetchone()[0]
+                prep = fb = None
+                if r["decision"] == "grade":   # grades only: no decision; overall grade / Required call via record_mark
+                    fb = _prepare_grade_only(con, pid, r, lenses, description_hash)
+                elif r["required_fit"]:
+                    raise ValueError("required_fit is read only on a Grades only row; on a build or pass the Required "
+                                     "call comes from the unmet lines and a 'requirement' reason")
                 else:
                     prep = _prepare_mark(con, pid, r["decision"], r["reason"], unmet, r["grade"], r["basis"])
                 bad = [f"{k}={g}" for k, g in lenses.items() if g not in rubric.GRADES]
                 if bad:
                     raise ValueError(f"lens grade must be one of {', '.join(rubric.GRADES)}: {', '.join(bad)}")
-                if lenses and not con.execute("SELECT description_hash FROM postings WHERE posting_id = ?",
-                                              [pid]).fetchone()[0]:
+                if lenses and not description_hash:
                     raise ValueError(f"{pid} has no JD text yet, so lens grades cannot be recorded against it")
             except ValueError as e:
                 done["refused"] += 1
@@ -596,6 +663,12 @@ def cmd_apply_queue(con, a):
             try:
                 if prep is not None:
                     _apply_mark(con, pid, r["decision"], prep, decided_at, source="queue", source_ref=f"queue:{qid}")
+                if fb is not None:
+                    feedback.record_mark(con, pid, fb["description_hash"], fb["decision"], reason_code=fb["reason_code"],
+                                         reason_detail=fb["reason_detail"], human_grade=fb["human_grade"],
+                                         required_fit=fb["required_fit"], required_unmet=fb["required_unmet"],
+                                         basis=fb["basis"], now=decided_at)
+                    print(f"    overall grade: {fb['human_grade'] or '-'}, Required: {fb['required_fit'] or '-'}")
                 if lenses:
                     acc, fr = {}, gold_ingest.FileReport(f"queue:{qid}")
                     raw = {"posting_id": pid, "note": r["reason"],
@@ -606,7 +679,7 @@ def cmd_apply_queue(con, a):
                     gold_ingest._write_human_lens_grades(con, acc)
                     print(f"    lens grades: {', '.join(f'{k}={g}' for k, g in lenses.items())}")
             except (ValueError, duckdb.Error) as e:
-                con.execute("ROLLBACK")       # the decision and its lens grades land together or not at all
+                con.execute("ROLLBACK")       # the decision or grade row and its lens grades land together or not at all
                 done[r["decision"]] -= 1
                 done["refused"] += 1
                 print(f"  queue {qid}: refused: {e}")
@@ -1021,8 +1094,12 @@ def main():
                        help="apply pending build / pass / hold calls and lens grades from the Postgres queue "
                             "(jobs.decision_queue, written by scripts/feedback_app.py) with the same checks as mark",
                        epilog="Each pending row is validated like `mark`; per-lens grades go to human_lens_grades (as a lens "
-                              "sheet would) in the same transaction, and a 'grade' row carries grades with no decision. "
-                              "Applied rows are stamped applied_at, refused "
+                              "sheet would) in the same transaction. A 'grade' (Grades only) row carries grades with no "
+                              "decision: its overall grade and Required fit (meets | fails, with its unmet lines) go to "
+                              "report_feedback as `mark --grade` writes them, so a blind Required call becomes a gold row "
+                              "for the judge2 / Jev bars; fields it leaves blank keep an earlier human call's, and a "
+                              "blind/seen mismatch with that call is refused. A Required fit on a build / pass / hold row "
+                              "is refused (there the decision implies it, as in `mark`). Applied rows are stamped applied_at, refused "
                               "ones get apply_error (shown in the applet) and are not retried. launch.sh runs it at the "
                               "start and just before the snapshot; scripts/inbox_watch.sh runs it hourly. While a run "
                               "holds the DuckDB it exits 1 and the rows wait. Postgres down: exits 1, nothing applied.")
@@ -1030,9 +1107,9 @@ def main():
     s.set_defaults(func=cmd_apply_queue)
 
     s = sub.add_parser("sync", parents=[common],
-                       help="rebuild the DuckDB tracker table from $TRACKER_SOURCE (postgres: tracker.application, "
-                            "exact posting or req id matches; markdown, the default: Application_Tracker.md, needs "
-                            "--vault) and record tracker decisions. Postgres unreachable: exits 1, nothing written "
+                       help="rebuild the DuckDB tracker table from $TRACKER_SOURCE (postgres, the live tracker since the cutover: "
+                            "tracker.application, exact posting or req id matches; markdown, the code default kept as "
+                            "the fallback: Application_Tracker.md, needs --vault) and record tracker decisions. Postgres unreachable: exits 1, nothing written "
                             "(the nightly pipeline logs a warning and continues)")
     s.add_argument("--verbose", action="store_true", help="print unmatched tracker rows")
     s.set_defaults(func=cmd_sync)

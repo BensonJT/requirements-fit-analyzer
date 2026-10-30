@@ -575,7 +575,7 @@ class App:
             self.root.after(1000, self.poll_refresh)
             return
         rc, lines = self._refresh_result
-        final = next((l for l in reversed(lines) if l.startswith(("DONE", "LOCKED", "FAILED"))), lines[-1] if lines else "")
+        final = next((l for l in reversed(lines) if l.startswith(("DONE", "PAGES", "LOCKED", "FAILED"))), lines[-1] if lines else "")
         self.msg.set(final + ("" if rc in (0, 2) else "  (log: logs/refresh_now.log)"))
         self.refresh_btn.configure(state="normal")
         self.refresh()

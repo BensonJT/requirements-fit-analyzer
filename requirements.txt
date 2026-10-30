@@ -14,3 +14,5 @@ pytest
 #   CPU torch: pip install --index-url https://download.pytorch.org/whl/cpu torch
 # Tracker Google Sheet view (optional; backend/tracker/gsheet.py): google-auth
 # PDF evidence without poppler's pdftotext (optional): pypdf
+# JD keyword tool, scripts/jd_bucketize.py (optional): spacy + en_core_web_sm
+#   uv pip install --python .venv/bin/python spacy "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"

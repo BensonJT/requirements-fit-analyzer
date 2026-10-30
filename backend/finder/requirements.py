@@ -489,6 +489,26 @@ def split_requirements(text: str, max_units: int = 0) -> list:
     return units
 
 
+def section_lines(text: str) -> list:
+    """(section, line, is_subheading) for each content line, in document order: the same boilerplate strip,
+    headings and section rules as split_requirements, but whole lines, sub-headings included ("Financial &
+    Resource Management" under Responsibilities), and no unit classification. For callers that want a section's
+    text, not requirement units (backend/jd_keywords)."""
+    lines = rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or "")))
+    kinds = [_heading_kind(l) if l else None for l in lines]
+    has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
+    section, out = ("intro" if has_headings else "body"), []
+    for line, kind in zip(lines, kinds):
+        if not line:
+            continue
+        if kind is not None:
+            section = "persona" if kind == "required" and _soft_person_heading(line) else kind
+            continue
+        if section != "drop" and not NOTICE.search(line):
+            out.append((section, line, _subheading(line)))
+    return out
+
+
 def _soft_person_heading(line: str) -> bool:
     """A Required-kind heading that is a candidate portrait ("Who you are"), not a gate list ("Basic
     Qualifications", "Requirements", "What you bring")."""

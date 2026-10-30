@@ -42,7 +42,7 @@ def duck_path(tmp_path):
         title VARCHAR, url VARCHAR, location_primary VARCHAR, workplace_type VARCHAR, work_site VARCHAR,
         pay_min INTEGER, pay_max INTEGER, pay_interval VARCHAR, posted_at DATE, posting_end_at DATE,
         first_seen_at TIMESTAMP, last_seen_at TIMESTAMP, closed_at TIMESTAMP, status VARCHAR,
-        screen_verdict VARCHAR, screen_score INTEGER, description_text VARCHAR)""")
+        screen_verdict VARCHAR, screen_score INTEGER, description_text VARCHAR, track VARCHAR DEFAULT 'fit')""")
     rows = [(A, "active", "review"), (B, "active", "reject"), (C, "closed", "reject"),
             (D, "closed", "review"), (E, "closed", "review")]
     for pid, status, verdict in rows:

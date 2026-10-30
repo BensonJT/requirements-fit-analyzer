@@ -10,7 +10,9 @@ otherwise.
     .venv/bin/python scripts/pg_snapshot.py [--duckdb db/jobsearch.duckdb] [--db NAME]
 
 Population: active postings not screen-rejected, UNION every posting named in DuckDB `decisions`,
-UNION every posting_id in tracker.application (any status; table may be empty or absent).
+UNION every posting_id in tracker.application (any status; table may be empty or absent), UNION (2026-10-30)
+every active fit posting the screen rejected that is strong on a lens -- the gem list reads why each was
+filtered (report_gates.py); reporting.postings leaves them out, so the market views are unchanged.
 Exit 0 on success, 1 on any failure (a locked DuckDB prints a clear message). A Jev-status failure only
 prints a WARNING; the snapshot still loads and exits 0.
 """
@@ -25,7 +27,7 @@ import psycopg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.tracker import db as trackerdb  # noqa: E402
-from backend.finder import jev_status  # noqa: E402
+from backend.finder import jev_gate, jev_status, report_gates  # noqa: E402
 
 POSTING_COLS = ["posting_id", "employer", "platform", "req_id", "title", "url", "location_primary",
                 "workplace_type", "work_site", "pay_min", "pay_max", "pay_interval", "posted_at",
@@ -36,12 +38,18 @@ LENS_COLS = ["final_score", "band", "tier", "verdict", "fit_process", "fit_techn
              "grade_ai", "required_fit", "rank_score", "rank_why", "lens_best"]
 DECISION_COLS = ["posting_id", "decision", "reason", "source", "source_ref", "decided_at"]
 # jev_result / jev_note (2026-10-25): what Jev did with the row, or the gate that kept it from Jev (jev_status.py).
-SNAPSHOT_COLS = POSTING_COLS + LENS_COLS + ["latest_decision", "jev_result", "jev_note", "in_tracker", "snapshot_at"]
+# Report gates (2026-10-30, report_gates.py): location filter and the gem list's "why it was filtered".
+GATE_COLS = list(report_gates.COLUMNS)
+SNAPSHOT_COLS = (POSTING_COLS + LENS_COLS + ["latest_decision", "jev_result", "jev_note", "in_tracker", "snapshot_at"]
+                 + GATE_COLS)
 
 # The population SQL. ? = list of tracker posting_ids. Order is by posting_id for a stable CLUSTER.
 POPULATION_SQL = f"""
 WITH ids AS (
     SELECT posting_id FROM postings WHERE status = 'active' AND screen_verdict IS DISTINCT FROM 'reject'
+    UNION SELECT f.posting_id FROM vw_lens_fit f JOIN postings p USING (posting_id)
+          WHERE p.status = 'active' AND p.track = 'fit' AND f.verdict = 'reject'
+            AND ({jev_gate._ELIGIBLE_LENS_SQL})
     UNION SELECT posting_id FROM decisions
     UNION SELECT unnest(?::VARCHAR[])
 ), latest AS (
@@ -78,11 +86,18 @@ def fetch(duck, ids):
     except Exception as e:  # noqa: BLE001
         print(f"pg_snapshot: WARNING jev status skipped ({type(e).__name__}: {e})", file=sys.stderr)
         jev = {r[0]: (None, f"jev status unavailable this run: {type(e).__name__}") for r in rows}
+    try:  # enrichment only, like Jev status: a gate failure leaves the columns NULL
+        gates = report_gates.compute(duck, [r[0] for r in rows], jev)
+    except Exception as e:  # noqa: BLE001
+        print(f"pg_snapshot: WARNING report gates skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        gates = {}
     for r in rows:
         r = list(r)
         if r[POSTING_COLS.index("description_text")]:  # Postgres text cannot hold NUL
             r[POSTING_COLS.index("description_text")] = r[POSTING_COLS.index("description_text")].replace("\x00", "")
-        snap.append(tuple(r) + jev.get(r[0], (None, None)) + (r[0] in tracked, now))
+        g = gates.get(r[0], {})
+        snap.append(tuple(r) + jev.get(r[0], (None, None)) + (r[0] in tracked, now)
+                    + tuple(g.get(c) for c in GATE_COLS))
     decs = duck.execute(f"SELECT {', '.join(DECISION_COLS)} FROM decisions ORDER BY posting_id, decided_at").fetchall()
     return snap, decs
 
@@ -112,7 +127,7 @@ def snapshot_one(pg, duck, posting_id):
     if r[i]:
         r[i] = r[i].replace("\x00", "")
     row = tuple(r) + (None, "added by trk add after the nightly snapshot; next run fills it",
-                      True, dt.datetime.now().replace(microsecond=0))
+                      True, dt.datetime.now().replace(microsecond=0)) + (None,) * len(GATE_COLS)
     pg.execute(f"INSERT INTO jobs.fit_snapshot ({', '.join(SNAPSHOT_COLS)}) "
                f"VALUES ({', '.join(['%s'] * len(SNAPSHOT_COLS))}) ON CONFLICT (posting_id) DO NOTHING", row)
     return True

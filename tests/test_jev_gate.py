@@ -426,3 +426,67 @@ def test_write_top_jobs_header_carries_the_jev_warning(tmp_path):
     assert "**JEV PROBLEM THIS RUN: stopped at the first account error (HTTP 402)**" in text
     assert "JEV PROBLEM" not in report.write_top_jobs(con, None, out_path=str(tmp_path / "o2")).read_text(encoding="utf-8")
     con.close()
+
+
+# ---------------------------------------------------------------- 2026-10-30: a fact-only change inherits the bar
+def _sibling(con, pv, base, *, passed, reason="catch_rate=0.83 (bar 0.7)", run_id="r-old"):
+    store.record_jev_prompt_base(con, pv, base)
+    store.insert_jev_eval(con, run_id=run_id, prompt_version=pv, family="required", n=131,
+                          metrics={"catch_rate": 0.83}, passed=passed, reason=reason)
+
+
+def test_fact_only_change_inherits_the_bar_without_a_gold_run(tmp_path, monkeypatch):
+    from backend.finder import jev
+    con, calls = _bar_fixture(tmp_path, monkeypatch, RunSummary())
+    monkeypatch.setattr(jev, "prompt_base", lambda endpoint: "base-1")
+    _sibling(con, "pv-old", "base-1", passed=True)
+    logs = []
+    res = jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append)
+    assert res["passed"] and res["inherited_from"] == "pv-old"
+    assert calls == []                                          # no gold set, no eval
+    assert con.execute("SELECT required_passed FROM vw_jev_bar WHERE prompt_version = 'pv-new'").fetchone()[0]
+    assert any("no gold run" in l for l in logs)
+    # measured now: the next run does nothing
+    assert jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=logs.append) is None
+    # and the older version's demotions are re-reviewed at once (the bar under pv-new has passed)
+    wanted = {pid: t for pid, t in jev_gate.review_subset_ids(con).items() if pid != "exempt-human"}
+    assert "demote-fails" not in jev_gate.reusable_ids(con, wanted, "pv-new")
+    con.close()
+
+
+def test_inherited_bar_names_the_version_the_gold_set_was_measured_at(tmp_path, monkeypatch):
+    from backend.finder import jev
+    con, calls = _bar_fixture(tmp_path, monkeypatch, RunSummary())
+    monkeypatch.setattr(jev, "prompt_base", lambda endpoint: "base-1")
+    _sibling(con, "pv-measured", "base-1", passed=True, run_id="r1")
+    assert jev_gate.inherit_required_bar(con, "pv-measured", log=lambda *_: None) is None   # never from itself
+    store.record_jev_prompt_base(con, "pv-mid", "base-1")
+    jev_gate.inherit_required_bar(con, "pv-mid", log=lambda *_: None)
+    jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=lambda *_: None)
+    reason = con.execute("SELECT reason FROM vw_jev_eval_latest WHERE prompt_version = 'pv-new'").fetchone()[0]
+    assert "measured at pv-measured" in reason and calls == []
+    con.close()
+
+
+@pytest.mark.parametrize("sibling_base, passed, reason", [
+    ("base-2", True, "catch_rate=0.83 (bar 0.7)"),              # the questions/model changed: different base
+    ("base-1", False, "catch_rate=0.5 (bar 0.7)"),               # the sibling's bar failed
+    ("base-1", False, "insufficient data: unjudged=131 of 131"),  # never measured
+])
+def test_bar_is_measured_when_it_cannot_be_inherited(tmp_path, monkeypatch, sibling_base, passed, reason):
+    from backend.finder import jev
+    con, calls = _bar_fixture(tmp_path, monkeypatch, RunSummary())
+    monkeypatch.setattr(jev, "prompt_base", lambda endpoint: "base-1")
+    _sibling(con, "pv-old", sibling_base, passed=passed, reason=reason)
+    jev_gate.ensure_required_bar(con, facts=[], live_ok=True, log=lambda *_: None)
+    assert calls == [("run", ["gold"]), ("eval", "pv-new")]
+    con.close()
+
+
+def test_prompt_base_ignores_the_facts_only(monkeypatch):
+    from backend.finder import jev
+    from backend.finder.jev import parse_facts
+    a = parse_facts("## Summary\nfact one\n")
+    b = parse_facts("## Summary\nfact one\nfact two\n")
+    assert jev.prompt_version(a, "typesafe") != jev.prompt_version(b, "typesafe")
+    assert jev.prompt_base("typesafe") != jev.prompt_base("vercel")

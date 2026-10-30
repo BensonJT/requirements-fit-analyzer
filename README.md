@@ -2,6 +2,8 @@
 
 Read requirement documents at their source and measure how well each one fits a verified evidence record. The first application is job postings: it reads them straight from employers' own applicant tracking systems (ATS) into a local DuckDB database, tracks each posting from the day it appears to the day it's taken down, and ranks the open ones against the evidence record. The evidence record and personal settings live outside this repo, so the code is public to read but not packaged to run as-is.
 
+How the whole system works, from the nightly run to a sent application, is drawn as an interactive [process map](https://bensonjt.github.io/profile/fit-analyzer-map.html).
+
 ## Why read the ATS directly
 
 Job aggregators re-list postings that closed weeks ago, and their links often dead-end. LinkedIn search is noisy and hides the posting date. The employer's ATS is the only source that is always current: if a req is on the Workday or Greenhouse board, it's open, and when it disappears, it's closed.

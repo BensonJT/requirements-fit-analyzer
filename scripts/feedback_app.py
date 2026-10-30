@@ -23,6 +23,9 @@ Postgres already).
 The contacts on file for the rows found are listed under the Tracker box (double-click a cell to copy it).
 "Offload PDFs to Drive" runs the vault's media_offload.py finalize on the selected row's package folder (after
 a confirmation listing the PDFs): copy to Drive, hash check, delete the local copies.
+After each queued call or tracker change, the focus and bridge report pages are rebuilt in the background from
+Postgres (a second or so; $JOBSEARCH_VAULT_DIR/Tools/reporting): their views read queued calls and tracker rows
+live, so a pass or a new application leaves the untapped lists on the next browser refresh, mid-run included.
 "Apply queue + refresh snapshot" runs scripts/refresh_now.sh (apply-queue, pg_snapshot, the report rebuild)
 and stops cleanly when a pipeline run holds the database.
 
@@ -51,6 +54,7 @@ load_dotenv(ROOT / ".env")
 JOB_SEARCH = Path(os.environ["JOBSEARCH_VAULT_DIR"]) if os.environ.get("JOBSEARCH_VAULT_DIR") else None
 VAULT = JOB_SEARCH.parents[2] if JOB_SEARCH else None
 OFFLOAD = VAULT / "System" / "Context" / "Skills" / "scripts" / "media_offload.py" if VAULT else None
+REPORTS = [JOB_SEARCH / "Tools" / "reporting" / n for n in ("build_focus_report.py", "build_bridge_report.py")] if JOB_SEARCH else []
 SCRATCH = Path(os.environ.get("KEYSTONE_SCRATCH") or Path.home() / "share" / "work")
 
 POSTING_RE = re.compile(r"^[0-9a-f]{20}$")
@@ -76,6 +80,14 @@ SELECT q.queue_id, to_char(q.submitted_at, 'MM-DD HH24:MI') AS sub,
             ELSE 'pending' END AS state
 FROM jobs.decision_queue q LEFT JOIN jobs.fit_snapshot f USING (posting_id)
 ORDER BY q.queue_id DESC LIMIT 30"""
+
+
+def rebuild_reports():
+    """Rebuild the focus and bridge report pages in the background (Postgres only, never the DuckDB); fire and forget."""
+    for script in REPORTS:
+        if script.exists():
+            subprocess.Popen(["python3", str(script)], cwd=str(script.parent),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class App:
@@ -420,6 +432,7 @@ class App:
         self.clear_form()
         self.msg.set(f"Queued #{r['queue_id']} ({self.basis.get()}): {decision} {self.pid}" + (f" ({reason})" if reason else ""))
         self.refresh()
+        rebuild_reports()
 
     def set_status(self):
         app, status, note = self.app.get(), self.status.get(), self.note.get().strip()
@@ -437,6 +450,7 @@ class App:
             self.note.set("")
             self.status.set("")
             self.lookup()          # refresh the tracker line first: lookup clears the message
+            rebuild_reports()
         self.msg.set(("trk: " + out[-1]) if out else f"trk exited {res.returncode}")
 
     def add_contact(self):

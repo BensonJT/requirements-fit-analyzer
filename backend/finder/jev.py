@@ -128,10 +128,11 @@ def _facts_hash(facts: list) -> str:
     return hashlib.sha1(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def prompt_version(facts: list, endpoint: str) -> str:
-    """sha1[:12] over everything that shapes a request: the effective question set, the rendered line
-    templates, the model and endpoint, the splitter, the facts and the size caps. Any change re-keys the cache."""
-    parts = [
+_FACTS_SLOT = "<facts>"
+
+
+def _prompt_parts(facts_hash: str, endpoint: str) -> list:
+    return [
         Q.QUESTION_SET_VERSION,
         json.dumps(Q.ROLE_QUESTIONS, sort_keys=True),
         json.dumps(Q.READING_RULES),
@@ -147,13 +148,25 @@ def prompt_version(facts: list, endpoint: str) -> str:
         endpoint,
         requirements.splitter_fingerprint(),
         judge2.JUDGE_NOISE.pattern,   # 2026-09-29: which lines a judge never sees
-        _facts_hash(facts),
+        facts_hash,
         str(Q.JD_CAP_CHARS),
         str(Q.MAX_REQUIRED_LINES),
         str(Q.MAX_RESPONSIBILITY_LINES),
         str(Q.LOCAL_OVERRIDE),
     ]
-    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def prompt_version(facts: list, endpoint: str) -> str:
+    """sha1[:12] over everything that shapes a request: the effective question set, the rendered line
+    templates, the model and endpoint, the splitter, the facts and the size caps. Any change re-keys the cache."""
+    return hashlib.sha1("\x1f".join(_prompt_parts(_facts_hash(facts), endpoint)).encode("utf-8")).hexdigest()[:12]
+
+
+def prompt_base(endpoint: str) -> str:
+    """prompt_version with the facts left out (2026-10-30): two prompt_versions with the same base differ only in
+    the fact sheet, so jev_gate.ensure_required_bar carries the required bar over instead of re-running the gold
+    set. Any change to the questions, model, endpoint, splitter or caps still changes the base."""
+    return hashlib.sha1("\x1f".join(_prompt_parts(_FACTS_SLOT, endpoint)).encode("utf-8")).hexdigest()[:12]
 
 
 def build_role_request(posting: Posting, model: str) -> dict:

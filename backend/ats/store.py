@@ -446,6 +446,15 @@ CREATE TABLE IF NOT EXISTS jev_evals (
     PRIMARY KEY (run_id, family)
 );
 
+-- 2026-10-30: each Jev prompt_version's base (jev.prompt_base: the prompt minus the fact sheet), recorded by
+-- jev_gate.ensure_required_bar. A new prompt_version whose base matches a measured one changed only the facts,
+-- so its required bar is carried over (a jev_evals row with metrics.inherited_from) instead of re-measured.
+CREATE TABLE IF NOT EXISTS jev_prompt_bases (
+    prompt_version    VARCHAR PRIMARY KEY,
+    base_version      VARCHAR NOT NULL,
+    recorded_at       TIMESTAMP NOT NULL         -- UTC, stored naive
+);
+
 -- Jobs_Found files already read back for decisions (re-read only when mtime changes).
 CREATE TABLE IF NOT EXISTS readback_log (file VARCHAR PRIMARY KEY, mtime DOUBLE NOT NULL, read_at TIMESTAMP NOT NULL);
 
@@ -2324,3 +2333,9 @@ def insert_jev_eval(con, *, run_id: str, prompt_version: str, family: str, n: Op
                 "evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [run_id, prompt_version, family, n, _json_or_none(metrics), bool(passed), reason,
                  datetime.now(timezone.utc).replace(tzinfo=None)])
+
+
+def record_jev_prompt_base(con, prompt_version: str, base_version: str) -> None:
+    """Records which base (jev.prompt_base) a Jev prompt_version belongs to; a known prompt_version is left as is."""
+    con.execute("INSERT INTO jev_prompt_bases VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                [prompt_version, base_version, datetime.now(timezone.utc).replace(tzinfo=None)])

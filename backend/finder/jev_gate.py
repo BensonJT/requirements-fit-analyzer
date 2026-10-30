@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from ..ats import store
 from . import report
 from . import jev_questions as Q
 from .jev_types import Posting, RunSummary
@@ -327,11 +328,17 @@ def ensure_required_bar(con, *, facts=None, live_ok: bool = False, transport=Non
     """2026-10-15: a fact-sheet edit re-keys Jev's prompt_version, and a review under a prompt_version with no
     passed REQUIRED bar never demotes -- so the gate silently stopped demoting on 10/5 (two sheet edits, no bar
     re-run). Before reviewing Top Jobs, if the CURRENT prompt_version has no stored required eval, Jev reviews
-    the blind gold set (~2.5M tokens, ~$0.10, ~3 min) and `evaluate_required` scores it. Returns the
-    required result dict, or None (already measured, not live, or failed -- logged, never raised)."""
+    the blind gold set (~5M tokens, ~$0.21) and `evaluate_required` scores it. Returns the
+    required result dict, or None (already measured, not live, or failed -- logged, never raised).
+    2026-10-30 (user's call): when only the fact sheet changed (same jev.prompt_base as a measured version), the
+    bar is carried over from that version instead (inherit_required_bar) and the gold set is not re-run; the
+    re-review of earlier demotions (reusable_ids) is the only spend. A change to the questions, model or caps
+    still re-measures."""
     from . import jev, jev_eval
     from datetime import datetime, timezone
-    pv = jev.prompt_version(facts if facts is not None else jev.load_facts(), jev.endpoint_from_env())
+    endpoint = jev.endpoint_from_env()
+    pv = jev.prompt_version(facts if facts is not None else jev.load_facts(), endpoint)
+    store.record_jev_prompt_base(con, pv, jev.prompt_base(endpoint))
     done = con.execute("SELECT passed, reason FROM vw_jev_eval_latest WHERE prompt_version = ? "
                        "AND family = 'required'", [pv]).fetchone()
     # 2026-10-28: an "insufficient data" result means the gold set was not reviewed (10/27: the daily token cap
@@ -342,6 +349,9 @@ def ensure_required_bar(con, *, facts=None, live_ok: bool = False, transport=Non
         if not done[0]:
             log(f"Jev gate: required bar at {pv} was measured and NOT passed -- its reviews will not demote")
         return None
+    inherited = inherit_required_bar(con, pv, log=log)
+    if inherited is not None:
+        return inherited
     if not live_ok:
         log(f"Jev gate: prompt_version {pv} has no required bar yet; not live, so it was not measured")
         return None
@@ -363,3 +373,32 @@ def ensure_required_bar(con, *, facts=None, live_ok: bool = False, transport=Non
     log(f"Jev gate: required bar at {pv}: {'PASSED' if res.get('passed') else 'NOT PASSED'} "
         f"({res.get('reason', '')})")
     return res
+
+
+def inherit_required_bar(con, pv: str, *, log=print) -> Optional[dict]:
+    """Carries a PASSED required bar over to `pv` from the newest-measured prompt_version with the same base
+    (store.jev_prompt_bases), i.e. one that differs from `pv` only in the fact sheet. Writes a `required`
+    jev_evals row (metrics.inherited_from / measured_at name the source) and returns its result dict; None when
+    `pv` has no recorded base, no sibling was measured, or the newest sibling's bar did not pass (the gold set
+    then decides). An "insufficient data" row is not a measurement and is never inherited."""
+    import json
+    from datetime import datetime, timezone
+    src = con.execute("""
+        SELECT e.prompt_version, e.passed, e.n, e.metrics
+        FROM vw_jev_eval_latest e
+        JOIN jev_prompt_bases s ON s.prompt_version = e.prompt_version
+        JOIN jev_prompt_bases c ON c.base_version = s.base_version AND c.prompt_version = ?
+        WHERE e.family = 'required' AND e.prompt_version <> ? AND NOT starts_with(coalesce(e.reason, ''), 'insufficient data')
+        ORDER BY e.evaluated_at DESC LIMIT 1""", [pv, pv]).fetchone()
+    if src is None or not src[1]:
+        return None
+    src_pv, _, n, metrics = src
+    metrics = json.loads(metrics) if isinstance(metrics, str) else dict(metrics or {})
+    measured_at = metrics.get("measured_at", src_pv)
+    metrics.update(inherited_from=src_pv, measured_at=measured_at)
+    reason = f"inherited from {src_pv} (only the fact sheet changed; gold set measured at {measured_at})"
+    run_id = datetime.now(timezone.utc).strftime("jev-inherit-%Y%m%dT%H%M%SZ")
+    store.insert_jev_eval(con, run_id=run_id, prompt_version=pv, family="required", n=n, metrics=metrics,
+                          passed=True, reason=reason)
+    log(f"Jev gate: required bar at {pv}: PASSED, {reason} -- no gold run; earlier demotions are re-reviewed")
+    return {"passed": True, "reason": reason, "inherited_from": src_pv}

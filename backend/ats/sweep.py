@@ -19,6 +19,9 @@ from . import adapters, store
 from .prefilter import DETAIL_TITLE_PATTERN, DIRECTIONAL_EXCLUDE_PATTERN, DIRECTIONAL_TITLE_PATTERN
 from .registry import load_registry
 
+# Bridge JDs fetched per run (2026-10-30): ~134 open bridge rows, a few new a night, so this covers them all.
+BRIDGE_DETAIL_BUDGET = 150
+
 
 def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -177,14 +180,14 @@ def sweep(con, rows, workers=8, max_pages=None, log=print):
 
 
 def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PATTERN, workers=6, log=print,
-                  since=None, label="Detail stage", exclude_pattern=None):
+                  since=None, label="Detail stage", exclude_pattern=None, track="fit"):
     """Fills description_text (and locations/dates/pay) for postings that still lack
     one, newest first, up to `budget` requests. A 404 closes the posting.
     `since` limits it to postings first seen at or after that time (this run's new ones)."""
     by_employer = {(r["employer"], r["platform"]): r for r in registry_rows}
     cands = store.detail_candidates(con, adapters.DETAIL_PLATFORMS, title_pattern, budget,
                                     employers=[r["employer"] for r in registry_rows], since=since,
-                                    exclude_pattern=exclude_pattern)
+                                    exclude_pattern=exclude_pattern, track=track)
     if not cands:
         log(f"{label}: nothing to fetch.")
         return 0, 0
@@ -312,6 +315,10 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
             if track in ("bridge", "all") and bridge_rows:
                 bridge_stats = sweep_bridge(con, bridge_rows, max_ring=max_ring, workers=workers,
                                             max_pages=max_pages, log=log)
+                # 2026-10-30 (user): bridge roles are judged on pay, which only the detail page carries
+                n, _ = fetch_details(con, bridge_rows, budget=BRIDGE_DETAIL_BUDGET, title_pattern=None,
+                                     label="Bridge details", track="bridge")
+                details += n
         if detail_budget and track in ("fit", "all"):
             pattern, exclude = (None if detail_all else DETAIL_TITLE_PATTERN), None
             if detail_pattern == "directional":

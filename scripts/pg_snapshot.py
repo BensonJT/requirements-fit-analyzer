@@ -27,6 +27,7 @@ import psycopg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.tracker import db as trackerdb  # noqa: E402
+from backend.ats import bridge  # noqa: E402
 from backend.finder import jev_gate, jev_status, report_gates  # noqa: E402
 
 POSTING_COLS = ["posting_id", "employer", "platform", "req_id", "title", "url", "location_primary",
@@ -40,8 +41,24 @@ DECISION_COLS = ["posting_id", "decision", "reason", "source", "source_ref", "de
 # jev_result / jev_note (2026-10-25): what Jev did with the row, or the gate that kept it from Jev (jev_status.py).
 # Report gates (2026-10-30, report_gates.py): location filter and the gem list's "why it was filtered".
 GATE_COLS = list(report_gates.COLUMNS)
+# Bridge-track fields (2026-10-30, the bridge roles report); NULL on fit rows.
+BRIDGE_COLS = ["track", "bridge_place", "employment_type", "voice", "pay_low", "pay_high", "pay_unit"]
 SNAPSHOT_COLS = (POSTING_COLS + LENS_COLS + ["latest_decision", "jev_result", "jev_note", "in_tracker", "snapshot_at"]
-                 + GATE_COLS)
+                 + GATE_COLS + BRIDGE_COLS)
+
+
+def bridge_fields(duck, ids):
+    """{posting_id: tuple in BRIDGE_COLS order} for the bridge rows among `ids`: track and place, the voice flag
+    from the title, and pay (structured, else parsed from the JD text, where most bridge boards print it)."""
+    rows = duck.execute("""SELECT posting_id, track, bridge_place, employment_type, title, pay_min, pay_max,
+                                  pay_interval, description_text
+                           FROM postings WHERE track = 'bridge' AND posting_id IN (SELECT unnest(?::VARCHAR[]))""",
+                        [list(ids)]).fetchall()
+    out = {}
+    for pid, track, place, emp, title, lo, hi, interval, jd in rows:
+        pay = (lo, hi if hi is not None else lo, interval) if lo is not None else bridge.pay_from_text(jd)
+        out[pid] = (track, place, emp, bridge.voice_flag(title)) + (tuple(pay) if pay else (None, None, None))
+    return out
 
 # The population SQL. ? = list of tracker posting_ids. Order is by posting_id for a stable CLUSTER.
 POPULATION_SQL = f"""
@@ -91,13 +108,19 @@ def fetch(duck, ids):
     except Exception as e:  # noqa: BLE001
         print(f"pg_snapshot: WARNING report gates skipped ({type(e).__name__}: {e})", file=sys.stderr)
         gates = {}
+    try:  # enrichment only
+        bridges = bridge_fields(duck, [r[0] for r in rows])
+    except Exception as e:  # noqa: BLE001
+        print(f"pg_snapshot: WARNING bridge fields skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        bridges = {}
+    no_bridge = (None,) * len(BRIDGE_COLS)
     for r in rows:
         r = list(r)
         if r[POSTING_COLS.index("description_text")]:  # Postgres text cannot hold NUL
             r[POSTING_COLS.index("description_text")] = r[POSTING_COLS.index("description_text")].replace("\x00", "")
         g = gates.get(r[0], {})
         snap.append(tuple(r) + jev.get(r[0], (None, None)) + (r[0] in tracked, now)
-                    + tuple(g.get(c) for c in GATE_COLS))
+                    + tuple(g.get(c) for c in GATE_COLS) + bridges.get(r[0], no_bridge))
     decs = duck.execute(f"SELECT {', '.join(DECISION_COLS)} FROM decisions ORDER BY posting_id, decided_at").fetchall()
     return snap, decs
 
@@ -127,7 +150,7 @@ def snapshot_one(pg, duck, posting_id):
     if r[i]:
         r[i] = r[i].replace("\x00", "")
     row = tuple(r) + (None, "added by trk add after the nightly snapshot; next run fills it",
-                      True, dt.datetime.now().replace(microsecond=0)) + (None,) * len(GATE_COLS)
+                      True, dt.datetime.now().replace(microsecond=0)) + (None,) * (len(GATE_COLS) + len(BRIDGE_COLS))
     pg.execute(f"INSERT INTO jobs.fit_snapshot ({', '.join(SNAPSHOT_COLS)}) "
                f"VALUES ({', '.join(['%s'] * len(SNAPSHOT_COLS))}) ON CONFLICT (posting_id) DO NOTHING", row)
     return True

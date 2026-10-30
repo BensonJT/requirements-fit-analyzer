@@ -280,3 +280,38 @@ def voice_flag(title: str) -> str:
 # §31.6, user ruling 2026-09-21): low-voice first (the better fit), then no opinion, then
 # high-voice LAST -- voice-heavy roles are a poor fit, so they sort to the bottom, never off.
 VOICE_SORT_ORDER = {"low": 0, "": 1, "high": 2}
+
+
+# ---------------------------------------------------------------- pay from the JD text (2026-10-30)
+# Bridge roles are judged on pay, and most bridge boards print it only in the JD text, each in its own
+# words: Walmart "The hourly wage range for this position is $17.00 to $25.00", Target "Starting Hourly Rate
+# ... $17.25 USD per hour", Kohl's "Pay Range: $13.00 - $18.80", Weis "starts at $15.00 and is up to $22.00",
+# Wegmans "$17 - $17.50 / hour", CarMax "$16.00 - $25.60" or "$75,200.00 - $131,700.00". A dollar figure
+# followed by million/billion (AutoNation's charity line) is never pay.
+_MONEY = r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)(?!\s*(?:million|billion|[mb]\b|k\b))"
+_PAY_RANGE_RE = re.compile(_MONEY + r"(?:\s*(?:USD|/\s*h(?:ou)?r))?\s*(?:-|–|—|to|and is up to)\s*" + _MONEY, re.I)
+_PAY_ONE_RE = re.compile(_MONEY + r"\s*(?:USD\s*)?(?:per\s+hour|/\s*h(?:ou)?r|an\s+hour|hourly)", re.I)
+_PAY_CONTEXT_RE = re.compile(r"(?:pay|wage|salary|rate|hourly|compensation|starts at)", re.I)
+
+
+def _money(s: str) -> float:
+    return float(s.replace(",", ""))
+
+
+def pay_from_text(text: str):
+    """(low, high, 'hour' | 'year') from the first pay statement in a bridge JD, or None. A range is read
+    only when a pay word sits in the 80 characters before it, or it reads as an hourly rate; one figure only
+    with an explicit per-hour marker. Under $300 is hourly, otherwise yearly."""
+    if not text:
+        return None
+    for m in _PAY_RANGE_RE.finditer(text):
+        before = text[max(0, m.start() - 80):m.start()]
+        lo, hi = _money(m.group(1)), _money(m.group(2))
+        if not (_PAY_CONTEXT_RE.search(before) or hi < 300) or lo <= 0 or hi < lo:
+            continue
+        return lo, hi, ("hour" if hi < 300 else "year")
+    m = _PAY_ONE_RE.search(text)
+    if m:
+        v = _money(m.group(1))
+        return v, v, "hour"
+    return None

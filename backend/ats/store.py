@@ -2097,7 +2097,7 @@ DETAIL_MAX_ATTEMPTS = 3  # a posting whose fetch keeps coming back empty/errorin
 
 
 def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=None, since=None,
-                       retry_exhausted=False, exclude_pattern=None):
+                       retry_exhausted=False, exclude_pattern=None, track="fit"):
     """Active postings still missing a JD, least-tried and newest first. `title_pattern` (regex) is a
     BUDGETING device — it decides which postings get a detail request first, not which ones matter.
 
@@ -2107,12 +2107,12 @@ def detail_candidates(con, platforms, title_pattern=None, limit=300, employers=N
 
     `fit` track only (sprint plan §31.5): JD detail fetch is off for a bridge posting by default --
     the bridge list payload is enough for `finder.py bridge`'s output, and no bridge row is ever
-    worth the request budget a fit-track posting is competing for. This is unconditional (no
-    parameter lifts it) rather than an opt-in flag, so every EXISTING caller of this function stays
-    correctly scoped to `fit` with no code change on their end."""
-    where = ("status = 'active' AND track = 'fit' AND description_text IS NULL "
+    worth the request budget a fit-track posting is competing for. Every existing caller stays scoped to
+    `fit` by the default. 2026-10-30 (user): bridge roles are now in active use, and pay is what they are
+    judged on, so the sweep runs a separate small bridge detail stage with `track='bridge'`."""
+    where = ("status = 'active' AND track = ? AND description_text IS NULL "
              "AND platform IN (SELECT unnest(?::VARCHAR[]))")
-    params = [list(platforms)]
+    params = [track, list(platforms)]
     if not retry_exhausted:
         where += " AND detail_attempts < ?"
         params.append(DETAIL_MAX_ATTEMPTS)

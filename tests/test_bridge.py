@@ -3,6 +3,7 @@ data-loss guard (§31.4), written FIRST per the branch's process instructions. N
 import os
 import sys
 from datetime import date, datetime, time, timedelta
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.ats import bridge, store  # noqa: E402
@@ -913,3 +914,18 @@ ADDRESS_CASES = [
 def test_address_shapes():
     for text, city, state, want in ADDRESS_CASES:
         assert bridge.location_matches(text, city, state) is want, text
+
+
+@pytest.mark.parametrize("text, expect", [
+    ("The hourly wage range for this position is $17.00 to $25.00*", (17.0, 25.0, "hour")),
+    ("Starting Hourly Rate / Salario por Hora Inicial: $17.25 USD per hour", (17.25, 17.25, "hour")),
+    ("Pay Range: $13.00 - $18.80", (13.0, 18.8, "hour")),
+    ("The hourly pay for this position starts at $15.00 and is up to $22.00.", (15.0, 22.0, "hour")),
+    ("$17 - $17.50 / hour", (17.0, 17.5, "hour")),
+    ("Salary: $75,200.00 - $131,700.00 May be eligible for bonus", (75200.0, 131700.0, "year")),
+    ("Through DRV PNK, we have raised over $40 million for cancer-related causes", None),
+    ("No pay stated here.", None),
+    ("", None),
+])
+def test_pay_from_text(text, expect):
+    assert bridge.pay_from_text(text) == expect

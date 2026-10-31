@@ -466,8 +466,10 @@ def test_parse_tracker_shapes(tmp_path):
 def test_tracker_sync_exact_fuzzy_none_and_decisions(tmp_path):
     con = store.connect(str(tmp_path / "t.duckdb"))
     ids = _seed(con)
+    # First seen at a fixed date inside FUZZY_MATCH_WINDOW_DAYS of the row's 2026-08-01 date applied: seeding it at
+    # "now" made this test fail once the clock passed 2026-10-30 (day 91), with the matcher behaving correctly.
     store.record_board(con, "Initech", "workday", [N.base(req_id="I1", title="Senior Process Improvement Lead - Remote")],
-                       pipeline._now())
+                       datetime(2026, 8, 5, 12, 0))
     (tmp_path / "Application_Tracker.md").write_text(TRACKER_MD.format(pid_a=ids["A"]))
     counts = tracker_sync.sync(con, str(tmp_path), log=_quiet)
     assert (counts["rows"], counts["exact"], counts["fuzzy"], counts["none"]) == (5, 1, 1, 3)

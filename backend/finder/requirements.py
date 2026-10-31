@@ -18,7 +18,11 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-10-23.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-10-30.1"   # bump when splitting or classing changes (part of the requirement cache key)
+                                    # 2026-10-30.1: employer footer statements (EEO, fair chance, pay-range and
+                                    # benefit notices, entity disclaimers) drop by content wherever they sit, so the
+                                    # last heading no longer absorbs the footer; a qualification-shaped line is never
+                                    # dropped. Intro "You will ..." sentences are responsibilities, not intro
                                     # 2026-09-30.1: USAJobs paragraph dumps -- an inline qualification opener
                                     # ("SPECIALIZED EXPERIENCE GS-14:", "Specialized experience is defined as:")
                                     # opens Required mid-paragraph; application mechanics (time-in-grade, SF-50,
@@ -148,6 +152,54 @@ USAJOBS_NOTICE = re.compile(
     r"|will be (?:evaluated|assessed) (?:based )?on|assessment (?:results|process|for this application)|situational judgment test"
     r"|ssjt|timed test|cut score|answer each item|must be fully documented|application materials|supporting documents"
     r"|applicants may (?:also )?(?:substitute|combine)|education portion|month and year start)\b", re.I)
+# 2026-10-30.1: employer footer statements. Nothing closes the last qualification heading, so a footer that follows
+# it was filed as Preferred requirements (Capital One: 27 lines after "Preferred Qualifications"; Microsoft: the base
+# pay paragraph). Matched by content on every line wherever it sits. Each pattern is a statement form, never a
+# topic: "manage reasonable accommodation requests" or "design incentive compensation programs" are real duties and
+# must not match. A qualification-shaped line (years / degree / leading "Must") is never dropped by it.
+FOOTER_LINE = re.compile(
+    r"\b(?:(?:is|are) an? (?:equal (?:employment )?opportunity|eoe|affirmative action)\b|opportunity employer"
+    r"|without regard to (?:race|age|sex|religion|color)|applicants? with (?:a |arrest (?:and|or) )?(?:criminal|conviction)"
+    r" (?:histor|record)|criminal background inquiries|fair chance (?:act|ordinance)|criminal records screening"
+    r"|drug-free workplace|(?:require|need|request)s? (?:an? )?(?:reasonable )?accommodations?\b"
+    r"|recruitingaccommodation|will not sponsor (?!(?:a |an |the )?(?:security )?clearance|this requirement)|not (?:be )?(?:able to )?(?:offer |provide )?(?:visa )?sponsor(?:ship)?"
+    r" (?:a new|for this|now or)|minimum and maximum (?:full-time )?(?:annual )?salar|salary information is solely"
+    r"|subject to the pay range|salaries for part-time|will be prorated|eligible (?:to earn|for) [^.]{0,40}incentive"
+    r" compensation|discretionary or non[- ]?discretionary|eligibility varies based on|accept applications for a"
+    r" minimum|no agencies please|does not provide, endorse|not liable for third-party|several different entities"
+    r"|any position posted in|questions about [^.]{0,40}recruiting process|in search of information on employment"
+    r"|kept confidential and will be used only|typical base pay range|base pay range for this (?:role|position)"
+    r"|this role is hybrid meaning|in-person days for associates|enterprise-? ?wide virtual work days"
+    r"|learn more at the [^.]{0,40}careers? (?:web)?site)", re.I)
+
+
+# A pay paragraph the line rejoiner glued onto the requirement before it (a Microsoft certification bullet ending in
+# ", or" ran into "Solution Engineering IC5 - The typical base pay range ..."): cut the tail, keep the requirement.
+PAY_TAIL = re.compile(r",?\s*(?:(?:or|and)\s+)?(?:[A-Z][\w&/]*\s+){1,4}IC\d+\s*[-–]\s*The typical base pay range\b.*$")
+
+
+def _footer(piece: str) -> bool:
+    return bool(FOOTER_LINE.search(piece)) and not _qualification_shaped(piece)
+
+
+def _cut_pay_tail(piece: str) -> str:
+    return PAY_TAIL.sub("", piece).rstrip(" ,;") if PAY_TAIL.search(piece) else piece
+
+
+# 2026-10-30.1: an intro sentence addressed to the candidate's work ("You will create and modify processes", "As a
+# Senior Manager on our team, you will drive strategy") is a responsibility; the intro section had dropped it (the
+# keyword tool lost "tool creation and evolution" and "data integrity" from Capital One R248994). Joining, reporting
+# and benefit sentences ("You will join", "you'll report to", "You will be eligible") stay intro.
+YOU_WILL = re.compile(
+    r"^\W*(?:in this role,?\s+|as (?:a|an|the|our)\b[^.]{0,120}?,\s*)?you(?:['’]ll| will)\s+"
+    r"(?!(?:be (?:part|joining|eligible|offered|paid|considered|reporting)|join|report|receive|enjoy|get|have access"
+    r"|have the (?:opportunity|chance)|work (?:alongside|with a team))\b)", re.I)
+
+
+def _you_will(line: str) -> bool:
+    return any(YOU_WILL.search(s) for s in _SENTENCE_SPLIT.split(line))
+
+
 LONG_LINE = 600   # a paragraph-dump line: handled sentence by sentence, never dropped or kept whole
 _SENTENCE_SPLIT = re.compile(r"(?<!\bU\.S)(?<=[.!?])\s+(?=[A-Z(])|(?<=[a-z][a-z][.!?])(?=[A-Z][a-z])|\s(?=\(?\d{1,2}\)\s+[A-Z])")
 
@@ -462,11 +514,14 @@ def split_requirements(text: str, max_units: int = 0) -> list:
                 section = "required"     # 2026-09-30.1: the opener holds for the rest of the paragraph and beyond
                 if opener.start() <= 3:
                     piece = piece[opener.end():].lstrip(":;,- ").strip()
-            if USAJOBS_NOTICE.search(piece):
+            piece = _cut_pay_tail(piece)
+            if USAJOBS_NOTICE.search(piece) or _footer(piece):
                 continue
             # 2026-09-29.2: a stated status ("..., preferred", "Must ...") belongs to its own sentence, not to every
             # sentence the rejoined line carries
             line_section = inline_section(piece) or section
+            if line_section == "intro" and _you_will(piece):
+                line_section = "responsibility"
             if line_section == "persona":
                 line_section = ("required" if not explicit_required or _qualification_shaped(piece)
                                 else "preferred")
@@ -504,7 +559,14 @@ def section_lines(text: str) -> list:
         if kind is not None:
             section = "persona" if kind == "required" and _soft_person_heading(line) else kind
             continue
-        if section != "drop" and not NOTICE.search(line):
+        if section == "drop" or NOTICE.search(line):
+            continue
+        line = _cut_pay_tail(line)
+        if not line:
+            continue
+        if _you_will(line) and section == "intro":
+            out.append(("responsibility", line, False))
+        elif not _footer(line):
             out.append((section, line, _subheading(line)))
     return out
 

@@ -95,3 +95,36 @@ unpunctuated line followed by a longer line is a label.
 Any splitter change re-keys Jev's prompt_version, so the next run re-scores the 133-posting gold set (~5.5M tokens,
 11/01) and re-splits coverage. Ship every fix above as ONE `SPLITTER_VERSION`, re-run `collect.py` on both samples
 and compare against this baseline before merging.
+
+## Result: splitter 2026-11-01.1 (branch `splitter-20261101`)
+Measured with the same two samples (`collect.py`, then `rates.py`), baseline 2026-10-30.1 vs 2026-11-01.1:
+
+| Measure | Population before / after | Corpus before / after |
+|---|---|---|
+| Required lines > 30 (Jev cap) | 3.1% / 1.4% | 3.1% / 2.1% |
+| A Required line carries a preferred cue | 14.6% / 8.7% | 16.5% / 9.7% |
+| Required lines led by "Preferred/Desired/Bonus" | 1.7% / 0.1% | 2.2% / 0.2% |
+| Required section mostly duties | 1.7% / 0.6% | 1.0% / 0.6% |
+| Required lines but 0 Responsibility lines | 8.5% / 6.6% | 15.7% / 13.6% |
+| Median / p90 Required lines | 9 / 21 -> 8 / 18 | 10 / 21 -> 8 / 19 |
+| Total Required lines | 18,599 -> ~16,400 | 88,116 -> ~79,500 |
+
+Required lines changed in about 26% of population postings. 6 population postings lost every Required line, all
+correctly: Oracle "preferred but not required" lines and duties ending "as required". The corpus's 50 such losses
+(Toast "AI at Toast" marketing, McKesson physical demands, "a plus but not required") were checked the same way.
+The 4 audit cases: GDIT Required 41 -> 14 with 20 duties found (was 0); Deloitte 40 -> 10 with the 22 accreditations
+as one "One of ..." line and the soft skills moved to Preferred; ServiceNow 44 -> 32 with its duties back in
+Responsibilities; McKesson 60 -> 59 (see §5).
+
+Note: `flips.py` counts raw heading tags (`_heading_kind`), before `_resolve_kinds`, so its numbers (1,003 -> 823)
+understate the change; the line-level measures above are what Jev reads.
+
+**§5 rejected.** The portrait-before-formal-block rule broke the 2026-10-20 measured decision that a hard-worded
+heading ("Top skills or competencies to be successful") carries real requirements even when a "Basic
+Qualifications" block follows (`tests/test_splitter_persona.py`). It was removed; McKesson and ServiceNow stay long,
+and Jev's over-cap rule keeps qualification-shaped lines first.
+
+**Jev cost of shipping it.** With the 11/01 carry-over (`jev.request_base`, jev `9e3c22d`), a review is reused at 0
+tokens when the new splitter selects the same lines. Of the 237 reviews under prompt_version d85211a8b443: gold
+set 74 of 133 carry over (5.56M -> ~2.74M tokens to re-measure), other reviews 76 of 104 carry over (4.40M ->
+~1.31M). The gold set has grown to 143 since; the 10 new ones are reviewed either way.

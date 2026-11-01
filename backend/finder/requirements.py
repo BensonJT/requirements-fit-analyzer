@@ -18,7 +18,15 @@ from backend import profile as P
 
 from .labels import strip_boilerplate
 
-SPLITTER_VERSION = "2026-10-30.1"   # bump when splitting or classing changes (part of the requirement cache key)
+SPLITTER_VERSION = "2026-11-01.1"   # bump when splitting or classing changes (part of the requirement cache key)
+                                    # 2026-11-01.1 (docs/SPLITTER_STUDY_20261101.md, 9,315 JDs): a topic heading
+                                    # after Preferred stays Preferred and one over duty lines stays Responsibilities;
+                                    # a short line whose only cue is a topic noun is content; "one of the
+                                    # following" lists are one
+                                    # line; team / company / benefit / bonus / tag headings drop; "Job
+                                    # Description" resets to intro; new duty, Required and Preferred openers;
+                                    # leading, mid-line and widened trailing preferred status; "X required, Y
+                                    # preferred" splits; "as required" is not a status; sentence-case duty labels
                                     # 2026-10-30.1: employer footer statements (EEO, fair chance, pay-range and
                                     # benefit notices, entity disclaimers) drop by content wherever they sit, so the
                                     # last heading no longer absorbs the footer; a qualification-shaped line is never
@@ -51,7 +59,12 @@ RESPONSIBILITY_HEADINGS = (r"responsibilit|what you.ll do|what you will do|dutie
                            r"|success metrics|^you will$|^you.ll$"
                            # 2026-10-23.1, mined from the 53 active postings still without a Required section
                            r"|how you.ll make an impact|what you will be responsible for|problems you.ll solve"
-                           r"|work you.ll own|what you will transform")
+                           r"|work you.ll own|what you will transform"
+                           # 2026-11-01.1 (docs/SPLITTER_STUDY_20261101.md §2): duty openers left as intro or body
+                           r"|work you.ll do|^your mission$|^mission$|^the work$|^the job$|essential (?:job )?functions"
+                           r"|^job functions$|what you.ll work on|how you.ll make a difference|primary duties|major duties"
+                           r"|key duties|core duties|what you.ll own|^your day$|main tasks|what the role involves"
+                           r"|successful candidate will (?!have|possess|bring|need|be\b)")
 # Person-side headings the rules' REQUIRED_HEADINGS does not carry; counted as Required for coverage only.
 PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you|your background"
                    r"|what we.re looking for|what we are looking for|competenc|you have|you bring|you.ll bring"
@@ -64,7 +77,11 @@ PERSON_HEADINGS = (r"skills|knowledge|experience|education|who you are|about you
                    # 2026-09-29.3: Grafana's "What Makes You a Great Fit:" was read as more responsibilities
                    r"|great fit|good fit|strong fit|makes you"
                    # 2026-10-23.1
-                   r"|who we are looking for|who we.re looking for|thrive here if")
+                   r"|who we are looking for|who we.re looking for|thrive here if"
+                   # 2026-11-01.1: required openers the study found unrecognized
+                   r"|minimum requirement\b|^qualification$|qualification requirements|mandatory|essential criteria"
+                   r"|essential qualifications?|key qualifications|licen[cs](?:e|es|ing)\b|^certifications?$|^languages?$"
+                   r"|successful candidates? will (?:have|possess|bring|need)")
 # 2026-10-20.1: the SOFT person headings -- a portrait of the candidate, not a list of gates. Capital One's "Who you
 # are:" ("Do-er:", "Team Player:", "You ask why...") filed seven traits as Required at weight 1.0, above its real
 # Basic Qualifications (Bachelor's 0.54), so the top-18 cut, the judge and Jev read the traits as the bar. When the
@@ -80,7 +97,12 @@ HARD_PERSON_HEADINGS = (r"skills|knowledge|experience|education|competenc|expert
                         r"|you will bring|you.re bringing|we expect|must.haves?|you must have|you should have"
                         r"|what you will need|you need|you.ll need|what we need|need from you|what it takes")
 # Preferred headings the rules' PREFERRED_HEADINGS does not carry (splitter only; the rule engine is unchanged).
-SPLITTER_PREFERRED_HEADINGS = r"desirable|a plus|good to have|\bwe prefer\b|\bprefer(?:red)? to have\b"   # 2026-09-29.4: RTX "Qualifications We Prefer"
+SPLITTER_PREFERRED_HEADINGS = (r"desirable|a plus|good to have|\bwe prefer\b|\bprefer(?:red)? to have\b"   # 2026-09-29.4: RTX "Qualifications We Prefer"
+                               # 2026-11-01.1: "What will make you stand out", "Additional skills we'll prioritize",
+                               # Carrot's "While not required, we would be especially excited if you bring"
+                               r"|stand out|we.ll prioritize|even better|extra credit|differentiators|^preferences$"
+                               r"|bonus if|would be (?:great|nice|a plus)|not required|especially excited|^optional$"
+                               r"|^pluses$")
 DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits|perks|what we offer|why join"
                  r"|compensation|pay range|salary|equal (employment )?opportunity|eeo|our commitment|life at"
                  r"|accommodation|privacy|disclaimer|additional information|how to apply|pay transparency"
@@ -91,7 +113,39 @@ DROP_HEADINGS = (r"about (us|the company|the team|our|[A-Z])|who we are|benefits
                  r"|fair chance|usage policy|third.party applications|candidate privacy|e-verify|know your rights"
                  r"|recruitment fraud|notice to (?:applicants|candidates|recruiters|agencies)"
                  # 2026-09-29.2: benefit sections seen in gold postings (Amgen, Toyota)
-                 r"|what you can expect|highlights include|a few highlights")
+                 r"|what you can expect|highlights include|a few highlights"
+                 # 2026-11-01.1 (study §2): team, company, benefit and tag headings whose lines stayed in Required
+                 # (977 postings) or Preferred (647); anchored where a bare word would catch real headings
+                 r"|company overview|company profile|what we believe|our culture|how we work|department description"
+                 r"|^(?:the|our) team$|team overview|meet the team|about this team|employee referral|parental leave"
+                 r"|paid time off|^work shift$|^sponsorship$|^the details$|^pay$|^keywords$|unleash your potential"
+                 r"|tuition reimbursement|educational assistance|^#?li-[a-z0-9]+$|^\d{4,7}\s*-?\s*\d{4,7}\s*usd$")
+# 2026-11-01.1: headings that end a metadata block and start the description proper. GDIT's "Public Trust/Other
+# Required:" field opened Required and "Job Description:" (unrecognized) left the whole JD there (106 postings).
+# A reset returns to intro (or body when the posting has no section headings).
+RESET_HEADINGS = r"^(?:job description|description|overview|position overview|role overview|the position)$"
+# 2026-11-01.1: "requirements" as the object of the work, not a list of them: "Requirements Gathering", "Business
+# Analysis & Requirements Management", "Technical Requirements & Solution Framing" opened Required inside duties.
+REQ_WORK_OBJECT = re.compile(
+    r"\brequirements?\s+(?:gathering|management|translation|definition|discovery|elicitation|analysis|framing"
+    r"|engineering|documentation)|\b(?:business|technical|product|stakeholder|functional|user|system)\s+requirements"
+    r"|\brequirements\s*(?:&|and)\s*(?:discovery|solution|design|delivery|scoping)", re.I)
+# 2026-11-01.1: a heading that re-opens Required after a Preferred section must say so; a topic heading
+# ("Competencies", "Education", "Knowledge, Skills and Abilities", Fannie Mae's keyword-dump "Qualifications")
+# after Preferred stays Preferred (1,003 postings flipped back). Its qualification-shaped lines still go to
+# Required (the persona rule).
+GATE_HEADING = re.compile(r"\brequire(?:d|ments?)\b|\bminimum\b|\bbasic\b|\bmust\b|\bmandatory\b|\bneed(?:ed)?\b",
+                          re.I)
+# 2026-11-01.1: a duty-led line (imperative or third person), for telling a topic heading inside Responsibilities
+# ("Content and knowledge amplification", "Communication Skills") from a heading that opens Required.
+DUTY_LEAD = re.compile(
+    r"^\W*(?:lead|manage|develop|partner|drive|own|build|design|collaborate|support|coordinate|oversee|create|ensure"
+    r"|define|establish|serve|act|analy[sz]e|identify|implement|deliver|monitor|prepare|provide|maintain|conduct"
+    r"|facilitate|track|present|communicate|work|participate|perform|review|translate|evaluate|assist|plan|report"
+    r"|champion|run|operate|direct|guide|influence|advise|use|leverage|engage|respond|recommend|operate|cultivate"
+    r"|recruit|embed|enable|contribute|set|shape|drive|automate|integrate|document|conduct|answer|prioritize"
+    r"|utilize|apply|organize|negotiate|mentor|coach|train|research|write|draft|test|validate)(?:s|es|d|ed)?\b"
+    r"|^\W*you(?:['’]ll| will)\b", re.I)
 # A degree or education-level line: with a years line, the shape of a qualification wherever it sits (the
 # no-Required rescue in split_requirements).
 DEGREE_LINE = re.compile(r"\b(?:bachelor|master|associate|doctorate|ph\.?\s?d|mba)[’']?s?\b[^.]{0,40}\bdegree\b"
@@ -170,7 +224,10 @@ FOOTER_LINE = re.compile(
     r"|any position posted in|questions about [^.]{0,40}recruiting process|in search of information on employment"
     r"|kept confidential and will be used only|typical base pay range|base pay range for this (?:role|position)"
     r"|this role is hybrid meaning|in-person days for associates|enterprise-? ?wide virtual work days"
-    r"|learn more at the [^.]{0,40}careers? (?:web)?site)", re.I)
+    r"|learn more at the [^.]{0,40}careers? (?:web)?site"
+    # 2026-11-01.1: Deloitte's pay-range statements, filed as Preferred lines
+    r"|wage range for this role|disclosed range estimate|hired at or near the top of the range"
+    r"|reasonable estimate of the current range|discretionary annual incentive program)", re.I)
 
 
 # A pay paragraph the line rejoiner glued onto the requirement before it (a Microsoft certification bullet ending in
@@ -314,24 +371,63 @@ def _heading_kind(line: str):
     # A short line phrased as a question that names a DROP section ("What do we offer?") is a heading too: a
     # question is a label, never a claim, so it cannot swallow a real requirement the way a statement could.
     drop_question = s.endswith("?") and len(s.split()) <= 8 and bool(re.search(DROP_HEADINGS, s, re.I))
+    # 2026-11-01.1: Toast's "What will help you stand out (Nonessential Skills/Nice to Haves)" -- a line that names its
+    # own optional status in a short label is a Preferred heading, whatever its case
+    if (not _BULLET.match(line) and len(s.split()) <= 12 and not s.endswith(".")
+            and re.search(r"\b(?:nice[- ]to[- ]haves?|non-?essential|bonus points|(?:help you |make you )?stand out)\b", s, re.I)
+            and not re.search(r"\b(?:experience|years?|degree)\b.{3,}", re.sub(r"\([^)]*\)", "", s), re.I)):
+        return "preferred"
     if not (ends_colon or short_label or _known_heading_label(s) or drop_question or _whole_heading(s)):
+        # 2026-11-01.1: GDIT's "...will execute the following responsibilities:" ran past the 80-character colon limit
+        if raw.endswith(":") and len(s) <= 150 and re.search(
+                r"(?:the following|these|key|primary|additional) (?:responsibilities|duties)"
+                r"|(?:responsibilities|duties) (?:include|are|will include)", s, re.I):
+            return "responsibility"
         return None
+    # 2026-11-01.1: a degree line is a claim, never a heading (Fannie Mae's "Bachelor's Level Degree (Required)")
+    if re.search(r"\b(?:bachelor|master|associate|doctorate|mba|ph\.?\s?d)[’']?s?\b", s, re.I) and not ends_colon:
+        return None
+    # 2026-11-01.1: a short line that only LOOKS like a label (no colon, not a known heading phrase end to end) and
+    # whose only cue is a topic noun ("experience", "skills", "knowledge") is content, not a heading: Deloitte's first
+    # Preferred item "Azure DevOps experience" re-opened Required for the rest of the list; "Excellent time
+    # management skills", "Local market knowledge" did the same. "Technical skills", "Key responsibilities",
+    # "Required skills" still open their sections.
+    only_short = not (ends_colon or _known_heading_label(s) or drop_question or _whole_heading(s))
+    s_req = REQ_WORK_OBJECT.sub(" ", s)
+    topic_only = only_short and _topic_noun_line(s_req)
     # 2026-09-29.1: a short line naming a qualification ("Advanced degree preferred", "Public Trust") is a claim
     if (QUALIFICATION_TERM.search(s) and not ends_colon and not _known_heading_label(s) and not _whole_heading(s)
             and not re.search(DROP_HEADINGS, s, re.I)):
         return None
     if LOGISTICS.search(s) and not re.search(DROP_HEADINGS, s, re.I):
         return None
-    if re.search(r"physical (?:demands|requirements)|work(?:ing)? (?:environment|conditions)", s, re.I):
-        return "drop"   # 2026-09-29.1: "Physical Requirements" names 'requirements' but is logistics
+    if re.search(r"physical (?:demands?|requirements)|work(?:ing)? (?:environment|conditions)", s, re.I):
+        return "drop"   # 2026-09-29.1: "Physical Requirements" names 'requirements' but is logistics (11-01.1: "Physical
+                        # Demand Requirements", USAA)
+    # 2026-11-01.1: a benefit heading naming a bonus ("Peer Bonus Awards", "Annual Bonus Eligibility": 221 postings)
+    # opened Preferred through PREFERRED_HEADINGS' "bonus"; "Bonus points", "Bonus if", a bare "Bonus" stay Preferred
+    if re.search(r"tuition reimbursement|educational assistance|parental leave|paid time off|employee referral", s, re.I):
+        return "drop"   # 2026-11-01.1: benefit headings that also name a person word ("Educational Assistance")
+    if re.search(r"\b(?:bonus|incentive)", s, re.I) and re.search(
+            r"annual|eligib|award|potential|target|discretionary|\blti\b|program|plan\b|structure|sign[- ]on|referral"
+            r"|peer|\d", s, re.I):
+        return "drop"
+    if re.search(RESET_HEADINGS, s, re.I):
+        return "reset"
     if re.search(DROP_HEADINGS, s, re.I if not re.match(r"about [A-Z]", s) else 0) and not re.search(
             P.REQUIRED_HEADINGS + "|" + RESPONSIBILITY_HEADINGS + "|" + PERSON_HEADINGS, s, re.I):
         return "drop"   # 2026-09-28.1: PERSON_HEADINGS joins the exclusion, so "About You" is no longer dropped
+    if topic_only:
+        return None
     if re.fullmatch(REQUIRED_LABELS, s, re.I):
         return "required"
     if re.search(P.PREFERRED_HEADINGS, s, re.I) or re.search(SPLITTER_PREFERRED_HEADINGS, s, re.I):
         return "preferred"
-    if re.search(P.REQUIRED_HEADINGS, s, re.I) or re.search(PERSON_HEADINGS, s, re.I):
+    # 2026-11-01.1: a heading naming duties outright ("Key Roles and Responsibilities") is Responsibilities even when
+    # it also carries a person phrase ("What we are looking for: Key Roles and Responsibilities", 30 postings)
+    if re.search(r"responsibilit|duties", s, re.I) and not re.search(P.REQUIRED_HEADINGS, s_req, re.I):
+        return "responsibility"
+    if re.search(P.REQUIRED_HEADINGS, s_req, re.I) or re.search(PERSON_HEADINGS, s_req, re.I):
         return "required"
     if re.search(RESPONSIBILITY_HEADINGS, s, re.I):
         return "responsibility"
@@ -339,6 +435,24 @@ def _heading_kind(line: str):
 
 
 _CONNECTIVES = ("and", "or", "of", "the", "a", "an", "to", "for", "in", "on", "with", "&")
+# 2026-11-01.1: modifiers a topic heading may carry beside its noun ("Technical Skills", "Relevant experience").
+_TOPIC_MODIFIERS = {"technical", "professional", "core", "key", "required", "relevant", "additional", "your", "other",
+                    "soft", "hard", "general", "specific", "functional", "leadership", "work", "job", "skills",
+                    "experience", "knowledge", "education", "expertise", "competencies", "competency", "abilities",
+                    "qualifications", "background", "and", "&", "/", "of", "the", "our", "preferred", "desired",
+                    "minimum", "basic", "essential", "critical", "must", "have", "nice", "to", "requirements"}
+
+
+def _topic_noun_line(s: str) -> bool:
+    """True when the line's only heading cue is a person topic noun (PERSON_HEADINGS) and it carries other content
+    words besides the allowed modifiers -- "Azure DevOps experience", not "Technical Skills"."""
+    if re.search("|".join([P.REQUIRED_HEADINGS, P.PREFERRED_HEADINGS, SPLITTER_PREFERRED_HEADINGS,
+                           RESPONSIBILITY_HEADINGS]), s, re.I):
+        return False
+    if not re.search(PERSON_HEADINGS, s, re.I):
+        return False
+    words = [w.lower() for w in re.findall(r"[A-Za-z][\w'’-]*|&|/", s)]
+    return any(w not in _TOPIC_MODIFIERS for w in words)
 # 2026-09-29.1: a short line naming a qualification ("Public Trust", "Bachelor's degree", "PMP certification") is a
 # requirement even without a bullet -- career-site HTML often renders each list item as a bare line. It is never a
 # subheading, so it is no longer skipped.
@@ -347,8 +461,23 @@ QUALIFICATION_TERM = re.compile(
     r"|doctorate|diploma|certif\w*|licen[cs]\w*|pmp|cpa|six sigma|black belt)\b", re.I)
 # 2026-09-29.1: a line that states its own status ("..., required" / "..., preferred") overrides the heading it sits
 # under (BDO-style lists put every qualification under one heading and mark each line).
-INLINE_STATUS = re.compile(r"(?:[,;(\-–—]\s*|\s)(required|preferred|desired|a plus|nice to have)\s*\)?\s*\.?\s*$",
-                           re.I)
+INLINE_STATUS = re.compile(r"(?:[,;(\-–—]\s*|\s)(?<!\bas )(?<!\bwhen )(?<!\bif )(?<!\bwhere )(?<!\bunless )"
+                           r"(?<!\bnot )(required|preferred|desired|desirable|advantageous|a plus|a big plus|a bonus"
+                           r"|an asset|nice[- ]to[- ]have|good to have|optional)\s*\)?\s*\.?\s*$", re.I)
+# 2026-11-01.1 (study §3): preferred status stated at the start or in the middle of a Required line. Leading:
+# "Desired experience with C, C++...", "Preferred: ...", "Good to have: ...". Mid-line, outside parentheses: "Hospitality
+# experience is a plus, in particular ...", "JD degree desirable, but not required", "Bachelor's not required, but
+# recommended". A soft qualifier on a real gate ("5+ years ..., ideally with X", "cloud (AWS preferred)") is NOT
+# matched: the gate is real, Jev's grey question reads the qualifier.
+LEADING_PREFERRED = re.compile(r"^\W*(?:preferred|desired|desirable|nice[- ]to[- ]have|good[- ]to[- ]have|bonus(?: points)?"
+                               r"|a plus|advantageous|optional|ideally)\b", re.I)
+MIDLINE_PREFERRED = re.compile(r"\b(?:is|are|would be|will be considered|considered) (?:a |an )?(?:big |huge |strong |added )?"
+                               r"(?:plus|asset|advantage|bonus)\b|\b(?:preferred|desirable|desired|recommended|helpful),?"
+                               r" (?:but|though|however) not (?:required|necessary|mandatory)|\bnot (?:required|necessary"
+                               r"|mandatory)\b(?!\s+(?:to|for)\b)", re.I)
+# 2026-11-01.1: "Bachelor's degree required, Master's preferred" -- two statuses in one line are two requirements.
+_MIXED_SPLIT = re.compile(r";\s*|,\s+(?=(?:and |or |with )?(?:a |an )?(?:master|mba|ph\.?\s?d|advanced|graduate"
+                          r"|doctorate|[A-Z]))", re.I)
 
 
 # 2026-09-29.1: a line that opens by declaring itself required ("Must have a PhD", "Minimum 7 years ...").
@@ -356,12 +485,27 @@ LEADING_REQUIRED = re.compile(r"^\W*(?:must(?: have| be| hold| possess)?|minimum
 
 
 def inline_section(line: str):
-    """'required' / 'preferred' when the line marks its own status (a trailing ", required" / ", preferred", or a
-    leading "Must" / "Minimum"), else None. A trailing status wins over a leading cue."""
+    """'required' / 'preferred' when the line marks its own status (a trailing ", required" / ", preferred", a
+    preferred cue at the start or mid-line, or a leading "Must" / "Minimum"), else None. A trailing status wins,
+    then a stated preferred status, then a leading "Must"."""
     m = INLINE_STATUS.search(line.strip())
     if m:
         return "required" if m.group(1).lower() == "required" else "preferred"
-    return "required" if LEADING_REQUIRED.search(_BULLET.sub("", line)) else None
+    bare = _BULLET.sub("", line)
+    if LEADING_PREFERRED.search(bare) or MIDLINE_PREFERRED.search(re.sub(r"\([^)]*\)", " ", bare)):
+        return "preferred"
+    return "required" if LEADING_REQUIRED.search(bare) else None
+
+
+def split_mixed_status(piece: str) -> list:
+    """2026-11-01.1: a piece stating both a required and a preferred status ("Bachelor's degree required, Master's
+    preferred") as its clauses, each to be classed on its own; any other piece unchanged."""
+    bare = re.sub(r"\([^)]*\)", " ", piece)
+    if not (re.search(r"(?<!not )\brequired\b", bare, re.I)
+            and re.search(r"\b(?:preferred|desired|desirable|a plus)\b", bare, re.I)):
+        return [piece]
+    parts = [p.strip(" ,;") for p in _MIXED_SPLIT.split(piece) if p and p.strip(" ,;")]
+    return parts if len(parts) > 1 and all(len(p) >= 10 for p in parts) else [piece]
 
 
 def _title_case(s: str) -> bool:
@@ -487,27 +631,150 @@ def classify(text: str) -> tuple:
     return "work", text
 
 
+# 2026-11-01.1 (study §4): "One of the following active accreditations obtained:" followed by 22 certifications sent
+# 22 Required lines, any one of which satisfies the gate, so a judge failed the posting on the 21 the candidate lacks.
+ANY_OF = re.compile(r"\b(?:(?:at least )?one|any(?: one)?|one or more|either) of the following\b|\bany one of\b", re.I)
+_ANY_OF_MAX = 380   # under MAX_UNIT, so _pieces never splits the joined line back up
+
+
+def _collapse_any_of(lines: list) -> list:
+    """An any-of opener line ending in ':' plus the short list after it (to the next heading, blank-separated
+    paragraph or long line) becomes ONE line: "<opener>: A; B; C (+N more)". Sub-labels inside the list ("If not
+    CPA eligible:") are dropped."""
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line and line.rstrip().endswith(":") and ANY_OF.search(line) and not _BULLET.match(line or "x"):
+            items, j = [], i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if not nxt:
+                    if j + 1 < len(lines) and lines[j + 1] and _heading_kind(lines[j + 1]) is None and len(items) < 40:
+                        j += 1
+                        continue
+                    break
+                if _heading_kind(nxt) is not None or len(nxt) > 160:
+                    break
+                if not nxt.rstrip().endswith(":"):
+                    items.append(re.sub(r"\.\s+", " ", _BULLET.sub("", nxt).strip().rstrip(".")))
+                j += 1
+            if len(items) >= 2:
+                head = line.rstrip().rstrip(":").strip()
+                joined, kept = head + ": ", 0
+                for it in items:
+                    if len(joined) + len(it) + 14 > _ANY_OF_MAX:
+                        break
+                    joined += ("; " if kept else "") + it
+                    kept += 1
+                if kept < len(items):
+                    joined += f" (+{len(items) - kept} more)"
+                out.append(joined)
+                i = j
+                continue
+        out.append(line)
+        i += 1
+    return out
+
+
+def _duty_block(lines: list, kinds: list, i: int) -> bool:
+    """The content under heading i (up to 5 lines, to the next heading) is duties: at least 2 lines, >= 60% duty-led,
+    none qualification-shaped."""
+    body = []
+    for line, kind in zip(lines[i + 1:], kinds[i + 1:]):
+        if kind is not None:
+            break
+        if line:
+            body.append(_BULLET.sub("", line))
+        if len(body) == 5:
+            break
+    if len(body) < 2 or any(_qualification_shaped(b) for b in body):
+        return False
+    return sum(bool(DUTY_LEAD.search(b)) for b in body) / len(body) >= 0.6
+
+
+def _resolve_kinds(lines: list, kinds: list) -> list:
+    """2026-11-01.1 (study §1): the section a heading opens, given the section it follows.
+      - After Preferred, a Required-kind heading that is not an explicit gate (GATE_HEADING) is a topic inside the
+        Preferred list: 'persona' (its qualification-shaped lines still go to Required).
+      - After Responsibilities, a Required-kind heading that is not a gate and is followed by duty-led lines is a
+        topic inside the duties: it stays Responsibilities."""
+    out, cur = list(kinds), None
+    for i, (line, kind) in enumerate(zip(lines, kinds)):
+        if kind is None:
+            continue
+        # a heading that is itself a qualification ("5+ years of relevant experience in:") always opens Required
+        if (kind == "required" and not GATE_HEADING.search(REQ_WORK_OBJECT.sub(" ", line))
+                and not _qualification_shaped(line)):
+            if cur == "preferred":
+                out[i] = "persona"
+                continue
+            if cur == "responsibility" and _duty_block(lines, kinds, i):
+                out[i] = "responsibility"
+                continue
+        cur = "intro" if kind == "reset" else kind
+    return out
+
+
+def _labels(lines: list, kinds: list) -> set:
+    """2026-11-01.1 (study §6): indexes of sentence-case labels inside duties ("Community strategy and governance",
+    "Measurement and continuous improvement"): a short (<= 6 words, <= 60 chars), unbulleted, unpunctuated line with
+    no qualification or person word, followed by a longer line. `_subheading` only knew Title Case labels, so these
+    counted as duty lines and pushed real duties past Jev's 12-line cap."""
+    out, section = set(), None
+    nonempty = [i for i, line in enumerate(lines) if line]
+    for n, i in enumerate(nonempty):
+        line, kind = lines[i], kinds[i]
+        if kind is not None:
+            section = kind
+            continue
+        if section not in ("responsibility", "intro", None) or _BULLET.match(line):
+            continue
+        st = line.strip()
+        if (len(st) > 60 or len(st.split()) > 6 or re.search(r"[.!?:;,]$", st) or QUALIFICATION_TERM.search(st)
+                or re.search(PERSON_HEADINGS, st, re.I) or YEARS_PHRASE.search(st) or DUTY_LEAD.search(st)):
+            continue
+        nxt = lines[nonempty[n + 1]] if n + 1 < len(nonempty) else ""
+        if len(nxt) > max(60, 2 * len(st)) and kinds[nonempty[n + 1]] is None:
+            out.add(i)
+    return out
+
+
+def _prepare(text: str):
+    """Lines, resolved heading kinds, whether the posting has section headings, and the explicit-Required flag: the
+    shared front half of split_requirements and section_lines."""
+    lines = _collapse_any_of(rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or ""))))
+    kinds = _resolve_kinds(lines, [_heading_kind(l) if l else None for l in lines])
+    has_headings = any(k in ("required", "preferred", "responsibility", "persona") for k in kinds)
+    persona = [k == "persona" or (k == "required" and _soft_person_heading(l)) for l, k in zip(lines, kinds)]
+    explicit_required = any(k == "required" and not soft for k, soft in zip(kinds, persona))
+    return lines, kinds, persona, has_headings, explicit_required, _labels(lines, kinds)
+
+
+def _open_section(kind: str, soft: bool, has_headings: bool) -> str:
+    if soft:
+        return "persona"
+    if kind == "reset":
+        return "intro" if has_headings else "body"
+    return kind
+
+
 def split_requirements(text: str, max_units: int = 0) -> list:
     """Requirement units in document order. `max_units` > 0 keeps the highest-weight units (ties: earlier first);
     coverage applies the §16.3 cap itself after specificity is known."""
-    lines = rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or "")))
-    kinds = [_heading_kind(l) if l else None for l in lines]
-    has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
-    persona = [k == "required" and _soft_person_heading(l) for l, k in zip(lines, kinds)]
-    explicit_required = any(k == "required" and not soft for k, soft in zip(kinds, persona))
+    lines, kinds, persona, has_headings, explicit_required, labels = _prepare(text)
     section = "intro" if has_headings else "body"
     units, seen, qual_shaped = [], set(), []
-    for line, kind, soft in zip(lines, kinds, persona):
+    for idx, (line, kind, soft) in enumerate(zip(lines, kinds, persona)):
         if not line:
             continue
         if kind is not None:
-            section = "persona" if soft else kind
+            section = _open_section(kind, soft, has_headings)
             continue
-        if section == "drop" or NOTICE.search(line) or _subheading(line):
+        if section == "drop" or NOTICE.search(line) or _subheading(line) or idx in labels:
             continue
         bulleted = bool(_BULLET.match(line)) or bool(QUALIFICATION_TERM.search(line))   # an itemized bullet (or a
         # named qualification) is a deliberate claim, even a short one
-        for piece in _pieces(_BULLET.sub("", line).strip()):
+        for piece in [c for p in _pieces(_BULLET.sub("", line).strip()) for c in split_mixed_status(p)]:
             piece = re.sub(r"^\(?\d{1,2}\)\s*", "", piece.strip())    # an inline "1) ..." item
             opener = USAJOBS_REQUIRED_OPENER.search(piece)
             if opener:
@@ -537,7 +804,8 @@ def split_requirements(text: str, max_units: int = 0) -> list:
             units.append(Requirement(unit_text, line_section, GROUPS[line_section], SECTION_WEIGHTS[line_section],
                                      klass, piece))
             qual_shaped.append(_qualification_shaped(piece))
-    units = _rescue_required(units, qual_shaped)
+    units = _rescue_required(units, qual_shaped,
+                             required_heading=any(k in ("required", "persona") for k in kinds))
     if max_units and len(units) > max_units:
         keep = sorted(range(len(units)), key=lambda i: (-units[i].weight, i))[:max_units]
         units = [units[i] for i in sorted(keep)]
@@ -549,15 +817,13 @@ def section_lines(text: str) -> list:
     headings and section rules as split_requirements, but whole lines, sub-headings included ("Financial &
     Resource Management" under Responsibilities), and no unit classification. For callers that want a section's
     text, not requirement units (backend/jd_keywords)."""
-    lines = rejoin_lines(strip_boilerplate(_unwrap_paragraphs(text or "")))
-    kinds = [_heading_kind(l) if l else None for l in lines]
-    has_headings = any(k in ("required", "preferred", "responsibility") for k in kinds)
+    lines, kinds, persona, has_headings, _explicit, labels = _prepare(text)
     section, out = ("intro" if has_headings else "body"), []
-    for line, kind in zip(lines, kinds):
+    for idx, (line, kind, soft) in enumerate(zip(lines, kinds, persona)):
         if not line:
             continue
         if kind is not None:
-            section = "persona" if kind == "required" and _soft_person_heading(line) else kind
+            section = _open_section(kind, soft, has_headings)
             continue
         if section == "drop" or NOTICE.search(line):
             continue
@@ -567,7 +833,7 @@ def section_lines(text: str) -> list:
         if _you_will(line) and section == "intro":
             out.append(("responsibility", line, False))
         elif not _footer(line):
-            out.append((section, line, _subheading(line)))
+            out.append((section, line, _subheading(line) or idx in labels))
     return out
 
 
@@ -590,12 +856,13 @@ def _qualification_shaped(piece: str) -> bool:
                 or DEGREE_LINE.search(piece) or LEADING_REQUIRED.search(piece))
 
 
-def _rescue_required(units: list, qual_shaped: list) -> list:
+def _rescue_required(units: list, qual_shaped: list, required_heading: bool = True) -> list:
     """2026-09-28.1: a posting whose headings name no Required section still states its qualifications -- under
     "Responsibilities", "Job Description", or no heading at all. When NO unit landed in `required`, every
     years/degree-shaped unit outside `preferred` moves to `required`. A posting that has a Required section is
-    left exactly as it was."""
-    if any(u.section == "required" for u in units):
+    left exactly as it was. 2026-11-01.1: also when no HEADING opened Required (`required_heading` False) -- one
+    inline "Must be open to travel." line no longer blocks the rescue of Perficient's "10+ years ..." lines."""
+    if required_heading and any(u.section == "required" for u in units):
         return units
     return [Requirement(u.text, "required", GROUPS["required"], SECTION_WEIGHTS["required"], u.klass, u.source)
             if shaped and u.section in ("intro", "body", "responsibility") else u

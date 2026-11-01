@@ -10,7 +10,7 @@ import re
 import sys
 from multiprocessing import Pool
 
-sys.path.insert(0, os.path.expanduser("~/jobsearch"))
+sys.path.insert(0, os.environ.get("JOBSEARCH_ROOT") or os.path.expanduser("~/jobsearch"))
 import duckdb  # noqa: E402
 
 from backend.finder import judge2  # noqa: E402

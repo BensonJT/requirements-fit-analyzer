@@ -1,5 +1,5 @@
 import sys, os, re
-sys.path.insert(0, os.path.expanduser("~/jobsearch"))
+sys.path.insert(0, os.environ.get("JOBSEARCH_ROOT") or os.path.expanduser("~/jobsearch"))
 import duckdb
 from backend.finder import requirements as R, judge2
 from backend.finder.labels import strip_boilerplate

@@ -193,6 +193,7 @@ def run_over_top(con, *, facts=None, live_ok: bool = False, transport=None, slee
         log(f"Jev gate: run failed ({type(exc).__name__}: {exc}); the report uses the stored reviews")
         return RunSummary(considered=len(rows), stopped_by_error=f"run failed ({type(exc).__name__})")
     log(f"Jev gate: {summary.reviewed} reviewed, {summary.reused} copied from twins, "
+        f"{summary.carried} carried over, "
         f"{summary.skipped_cached} cached, {summary.errors} error(s), "
         f"{summary.input_tokens} tokens ({time.monotonic() - t:.1f}s)")
     return summary
@@ -211,7 +212,8 @@ def run_warning(summary) -> Optional[str]:
     if summary.errors:
         return f"{summary.errors} of {summary.considered - summary.skipped_cached} review(s) failed"
     if summary.stopped_by_cap:
-        copied = f" (+{summary.reused} copied from twins)" if summary.reused else ""
+        copied = (f" (+{summary.reused + summary.carried} copied at 0 tokens)"
+                  if summary.reused or summary.carried else "")
         return (f"stopped at {summary.stopped_by_cap} after {summary.reviewed} review(s){copied}; "
                 f"the rest wait for the next run")
     return None

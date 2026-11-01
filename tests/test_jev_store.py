@@ -479,3 +479,19 @@ def test_find_jev_twin_prefers_an_undrifted_review(tmp_path):
     store.insert_jev_review(con, _review("A", "h", drift=True))
     store.insert_jev_review(con, _review("B", "h"))
     assert store.find_jev_twin(con, "C", "h", "T", "Acme", "pv1", None).posting_id == "B"
+
+
+def test_carry_candidates_need_the_same_request_base_and_jd(tmp_path):
+    """2026-11-01: a stored review under another prompt_version is a carry candidate only when that version's
+    request_base matches (it differed only in line selection) and the JD hash is the same."""
+    con = _connect(tmp_path)
+    _posting(con, "A", dh="h")
+    store.insert_jev_review(con, _review("A", "h", pv="old", lines=[_line(0)]))
+    store.insert_jev_review(con, _review("A", "h", pv="other-questions"))
+    store.record_jev_request_base(con, "old", "rb1")
+    store.record_jev_request_base(con, "other-questions", "rb2")
+    store.record_jev_request_base(con, "old", "rb-ignored")          # a known version is left as is
+    got = store.jev_carry_candidates(con, "A", "h", "new", "rb1")
+    assert [r.prompt_version for r in got] == ["old"] and len(got[0].lines) == 1
+    assert store.jev_carry_candidates(con, "A", "h2", "new", "rb1") == []     # JD changed
+    assert store.jev_carry_candidates(con, "A", "h", "old", "rb1") == []      # never its own version

@@ -163,6 +163,24 @@ def prompt_version(facts: list, endpoint: str) -> str:
     return hashlib.sha1("\x1f".join(_prompt_parts(_facts_hash(facts), endpoint)).encode("utf-8")).hexdigest()[:12]
 
 
+# 2026-11-01: the prompt parts that only decide WHICH lines are sent (the splitter, the judge-noise filter, the line
+# caps). A posting's stored jev_lines record exactly which lines its review was sent, so two prompt_versions that
+# differ only here can share a review whenever the posting's selected lines are the same (carry-over).
+# Indexes into _prompt_parts: splitter_fingerprint, JUDGE_NOISE, MAX_REQUIRED_LINES, MAX_RESPONSIBILITY_LINES
+# (tests/test_jev.py pins them, so a reordered _prompt_parts fails loudly instead of carrying the wrong reviews).
+SELECTION_PART_INDEXES = (13, 14, 17, 18)
+
+
+def request_base(facts: list, endpoint: str) -> str:
+    """prompt_version with the line-selection parts left out (SELECTION_PART_INDEXES): the same request_base and the
+    same selected lines mean a byte-identical set of requests, so a stored review can be carried to the new
+    prompt_version at no token cost (jev.run). The questions, templates, model, endpoint, facts and JD cap all stay in."""
+    parts = _prompt_parts(_facts_hash(facts), endpoint)
+    for i in SELECTION_PART_INDEXES:
+        parts[i] = "<selection>"
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
 def prompt_base(endpoint: str) -> str:
     """prompt_version with the facts left out (2026-10-30): two prompt_versions with the same base differ only in
     the fact sheet, so jev_gate.ensure_required_bar carries the required bar over instead of re-running the gold
@@ -567,6 +585,15 @@ class StorePersist:
         return store.find_jev_twin(con, posting.posting_id, posting.description_hash, posting.title,
                                    posting.employer, prompt_version, run_tag)
 
+    def jev_carry_candidates(self, con, posting: Posting, prompt_version: str, request_base: str) -> list:
+        from backend.ats import store
+        return store.jev_carry_candidates(con, posting.posting_id, posting.description_hash, prompt_version,
+                                          request_base)
+
+    def record_jev_request_base(self, con, prompt_version: str, request_base: str) -> None:
+        from backend.ats import store
+        store.record_jev_request_base(con, prompt_version, request_base)
+
 
 def twin_key(posting: Posting) -> tuple:
     """2026-11-01: postings that would send Jev byte-identical requests -- same JD text, title and employer
@@ -576,23 +603,50 @@ def twin_key(posting: Posting) -> tuple:
     return (posting.description_hash, norm(posting.title), norm(posting.employer))
 
 
-def copy_review(source: ReviewRecord, posting: Posting) -> ReviewRecord:
-    """`source`'s review stored under `posting`: every Jev answer and code-derived field as reviewed, 0 input
-    tokens (no request was sent, so nothing counts against the daily cap), stamped now. `raw_response` gains
-    `copied_from` so a copy is always traceable to the review that was paid for."""
+def copy_review(source: ReviewRecord, posting: Posting, pv: Optional[str] = None) -> ReviewRecord:
+    """`source`'s review stored under `posting` (and under `pv`, when carried to a new prompt_version): every Jev
+    answer as reviewed, the code-derived fields re-derived with today's code, 0 input tokens (no request was sent,
+    so nothing counts against the daily cap), stamped now. `raw_response` gains `copied_from` (posting_id and
+    prompt_version) so a copy is always traceable to the review that was paid for."""
+    lines = [dataclasses.replace(line) for line in source.lines]
+    fit, why = judge2.derive_required_fit(lines, title=posting.title or "")
+    lfit, _lwhy = judge2.lines_fit(lines, title=posting.title or "")
+    sfit, sscore, _counts = judge2.shape_fit(lines)
     return dataclasses.replace(
-        source, posting_id=posting.posting_id, input_tokens=0, reviewed_at=_now_iso(),
-        lines=[dataclasses.replace(line) for line in source.lines],
-        raw_response={**(source.raw_response or {}), "copied_from": source.posting_id})
+        source, posting_id=posting.posting_id, prompt_version=pv or source.prompt_version, input_tokens=0,
+        reviewed_at=_now_iso(), lines=lines, required_fit=fit, derive_why=why, lines_fit=lfit, shape_fit=sfit,
+        shape_score=sscore,
+        raw_response={**(source.raw_response or {}),
+                      "copied_from": {"posting_id": source.posting_id, "prompt_version": source.prompt_version}})
 
 
-def _find_twin(persist, con, seen: dict, posting: Posting, pv: str, run_tag: Optional[str]) -> Optional[ReviewRecord]:
-    """A review to copy for `posting`: one made earlier in this run, else a stored one (persist adapters
-    without `find_jev_twin` simply find none)."""
+def _selected(posting: Posting) -> list:
+    """(section, text) of the lines today's code would send (select_lines, silently)."""
+    return list(select_lines(posting, log=lambda *a: None))
+
+
+def _find_reusable(persist, con, seen: dict, posting: Posting, pv: str, run_tag: Optional[str],
+                   rbase: Optional[str]):
+    """(source review, how) for a posting that needs no request, else (None, None):
+      - 'twin': a review of another posting with the same JD, title and employer under this prompt_version, made
+        earlier in this run or stored (twin_key / find_jev_twin);
+      - 'carried': this posting's own review under an earlier prompt_version with the same request_base whose
+        stored lines are exactly the lines selected today -- the requests would be byte-identical (a splitter
+        release changes the selection for some postings, not all).
+    Persist adapters without the lookups simply find nothing."""
     twin = seen.get(twin_key(posting))
     if twin is None and hasattr(persist, "find_jev_twin"):
         twin = persist.find_jev_twin(con, posting, pv, run_tag)
-    return twin
+    if twin is not None:
+        return twin, "twin"
+    if run_tag is None and rbase and hasattr(persist, "jev_carry_candidates"):
+        want = None
+        for cand in persist.jev_carry_candidates(con, posting, pv, rbase):
+            if want is None:
+                want = _selected(posting)
+            if [(ln.section, ln.line_text) for ln in cand.lines] == want:
+                return cand, "carried"
+    return None, None
 
 
 def _today_utc_iso() -> str:
@@ -615,6 +669,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
     base_pv = prompt_version(facts, endpoint)
     pv = f"{base_pv}:{run_tag}" if run_tag else base_pv
     persist = persist or StorePersist()
+    rbase = request_base(facts, endpoint)   # 2026-11-01: carry-over key (see _find_reusable)
 
     key = ""
     if not dry_run:
@@ -632,8 +687,15 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
         est = 0
         seen_keys = set()
         for i, p in enumerate(todo):
-            if twin_key(p) in seen_keys or _find_twin(persist, con, {}, p, pv, run_tag) is not None:
+            if twin_key(p) in seen_keys:
                 summary.reused += 1   # would be copied from a twin, so no request and no tokens
+                continue
+            _src, how = _find_reusable(persist, con, {}, p, pv, run_tag, rbase)
+            if how is not None:
+                if how == "twin":
+                    summary.reused += 1
+                else:
+                    summary.carried += 1
                 continue
             seen_keys.add(twin_key(p))
             role_body = build_role_request(p, model)
@@ -651,7 +713,8 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                     log(f"--- jev dry-run lines request {j + 1}/{len(lines_bodies)}: {p.posting_id} ---")
                     log(json.dumps(body, indent=2, ensure_ascii=False))
         log(f"jev dry-run: endpoint={endpoint} model={model} prompt_version={pv} "
-            f"to_send={len(todo) - summary.reused} copied_from_twins={summary.reused} "
+            f"to_send={len(todo) - summary.reused - summary.carried} copied_from_twins={summary.reused} "
+            f"carried_over={summary.carried} "
             f"skipped_cached={summary.skipped_cached} estimated_input_tokens={est} "
             f"(~${est * Q.PRICE_PER_M_INPUT / 1e6:.2f})")
         cap = (caps or caps_from_env()).daily_token_cap
@@ -668,25 +731,33 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
     meter = _Meter()
     tokens_before = persist.jev_tokens_since(con, _today_utc_iso())
     seen = {}   # twin_key -> the review made for it in this run
+    if hasattr(persist, "record_jev_request_base") and run_tag is None:
+        persist.record_jev_request_base(con, pv, rbase)
 
     for n, p in enumerate(todo, start=1):
-        # 2026-11-01: a posting whose JD, title and employer match an already-reviewed one gets a copy of that
-        # review at no token cost. Checked before the caps, so twins are still copied after a cap is hit.
-        twin = _find_twin(persist, con, seen, p, pv, run_tag)
-        if twin is not None:
-            record = copy_review(twin, p)
+        # 2026-11-01: a posting that would send byte-identical requests to a review already paid for gets a copy at
+        # no token cost -- a twin posting (same JD, title, employer) or its own review under an earlier
+        # prompt_version whose selected lines are unchanged. Checked before the caps, so copies continue after a cap.
+        src, how = _find_reusable(persist, con, seen, p, pv, run_tag, rbase)
+        if src is not None:
+            record = copy_review(src, p, pv)
             try:
                 persist.insert_jev_review(con, record)
             except Exception as exc:  # noqa: BLE001 -- logged and counted, never fatal
                 summary.errors += 1
-                log(f"jev: {p.posting_id} copy from {twin.posting_id} failed ({type(exc).__name__}: {exc})")
+                log(f"jev: {p.posting_id} copy from {src.posting_id}@{src.prompt_version} failed "
+                    f"({type(exc).__name__}: {exc})")
                 continue
-            summary.reused += 1
-            log(f"jev.run: {n}/{len(todo)} {p.posting_id} required_fit={record.required_fit} "
-                f"copied from {twin.posting_id} (same JD, title and employer; 0 tokens)")
+            if how == "twin":
+                summary.reused += 1
+                note = f"copied from {src.posting_id} (same JD, title and employer; 0 tokens)"
+            else:
+                summary.carried += 1
+                note = f"carried over from {src.prompt_version} (same lines and questions; 0 tokens)"
+            log(f"jev.run: {n}/{len(todo)} {p.posting_id} required_fit={record.required_fit} {note}")
             continue
         if summary.stopped_by_cap:
-            continue   # capped: only twin copies can still be stored
+            continue   # capped: only copies can still be stored
         try:
             planned = [build_role_request(p, model)] + build_lines_requests(p, facts, model, log=lambda *a: None)
         except Exception as exc:  # noqa: BLE001 -- one bad posting never stops the run
@@ -696,13 +767,13 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
         if meter.calls + len(planned) > caps.max_calls_per_run:
             summary.stopped_by_cap = "max_calls_per_run"
             log(f"jev: stopping, {meter.calls} calls made and {len(planned)} more would pass "
-                f"max_calls_per_run={caps.max_calls_per_run}; only twin copies from here on")
+                f"max_calls_per_run={caps.max_calls_per_run}; only 0-token copies from here on")
             continue
         used = tokens_before + meter.tokens
         if used + sum(plan_tokens(b) for b in planned) > caps.daily_token_cap:
             summary.stopped_by_cap = "daily_token_cap"
             log(f"jev: stopping, {used} tokens used today; the next posting would pass "
-                f"daily_token_cap={caps.daily_token_cap}; only twin copies from here on")
+                f"daily_token_cap={caps.daily_token_cap}; only 0-token copies from here on")
             continue
         try:
             record = review_posting(p, facts, transport=transport, sleep_fn=sleep_fn, endpoint=endpoint,

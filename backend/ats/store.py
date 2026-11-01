@@ -456,6 +456,16 @@ CREATE TABLE IF NOT EXISTS jev_prompt_bases (
     recorded_at       TIMESTAMP NOT NULL         -- UTC, stored naive
 );
 
+-- 2026-11-01: each Jev prompt_version's request base (jev.request_base: the prompt minus the parts that only choose
+-- WHICH lines are sent -- splitter, judge-noise filter, line caps). jev.run carries a stored review to a new
+-- prompt_version with the same request base when the posting's selected lines are unchanged (0 tokens), so a
+-- splitter release pays only for postings whose lines moved. Recorded by jev.run on every live run.
+CREATE TABLE IF NOT EXISTS jev_request_bases (
+    prompt_version    VARCHAR PRIMARY KEY,
+    request_base      VARCHAR NOT NULL,
+    recorded_at       TIMESTAMP NOT NULL         -- UTC, stored naive
+);
+
 -- Jobs_Found files already read back for decisions (re-read only when mtime changes).
 CREATE TABLE IF NOT EXISTS readback_log (file VARCHAR PRIMARY KEY, mtime DOUBLE NOT NULL, read_at TIMESTAMP NOT NULL);
 
@@ -2293,6 +2303,25 @@ def find_jev_twin(con, posting_id: str, description_hash: str, title: str, emplo
         [description_hash, prompt_version, _run_tag_key(run_tag), posting_id, _twin_text(title), _twin_text(employer)],
     ).fetchone()
     return load_jev_review(con, row[0], description_hash, prompt_version, run_tag) if row else None
+
+
+def record_jev_request_base(con, prompt_version: str, request_base: str) -> None:
+    """Records a prompt_version's jev.request_base; a known prompt_version is left as is."""
+    con.execute("INSERT INTO jev_request_bases VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                [prompt_version, request_base, datetime.now(timezone.utc).replace(tzinfo=None)])
+
+
+def jev_carry_candidates(con, posting_id: str, description_hash: str, prompt_version: str,
+                         request_base: str) -> list:
+    """2026-11-01: this posting's stored canonical reviews (same JD hash) under OTHER prompt_versions that share
+    `request_base`, undrifted first, newest first -- each one a review whose requests differed from today's only in
+    which lines were selected. The caller (jev.run) keeps one only if its stored lines equal today's selection."""
+    rows = con.execute(
+        "SELECT r.prompt_version FROM jev_reviews r JOIN jev_request_bases b USING (prompt_version) "
+        "WHERE r.posting_id = ? AND r.description_hash = ? AND r.run_tag = '' AND r.prompt_version <> ? "
+        "AND b.request_base = ? ORDER BY r.version_drift, r.reviewed_at DESC",
+        [posting_id, description_hash, prompt_version, request_base]).fetchall()
+    return [load_jev_review(con, posting_id, description_hash, pv, None) for (pv,) in rows]
 
 
 def _twin_text(value: Optional[str]) -> str:

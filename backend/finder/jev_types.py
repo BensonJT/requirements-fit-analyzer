@@ -121,6 +121,7 @@ class RunSummary:
     skipped_cached: int = 0      # already reviewed under this prompt_version (and run_tag)
     reviewed: int = 0            # postings with a stored ReviewRecord from this run
     reused: int = 0              # 2026-11-01: postings given a copy of a twin's review (same JD, title, employer)
+    carried: int = 0             # 2026-11-01: own review carried from an earlier prompt_version (same lines)
     calls: int = 0               # HTTP requests sent (role + lines, including splits)
     input_tokens: int = 0
     errors: int = 0              # postings that failed after retries (logged, never fatal)

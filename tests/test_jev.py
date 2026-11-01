@@ -4,6 +4,7 @@ NO test here makes a network call or opens the live database: `transport` is alw
 a recording stub, persistence a fake object, and databases are tmp_path files. Response shapes copy the real
 jev-1.13.0 smoke fixture (tests/fixtures/jev/smoke_response.json). All fact-sheet text is synthetic.
 """
+import dataclasses
 import json
 import os
 import sys
@@ -15,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from backend.ats import normalize as N  # noqa: E402
 from backend.ats import store  # noqa: E402
-from backend.finder import feedback, jev, judge2  # noqa: E402
+from backend.finder import feedback, jev, judge2, requirements  # noqa: E402
 from backend.finder import jev_questions as Q  # noqa: E402
 from backend.finder.jev_types import Caps, LineRecord, Posting  # noqa: E402
 
@@ -607,7 +608,8 @@ def test_twin_in_the_same_run_is_copied_not_sent(key_env):
     s = _run(rows, transport=fake_transport(calls=calls), persist=persist)
     assert (s.reviewed, s.reused, len(calls)) == (2, 1, 4)    # P1 + P3 sent (2 calls each); P2 copied
     p1, p2 = persist.inserted[0], persist.inserted[1]
-    assert p2.posting_id == "P2" and p2.input_tokens == 0 and p2.raw_response["copied_from"] == "P1"
+    assert p2.posting_id == "P2" and p2.input_tokens == 0
+    assert p2.raw_response["copied_from"] == {"posting_id": "P1", "prompt_version": p1.prompt_version}
     assert (p2.required_fit, p2.lens_process_grade, len(p2.lines)) == (p1.required_fit, p1.lens_process_grade,
                                                                        len(p1.lines))
     assert p1.input_tokens > 0 and "copied_from" not in p1.raw_response
@@ -634,6 +636,71 @@ def test_dry_run_counts_twins_and_leaves_them_out_of_the_estimate(key_env):
     s = _run(rows, dry_run=True, log=logs.append)
     assert s.reused == 1
     assert "to_send=1 copied_from_twins=1" in "\n".join(logs)
+
+
+def test_request_base_leaves_out_only_the_line_selection_parts():
+    """2026-11-01: SELECTION_PART_INDEXES must point at exactly the parts that choose which lines are sent."""
+    parts = jev._prompt_parts("facts-hash", "typesafe")
+    picked = [parts[i] for i in jev.SELECTION_PART_INDEXES]
+    assert picked == [requirements.splitter_fingerprint(), judge2.JUDGE_NOISE.pattern, str(Q.MAX_REQUIRED_LINES),
+                      str(Q.MAX_RESPONSIBILITY_LINES)]
+
+
+def test_splitter_change_moves_prompt_version_but_not_request_base(monkeypatch):
+    before = (jev.prompt_version(_facts(), "typesafe"), jev.request_base(_facts(), "typesafe"))
+    monkeypatch.setattr(requirements, "splitter_fingerprint", lambda: "a-new-splitter")
+    after = (jev.prompt_version(_facts(), "typesafe"), jev.request_base(_facts(), "typesafe"))
+    assert before[0] != after[0] and before[1] == after[1]
+    monkeypatch.setattr(Q, "READING_RULES", list(Q.READING_RULES) + ["a new rule"])
+    assert jev.request_base(_facts(), "typesafe") != before[1]   # a question/rule change is never carried
+
+
+class CarryPersist(FakePersist):
+    """FakePersist plus carry-over candidates (a stored review of the same posting under an older prompt_version)."""
+    def __init__(self, candidates=(), **kw):
+        super().__init__(**kw)
+        self.candidates = list(candidates)
+        self.bases = []
+
+    def jev_carry_candidates(self, con, posting, prompt_version, request_base):
+        return [c for c in self.candidates if c.posting_id == posting.posting_id]
+
+    def record_jev_request_base(self, con, prompt_version, request_base):
+        self.bases.append((prompt_version, request_base))
+
+
+def _old_review(posting):
+    seed = FakePersist()
+    _run([posting], persist=seed)
+    return dataclasses.replace(seed.inserted[0], prompt_version="old-pv")
+
+
+def test_unchanged_lines_carry_the_old_review_at_no_cost(key_env):
+    """A splitter release re-keys prompt_version; a posting whose selected lines did not move keeps its review."""
+    old = _old_review(_posting("P1"))
+    persist = CarryPersist(candidates=[old])
+    s = _run([_posting("P1")], persist=persist, transport=_ExplodingTransport())
+    assert (s.carried, s.reviewed, s.calls) == (1, 0, 0)
+    rec = persist.inserted[0]
+    assert rec.prompt_version == jev.prompt_version(_facts(), "typesafe") and rec.input_tokens == 0
+    assert rec.raw_response["copied_from"] == {"posting_id": "P1", "prompt_version": "old-pv"}
+    assert rec.required_fit == old.required_fit and len(rec.lines) == len(old.lines)
+    assert persist.bases == [(rec.prompt_version, jev.request_base(_facts(), "typesafe"))]
+
+
+def test_moved_lines_are_reviewed_again(key_env):
+    old = _old_review(_posting("P1"))
+    old.lines = old.lines[:-1]            # the old splitter sent one line fewer
+    persist = CarryPersist(candidates=[old])
+    calls = []
+    s = _run([_posting("P1")], persist=persist, transport=fake_transport(calls=calls))
+    assert (s.carried, s.reviewed, len(calls)) == (0, 1, 2)
+
+
+def test_tagged_runs_never_carry(key_env):
+    persist = CarryPersist(candidates=[_old_review(_posting("P1"))])
+    s = _run([_posting("P1")], persist=persist, run_tag="r2")
+    assert s.carried == 0 and s.reviewed == 1 and persist.bases == []
 
 
 def test_version_drift_is_marked_on_typesafe_only(key_env):

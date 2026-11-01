@@ -2276,6 +2276,30 @@ def insert_jev_review(con, record: ReviewRecord) -> None:
         con.executemany(f"INSERT INTO jev_lines ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", rows)
 
 
+def find_jev_twin(con, posting_id: str, description_hash: str, title: str, employer: str, prompt_version: str,
+                  run_tag: Optional[str]) -> Optional[ReviewRecord]:
+    """2026-11-01: a stored Jev review of ANOTHER posting with the same JD text (description_hash), title and
+    employer under the same prompt_version and run_tag -- an employer posting one role as several reqs (Oracle
+    346009/346469/346909 cost 3 x 48K tokens on 11/01). Every Jev request is built from those three fields
+    plus the facts (in prompt_version), so a twin's review is the review this posting would get. Title and
+    employer compare case-folded with whitespace collapsed (`_twin_text`). A non-drifted, newest review is
+    preferred. None when there is no twin."""
+    row = con.execute(
+        "SELECT r.posting_id FROM jev_reviews r JOIN postings p USING (posting_id) "
+        "WHERE r.description_hash = ? AND r.prompt_version = ? AND r.run_tag = ? AND r.posting_id <> ? "
+        "AND lower(regexp_replace(trim(coalesce(p.title, '')), '\\s+', ' ', 'g')) = ? "
+        "AND lower(regexp_replace(trim(coalesce(p.employer, '')), '\\s+', ' ', 'g')) = ? "
+        "ORDER BY r.version_drift, r.reviewed_at DESC LIMIT 1",
+        [description_hash, prompt_version, _run_tag_key(run_tag), posting_id, _twin_text(title), _twin_text(employer)],
+    ).fetchone()
+    return load_jev_review(con, row[0], description_hash, prompt_version, run_tag) if row else None
+
+
+def _twin_text(value: Optional[str]) -> str:
+    """find_jev_twin's title/employer comparison form: whitespace collapsed, lower-cased."""
+    return " ".join((value or "").split()).lower()
+
+
 def jev_tokens_since(con, since_iso: str) -> int:
     """Input tokens of every stored Jev review (all run tags) with reviewed_at >= `since_iso` -- the stored
     half of the daily spend cap (jev_types.Caps)."""

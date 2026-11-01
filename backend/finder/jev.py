@@ -22,6 +22,7 @@ Sections:
   5. `review_posting`, `run`, and the population helpers.
 """
 import copy
+import dataclasses
 import hashlib
 import json
 import math
@@ -560,6 +561,39 @@ class StorePersist:
         from backend.ats import store
         return store.jev_tokens_since(con, since_iso)
 
+    def find_jev_twin(self, con, posting: Posting, prompt_version: str,
+                      run_tag: Optional[str]) -> Optional[ReviewRecord]:
+        from backend.ats import store
+        return store.find_jev_twin(con, posting.posting_id, posting.description_hash, posting.title,
+                                   posting.employer, prompt_version, run_tag)
+
+
+def twin_key(posting: Posting) -> tuple:
+    """2026-11-01: postings that would send Jev byte-identical requests -- same JD text, title and employer
+    (case-folded, whitespace collapsed; the same comparison as store.find_jev_twin). One review serves all."""
+    def norm(s):
+        return " ".join((s or "").split()).lower()
+    return (posting.description_hash, norm(posting.title), norm(posting.employer))
+
+
+def copy_review(source: ReviewRecord, posting: Posting) -> ReviewRecord:
+    """`source`'s review stored under `posting`: every Jev answer and code-derived field as reviewed, 0 input
+    tokens (no request was sent, so nothing counts against the daily cap), stamped now. `raw_response` gains
+    `copied_from` so a copy is always traceable to the review that was paid for."""
+    return dataclasses.replace(
+        source, posting_id=posting.posting_id, input_tokens=0, reviewed_at=_now_iso(),
+        lines=[dataclasses.replace(line) for line in source.lines],
+        raw_response={**(source.raw_response or {}), "copied_from": source.posting_id})
+
+
+def _find_twin(persist, con, seen: dict, posting: Posting, pv: str, run_tag: Optional[str]) -> Optional[ReviewRecord]:
+    """A review to copy for `posting`: one made earlier in this run, else a stored one (persist adapters
+    without `find_jev_twin` simply find none)."""
+    twin = seen.get(twin_key(posting))
+    if twin is None and hasattr(persist, "find_jev_twin"):
+        twin = persist.find_jev_twin(con, posting, pv, run_tag)
+    return twin
+
 
 def _today_utc_iso() -> str:
     now = datetime.now(timezone.utc)
@@ -596,7 +630,12 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
 
     if dry_run:
         est = 0
+        seen_keys = set()
         for i, p in enumerate(todo):
+            if twin_key(p) in seen_keys or _find_twin(persist, con, {}, p, pv, run_tag) is not None:
+                summary.reused += 1   # would be copied from a twin, so no request and no tokens
+                continue
+            seen_keys.add(twin_key(p))
             role_body = build_role_request(p, model)
             try:
                 lines_bodies = build_lines_requests(p, facts, model, log=log)
@@ -611,7 +650,8 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                 for j, body in enumerate(lines_bodies):
                     log(f"--- jev dry-run lines request {j + 1}/{len(lines_bodies)}: {p.posting_id} ---")
                     log(json.dumps(body, indent=2, ensure_ascii=False))
-        log(f"jev dry-run: endpoint={endpoint} model={model} prompt_version={pv} to_send={len(todo)} "
+        log(f"jev dry-run: endpoint={endpoint} model={model} prompt_version={pv} "
+            f"to_send={len(todo) - summary.reused} copied_from_twins={summary.reused} "
             f"skipped_cached={summary.skipped_cached} estimated_input_tokens={est} "
             f"(~${est * Q.PRICE_PER_M_INPUT / 1e6:.2f})")
         cap = (caps or caps_from_env()).daily_token_cap
@@ -627,8 +667,26 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
         sleep_fn = time.sleep
     meter = _Meter()
     tokens_before = persist.jev_tokens_since(con, _today_utc_iso())
+    seen = {}   # twin_key -> the review made for it in this run
 
     for n, p in enumerate(todo, start=1):
+        # 2026-11-01: a posting whose JD, title and employer match an already-reviewed one gets a copy of that
+        # review at no token cost. Checked before the caps, so twins are still copied after a cap is hit.
+        twin = _find_twin(persist, con, seen, p, pv, run_tag)
+        if twin is not None:
+            record = copy_review(twin, p)
+            try:
+                persist.insert_jev_review(con, record)
+            except Exception as exc:  # noqa: BLE001 -- logged and counted, never fatal
+                summary.errors += 1
+                log(f"jev: {p.posting_id} copy from {twin.posting_id} failed ({type(exc).__name__}: {exc})")
+                continue
+            summary.reused += 1
+            log(f"jev.run: {n}/{len(todo)} {p.posting_id} required_fit={record.required_fit} "
+                f"copied from {twin.posting_id} (same JD, title and employer; 0 tokens)")
+            continue
+        if summary.stopped_by_cap:
+            continue   # capped: only twin copies can still be stored
         try:
             planned = [build_role_request(p, model)] + build_lines_requests(p, facts, model, log=lambda *a: None)
         except Exception as exc:  # noqa: BLE001 -- one bad posting never stops the run
@@ -638,14 +696,14 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
         if meter.calls + len(planned) > caps.max_calls_per_run:
             summary.stopped_by_cap = "max_calls_per_run"
             log(f"jev: stopping, {meter.calls} calls made and {len(planned)} more would pass "
-                f"max_calls_per_run={caps.max_calls_per_run}")
-            break
+                f"max_calls_per_run={caps.max_calls_per_run}; only twin copies from here on")
+            continue
         used = tokens_before + meter.tokens
         if used + sum(plan_tokens(b) for b in planned) > caps.daily_token_cap:
             summary.stopped_by_cap = "daily_token_cap"
             log(f"jev: stopping, {used} tokens used today; the next posting would pass "
-                f"daily_token_cap={caps.daily_token_cap}")
-            break
+                f"daily_token_cap={caps.daily_token_cap}; only twin copies from here on")
+            continue
         try:
             record = review_posting(p, facts, transport=transport, sleep_fn=sleep_fn, endpoint=endpoint,
                                     key=key, pv=pv, run_tag=run_tag, log=log, meter=meter)
@@ -660,6 +718,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
                 break
             continue
         summary.reviewed += 1
+        seen[twin_key(p)] = record
         if record.version_drift:
             summary.drift += 1
             log(f"jev: {p.posting_id} VERSION DRIFT: answered by {record.model_answered}")

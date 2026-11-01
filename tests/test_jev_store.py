@@ -454,3 +454,28 @@ def test_grey_p_round_trips_and_defaults_to_none(tmp_path):
     assert [l.grey_p for l in loaded.lines] == [None, 0.72]
     con.close()
 
+
+
+# ---------------------------------------------------------------- 2026-11-01: twin reviews (same JD, title, employer)
+def test_find_jev_twin_matches_same_jd_title_employer_only(tmp_path):
+    con = _connect(tmp_path)
+    for pid in ("A", "B", "C"):
+        _posting(con, pid, dh="h")
+    con.execute("UPDATE postings SET title = 'Other Role' WHERE posting_id = 'C'")
+    store.insert_jev_review(con, _review("A", "h", lines=[_line(0)]))
+    twin = store.find_jev_twin(con, "B", "h", "  t ", "ACME", "pv1", None)   # case + whitespace folded
+    assert twin is not None and twin.posting_id == "A" and len(twin.lines) == 1
+    assert store.find_jev_twin(con, "C", "h", "Other Role", "Acme", "pv1", None) is None   # title differs
+    assert store.find_jev_twin(con, "B", "h2", "T", "Acme", "pv1", None) is None           # JD differs
+    assert store.find_jev_twin(con, "B", "h", "T", "Acme", "pv2", None) is None            # prompt differs
+    assert store.find_jev_twin(con, "B", "h", "T", "Acme", "pv1", "r2") is None            # run tag differs
+    assert store.find_jev_twin(con, "A", "h", "T", "Acme", "pv1", None) is None            # never itself
+
+
+def test_find_jev_twin_prefers_an_undrifted_review(tmp_path):
+    con = _connect(tmp_path)
+    for pid in ("A", "B", "C"):
+        _posting(con, pid, dh="h")
+    store.insert_jev_review(con, _review("A", "h", drift=True))
+    store.insert_jev_review(con, _review("B", "h"))
+    assert store.find_jev_twin(con, "C", "h", "T", "Acme", "pv1", None).posting_id == "B"

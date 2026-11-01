@@ -66,7 +66,8 @@ def _posting(con, pid, *, dh="h", text=JD, title="Process Analyst", status="acti
 
 
 def _gold(con, pid, human_fit="meets"):
-    _posting(con, pid)
+    # each gold posting gets its own title: identical JD + title + employer would be Jev twins (copied, not sent)
+    _posting(con, pid, title=f"Process Analyst {pid}")
     con.execute(
         "INSERT INTO report_feedback (posting_id, description_hash, verdict, basis, assessor, required_fit, "
         "assessed_at, loaded_at) VALUES (?, 'h', 'build', 'blind', 'user', ?, ?, ?)", [pid, human_fit, NOW, NOW])

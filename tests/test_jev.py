@@ -587,6 +587,55 @@ def test_daily_token_cap_counts_stored_and_run_tokens(key_env):
     assert s.reviewed == 0 and s.calls == 0 and s.stopped_by_cap == "daily_token_cap"
 
 
+class TwinPersist(FakePersist):
+    """FakePersist plus a stored-twin lookup keyed like store.find_jev_twin."""
+    def __init__(self, stored=None, **kw):
+        super().__init__(**kw)
+        self.stored = stored or {}   # jev.twin_key -> ReviewRecord
+
+    def find_jev_twin(self, con, posting, prompt_version, run_tag):
+        return self.stored.get(jev.twin_key(posting))
+
+
+def test_twin_in_the_same_run_is_copied_not_sent(key_env):
+    """2026-11-01: Oracle posted one role as 3 reqs (same JD, title, employer); Jev paid for it 3 times."""
+    persist = FakePersist()
+    calls = []
+    rows = [_posting("P1"), _posting("P2"), _posting("P3", title="Other Role")]
+    for p in rows:
+        p.description_hash = "same-jd"
+    s = _run(rows, transport=fake_transport(calls=calls), persist=persist)
+    assert (s.reviewed, s.reused, len(calls)) == (2, 1, 4)    # P1 + P3 sent (2 calls each); P2 copied
+    p1, p2 = persist.inserted[0], persist.inserted[1]
+    assert p2.posting_id == "P2" and p2.input_tokens == 0 and p2.raw_response["copied_from"] == "P1"
+    assert (p2.required_fit, p2.lens_process_grade, len(p2.lines)) == (p1.required_fit, p1.lens_process_grade,
+                                                                       len(p1.lines))
+    assert p1.input_tokens > 0 and "copied_from" not in p1.raw_response
+
+
+def test_twin_stored_earlier_is_copied_even_after_the_cap(key_env):
+    seed = FakePersist()
+    _run([_posting("P0")], persist=seed)
+    stored = seed.inserted[0]                        # P0's paid review, as if stored on an earlier day
+    rows = [_posting("P1"), _posting("P9")]
+    rows[1].description_hash = stored.description_hash   # P9 = P0's JD, title and employer
+    persist = TwinPersist(stored={jev.twin_key(rows[1]): stored}, tokens_today=10**9)
+    s = _run(rows, persist=persist, transport=_ExplodingTransport(),
+             caps=Caps(max_calls_per_run=100, daily_token_cap=5_000_000))
+    assert s.stopped_by_cap == "daily_token_cap" and s.reviewed == 0 and s.reused == 1 and s.calls == 0
+    assert [r.posting_id for r in persist.inserted] == ["P9"] and persist.inserted[0].input_tokens == 0
+
+
+def test_dry_run_counts_twins_and_leaves_them_out_of_the_estimate(key_env):
+    logs = []
+    rows = [_posting("P1"), _posting("P2")]
+    for p in rows:
+        p.description_hash = "same-jd"
+    s = _run(rows, dry_run=True, log=logs.append)
+    assert s.reused == 1
+    assert "to_send=1 copied_from_twins=1" in "\n".join(logs)
+
+
 def test_version_drift_is_marked_on_typesafe_only(key_env):
     persist = FakePersist()
     lines = lambda body: lines_response(body, model="jev-1.14.0")  # noqa: E731

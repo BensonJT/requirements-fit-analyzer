@@ -180,6 +180,19 @@ def run(capsys, *argv):
     return rc, cap.out, cap.err
 
 
+def test_review_row_has_no_folder_until_built(conn, jd, capsys):
+    """2026-11-02: `review` puts a posting in front of the user; `trk set <id> built` creates the folder then."""
+    rc, out, _ = run(capsys, "add", "--company", "Acme Corp", "--role", "Ops Lead", "--req", "R9", "--status", "review")
+    assert rc == 0 and "[review]" in out and "folder" not in out
+    assert run(capsys, "edit", "1", "--notes", "LinkedIn https://www.linkedin.com/jobs/view/123/")[0] == 0
+    assert conn.execute("SELECT folder FROM tracker.application").fetchone()["folder"] is None
+    rc, out, _ = run(capsys, "set", "1", "built")
+    assert rc == 0 and "folder Applications/AcmeCorp_OpsLead_R9" in out
+    assert (jd / "Applications/AcmeCorp_OpsLead_R9/index.md").exists()
+    rc, out, _ = run(capsys, "set", "1", "built")            # already has a folder: no second one
+    assert rc == 0 and "folder" not in out
+
+
 def test_cli_add_set_note_contact_edit_show(conn, jd, capsys):
     rc, out, _ = run(capsys, "add", "--company", "Acme Corp", "--role", "Sr Analyst", "--req", "R123")
     assert rc == 0 and "added #1" in out

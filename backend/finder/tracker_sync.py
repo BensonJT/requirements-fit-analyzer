@@ -70,7 +70,7 @@ def decision_for_pg(row) -> tuple:
     anything that was applied (date_applied set) is a build. A remaining status without a date (an interview or
     rejection logged without the apply date) was still an application: build."""
     status = (row.status or "").strip().lower()
-    if status == "built":
+    if status in ("built", "review"):   # review (2026-11-02): put in front of the user, not yet decided
         return "hold", None
     if status in ("passed", "closed-unsent"):
         return "pass", f"other: tracker status {status}"

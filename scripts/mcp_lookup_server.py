@@ -49,7 +49,7 @@ ROW_CAP = 200
 QUERY_TIMEOUT_MS = 15000
 TRK_TIMEOUT_S = 60
 ACTOR = "claude-desktop"
-STATUSES = ("offer", "interview", "screen", "applied", "built", "accepted", "declined", "rejected",
+STATUSES = ("offer", "interview", "screen", "applied", "built", "review", "accepted", "declined", "rejected",
             "assumed-rejected", "withdrawn", "passed", "closed-unsent")
 CONTACT_ROLES = ("recruiter", "hiring_manager", "panelist", "referral", "staffing", "other")
 SOURCES = ("pipeline", "linkedin", "recruiter", "referral", "board", "manual", "migrated", "sheet")

@@ -45,9 +45,9 @@ def test_migrate_idempotent(conn):
     assert first == second == ["001_tracker.sql", "002_jobs.sql", "003_roles.sql", "004_jev_status.sql",
                               "005_decision_queue.sql", "006_decision_queue_lenses.sql",
                               "007_decision_queue_grade_only.sql", "008_report_gates.sql", "009_bridge.sql",
-                              "010_decision_queue_required.sql"]
+                              "010_decision_queue_required.sql", "011_review_status.sql"]
     n = conn.execute("SELECT count(*) AS n FROM tracker.status").fetchone()["n"]
-    assert n == 12
+    assert n == 13                                   # 12 + review (2026-11-02)
     assert conn.execute("SELECT count(*) AS n FROM pg_roles WHERE rolname = 'claude_ro'").fetchone()["n"] == 1
     assert conn.execute("SELECT to_regclass('jobs.fit_snapshot') AS t").fetchone()["t"]
 

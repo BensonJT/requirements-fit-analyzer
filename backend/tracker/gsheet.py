@@ -9,6 +9,7 @@ tests and other users never touch Google. `spawn()` runs a refresh in the backgr
 import fcntl
 import os
 import subprocess
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -40,7 +41,8 @@ TABS = {"Active": ACTIVE, "Closed": CLOSED, "Contacts": CONTACTS, "History": HIS
 
 STATUS_COLORS = {  # status -> (red, green, blue) background
     "offer": (0.72, 0.88, 0.80), "interview": (0.80, 0.90, 0.75), "screen": (0.85, 0.93, 0.83),
-    "applied": (0.85, 0.90, 0.98), "built": (1.0, 0.95, 0.80), "accepted": (0.72, 0.88, 0.80),
+    "applied": (0.85, 0.90, 0.98), "built": (1.0, 0.95, 0.80), "review": (0.93, 0.89, 0.98),
+    "accepted": (0.72, 0.88, 0.80),
     "rejected": (0.96, 0.84, 0.84), "assumed-rejected": (0.95, 0.90, 0.90), "declined": (0.93, 0.93, 0.93),
     "withdrawn": (0.93, 0.93, 0.93), "passed": (0.93, 0.93, 0.93), "closed-unsent": (0.93, 0.93, 0.93)}
 
@@ -70,6 +72,18 @@ def _link(url, label):
     if not url:
         return ""
     return f'=HYPERLINK("{str(url).replace(chr(34), "%22")}", "{label}")'
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+
+
+def _posting_url(a):
+    """The pipeline's posting URL, else the first link in the row's notes (2026-11-02: a `review` row from an
+    alert email or a board search has no posting ID, so its link travels in --notes)."""
+    if a.get("posting_url"):
+        return a["posting_url"]
+    m = _URL_RE.search(a.get("notes") or "")
+    return m.group(0).rstrip(".,;") if m else None
 
 
 def _contacts(conn):
@@ -108,7 +122,7 @@ def build_tabs(conn, today=None):
                 "Next action": a["next_action"], "Follow-up": a["follow_up_due"], "Closes": a["closes_on"],
                 "Contact": "; ".join(x["name"] for x in cs), "Email": c.get("email"), "Phone": c.get("phone"),
                 "LinkedIn": _link(c.get("linkedin"), "profile"), "Location": a["location"], "Pay": a["pay_text"],
-                "Source": a["source"], "Posting": _link(a["posting_url"], "open"), "Folder": a["folder"],
+                "Source": a["source"], "Posting": _link(_posting_url(a), "open"), "Folder": a["folder"],
                 "Latest note": latest, "Notes": a["notes"], "Reason": a["close_reason"]}
         tab, cols = ("Active", ACTIVE) if a["is_active"] else ("Closed", CLOSED)
         tabs[tab].append([v if k in ("LinkedIn", "Posting") else _text(v) for k, v in

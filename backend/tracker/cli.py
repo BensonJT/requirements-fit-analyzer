@@ -143,7 +143,32 @@ def cmd_show(conn, a):
 def cmd_set(conn, a):
     r = store.set_status(conn, a.app_id, a.status, actor(), status_date=a.date, note=a.note)
     print(f"#{r['app_id']} {r['company']}: {r['status']} ({r['status_date']})")
+    if r["status"] == "built":   # 2026-11-02: a `review` row the user decides to build gets its folder here
+        _ensure_folder(conn, r["app_id"])
     rerender(conn, a)
+
+
+def _ensure_folder(conn, app_id):
+    """Create the package folder for an application that has none (as `trk add` does for `built`).
+    Never fails the status change: a folder problem is a warning with the command that fixes it."""
+    row = conn.execute("SELECT app_id, company, role, employer_job_id, posting_id, folder FROM tracker.application "
+                       "WHERE app_id = %s", [app_id]).fetchone()
+    if row is None or row["folder"]:
+        return
+    jd = get_job_dir()
+    if jd is None:
+        print(f"warning: JOBSEARCH_VAULT_DIR is not set; #{app_id} has no folder "
+              f"(set it with `trk edit {app_id} --folder <path>`)", file=sys.stderr)
+        return
+    try:
+        rel = folders.create_folder(jd, taken=lambda r: store.folder_in_use(conn, r) is not None,
+                                    app_id=app_id, company=row["company"], role=row["role"],
+                                    employer_job_id=row["employer_job_id"], posting_id=row["posting_id"])
+        store.edit_field(conn, app_id, "folder", rel, actor())
+        print(f"folder {rel}")
+    except Exception as e:  # noqa: BLE001 - the status change is committed; say how to finish by hand
+        print(f"warning: #{app_id} is built but the folder step failed ({type(e).__name__}: {e}); "
+              f"set it with `trk edit {app_id} --folder <path>`", file=sys.stderr)
 
 
 def cmd_note(conn, a):
@@ -367,8 +392,10 @@ class UsageError(Exception):
 
 GUIDE = """\
 statuses:
-  active   built -> applied -> screen -> interview -> offer
+  active   (review) -> built -> applied -> screen -> interview -> offer
   closed   accepted, declined, rejected, assumed-rejected, withdrawn, passed, closed-unsent
+  'review' is a posting put in front of the user to read before deciding; no folder until `trk set <id> built`
+  (which creates it), or `trk set <id> passed`. Put the posting link in --notes when it has no posting ID.
   An official rejection is 'rejected'; 'assumed-rejected' means never heard back (see sweep).
   If a closed employer gets back in touch, trk set <id> screen moves the row back to active.
 

@@ -96,3 +96,13 @@ def test_refresh_against_a_fake_api(conn):
     write = next(c[1] for c in api.calls if c[0] == "write")
     active = next(d for d in write if d["range"] == "'Active'!A1")
     assert active["values"][0][0].startswith("Generated from the tracker database") and active["values"][1][0] == "ID"
+
+
+def test_posting_link_falls_back_to_a_url_in_notes():
+    """2026-11-02: a `review` row found in an alert email has no posting ID; its link rides in the notes."""
+    from backend.tracker import gsheet as G
+    assert G._posting_url({"posting_url": "https://x/1", "notes": "https://y/2"}) == "https://x/1"
+    assert G._posting_url({"posting_url": None, "notes": "LinkedIn https://www.linkedin.com/jobs/view/4485629783/."}) \
+        == "https://www.linkedin.com/jobs/view/4485629783/"
+    assert G._posting_url({"posting_url": None, "notes": "no link here"}) is None
+    assert G._posting_url({"posting_url": None, "notes": None}) is None

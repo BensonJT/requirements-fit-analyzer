@@ -630,7 +630,7 @@ def location_points(listing: S.Listing) -> int:
     pts = P.LOCATION_POINTS
     if S.is_remote(listing):
         return pts["remote"]
-    if listing.location.strip().lower() in P.NATIONWIDE_LOCATIONS:
+    if S.is_nationwide(listing):
         return pts["nationwide_unverified"]
     if listing.is_local_pass or S.is_commutable(listing):
         return pts["commutable_hybrid"] if listing.extra.get("workplace_type") == "hybrid" else pts["commutable_onsite"]

@@ -278,6 +278,12 @@ def is_remote(job: Listing) -> bool:
     workplace = job.extra.get("workplace_type")
     if workplace == "remote":  # the ATS's own flag (finder rows)
         return True
+    if job.extra.get("platform") == "usajobs":
+        # 2026-11-02: USAJobs states RemoteIndicator on every posting (the adapter maps it to `remote`), and
+        # its JD boilerplate defeats the text read: "Telework: Not Available", "Virtual: This is not a
+        # virtual position", benefits paragraphs listing telework. That read ~1,860 of 3,044 on-site federal
+        # postings as remote, so the commute rule never ran on them. The structured flag is the answer.
+        return False
     if _remote_location_entry(job):
         return True
     # "US Off-Site" as a location segment always means remote, whichever field carries it (sec 20.3).
@@ -689,6 +695,18 @@ def long_commute_site(job: Listing, hits: list) -> Optional[str]:
     return None
 
 
+def is_nationwide(job: Listing) -> bool:
+    """The headline location is a nationwide placeholder ("Multiple Locations", "United States") with no
+    usable site list behind it. 2026-11-02: a USAJobs "Multiple Locations" posting always lists its real
+    duty stations in `locations` (Atlanta + Kansas City, Indianapolis + Cleveland ...), so it is judged on
+    those by the commute rule instead of being waved through as "remote status unverified"."""
+    if job.location.strip().lower() not in P.NATIONWIDE_LOCATIONS:
+        return False
+    if job.extra.get("platform") == "usajobs":
+        return not any(loc.strip().lower() not in P.NATIONWIDE_LOCATIONS for loc in job.locations if loc)
+    return True
+
+
 def is_commutable(job: Listing) -> bool:
     """A commutable place is named in one of the listing's locations (each checked on its own, so a
     state in one location never vouches for a city in another). A `hybrid` workplace flag alone is
@@ -1026,7 +1044,7 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
     # 7. Location -- remote anywhere, or inside the commute radius
     remote = is_remote(job)
     local = job.is_local_pass or is_commutable(job)
-    nationwide = job.location.strip().lower() in P.NATIONWIDE_LOCATIONS
+    nationwide = is_nationwide(job)
     if nationwide and not remote:
         flags.append("nationwide listing -- remote status unverified")
     elif not remote and not local:

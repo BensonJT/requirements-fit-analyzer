@@ -32,7 +32,23 @@ PROVIDER_DEFAULTS = {
     "groq": {"batch": 120, "tpm": 7000, "max_tokens": 3000},
 }
 
-CAREER_SUMMARY = """(candidate background: kept in a gitignored career_summary.local.md)"""
+# The candidate background the classifier judges against is personal, so it lives in a gitignored file:
+# backend/jd_keywords/career_summary.local.md (or $JD_KEYWORDS_CAREER_SUMMARY). career_summary.example.md shows
+# the shape; a clone without a local file runs against the example.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _career_summary():
+    for path in (os.environ.get("JD_KEYWORDS_CAREER_SUMMARY"),
+                 os.path.join(_HERE, "career_summary.local.md"),
+                 os.path.join(_HERE, "career_summary.example.md")):
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return "\n" + f.read()
+    raise FileNotFoundError("no career summary: create backend/jd_keywords/career_summary.local.md")
+
+
+CAREER_SUMMARY = _career_summary()
 
 SYSTEM_PROMPT = (
     "You are a keyword classifier for a job application tool. "

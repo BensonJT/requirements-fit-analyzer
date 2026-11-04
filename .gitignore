@@ -194,3 +194,4 @@ db/*.txt
 
 # Session state file: local working log for the owner and AI sessions, never published (2026-10-24)
 docs/STATUS.md
+backend/jd_keywords/career_summary.local.md

@@ -193,6 +193,7 @@ The daily pipeline runs a gated Jev stage just before the second judge only when
 | Eightfold | title, locations, workplace flag, date, department | yes | host URL, domain |
 | Paylocity | title, location, remote flag, department, date (from the JSON block embedded in the all-jobs page) | yes | company GUID, slug |
 | USAJobs | everything, including full duties/qualifications, clearance, grade, pay | not needed | none — one registry row; needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` in `.env` |
+| BrassRing (Infinite TalentGateway) | title, location (the client's own field), last-updated date; needs a home-page session | yes (labelled sections, same session) | partnerid, siteid, optional location field override |
 
 USAJobs is the one adapter that is not a whole-board pull: it's a keyword search over `backend/profile.py`'s title phrases, so a posting missing from a run's results is never taken as evidence it's gone — only its own `ApplicationCloseDate` closes it. Missing credentials skip the adapter (one log line), they never fail the sweep. One registry row enables it regardless of `identifier_*` values (leave them blank).
 
@@ -258,6 +259,7 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 | `https://jobs.smartrecruiters.com/ServiceNow/...` | `smartrecruiters` | `ServiceNow` |
 | `https://apply.careers.microsoft.com/careers/job/123` | `eightfold` | `https://apply.careers.microsoft.com`, `microsoft.com` |
 | `https://recruiting.paylocity.com/recruiting/jobs/All/cd6cba65-…/Logos` | `paylocity` | `cd6cba65-…` (the GUID), `Logos` |
+| `https://sjobs.brassring.com/TGnewUI/Search/home/HomeWithPreLoad?partnerid=25397&siteid=5259&...` | `brassring` | `25397`, `5259` |
 
 **Things that trip people up:**
 - **Vanity careers sites hide the ATS.** A branded site like `careers.example.com` is often a front end for Workday or Oracle. Click Apply and watch where you land.
@@ -265,6 +267,7 @@ Planning Center,greenhouse,planningcenter,,,,manual,
 - **Workday's data center and site slug must match exactly.** A wrong data center returns 422, and a missing site slug returns 405.
 - **Paylocity apply links carry only a numeric job ID.** `recruiting.paylocity.com/Recruiting/jobs/Apply/4466374` names no company. Open the job's Details page and follow its all-jobs link; the company GUID is in that URL. The public v2 feed for the GUID often returns an empty list even when jobs are live.
 - **Eightfold's domain is the company's email domain, not the careers host.** Microsoft is `microsoft.com` on `apply.careers.microsoft.com`; Liberty Mutual is `libertymutual.com` on `libertymutual.eightfold.ai`. Some tenants answer only one of Eightfold's two list APIs, and the adapter tries both.
+- **BrassRing names its fields per client.** Title, location and summary are `formtextN` questions whose numbers differ by employer; the adapter reads the map from the board's own home page. A client whose `location` field holds a facility name (Performance Food Group) gets its city from a `formtext` field instead; put the field name in `identifier_3` if the guess is wrong.
 
 Set `source` to `unresolved` to keep a row in the file without sweeping it.
 

@@ -1812,3 +1812,158 @@ def test_jibe_jobs_short_read_is_truncated(monkeypatch):
     monkeypatch.setattr(A, "client", lambda: _C())
     out = A.jibe_jobs({"employer": "Acme", "identifier_1": "careers.acme.com"})
     assert getattr(out, "truncated", False)
+
+
+# ---------------------------------------------------------------- brassring
+import html as _html_mod  # noqa: E402
+
+
+class _BrResp:
+    def __init__(self, payload=None, text="", status=200):
+        self._p, self.text, self.status_code, self.headers, self.request = payload, text, status, {}, None
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _br_home(cfg):
+    return ('<input id="CookieValue" type="hidden" value="ENC" />'
+            '<input name="__RequestVerificationToken" type="hidden" value="TOK" />'
+            f'<input id="searchResults" type="hidden" value="{_html_mod.escape(json.dumps(cfg))}" />')
+
+
+_BR_DELTEK_CFG = {"JobFieldsToDisplay": {"JobTitle": "formtext4", "Position3": ["formtext1", "autoreq"]},
+                  "LocationCustomSolrFields": "Location,FORMTEXT1"}
+
+
+def _br_job(n, loc="US-Herndon-VA (Hybrid)", **extra):
+    q = {"reqid": str(600000 + n), "autoreq": f"{n}BR", "jobtitle": f"Short {n}", "formtext4": f"Full Title {n}",
+         "formtext1": loc, "lastupdated": "04-Nov-2026", **extra}
+    return {"Questions": [{"QuestionName": k, "Value": v} for k, v in q.items()],
+            "Link": f"https://sjobs.brassring.com/x?partnerid=1&siteid=2&PageType=JobDetails&jobid={600000 + n}"}
+
+
+def _br_server(cfg, jobs, calls, total=None):
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def close(self): pass
+
+        def request(self, method, url, params=None, json=None, headers=None, **kw):
+            calls.append((url.rsplit("/", 1)[-1], json, headers))
+            if method == "GET":
+                return _BrResp(text=_br_home(cfg))
+            if url.endswith("MatchedJobs"):
+                return _BrResp({"JobsCount": len(jobs) if total is None else total,
+                                "Jobs": {"Job": jobs[:A.BRASSRING_PAGE]}})
+            page = json["pageNumber"]
+            return _BrResp({"Jobs": {"Job": jobs[(page - 1) * A.BRASSRING_PAGE: page * A.BRASSRING_PAGE]}})
+    return lambda: _C()
+
+
+_BR_ROW = {"employer": "Deltek", "platform": "brassring", "identifier_1": "1", "identifier_2": "2"}
+
+
+def test_brassring_pages_by_reqid_and_maps_client_fields(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "BRASSRING_PAGE", 2)
+    jobs = [_br_job(1), _br_job(2, loc="US (Remote), US-Herndon-VA (Hybrid), US-Tampa-FL"),
+            _br_job(3, loc="India-Bangalore (Remote)")]
+    calls = []
+    monkeypatch.setattr(A, "client", _br_server(_BR_DELTEK_CFG, jobs, calls))
+    out = A.brassring_jobs(_BR_ROW)
+    assert not getattr(out, "truncated", False)
+    assert [p["req_id"] for p in out] == ["1BR", "2BR", "3BR"]
+    assert [c[0] for c in calls] == ["Home", "MatchedJobs", "ProcessSortAndShowMoreJobs"]
+    assert calls[1][2] == {"RFT": "TOK"} and calls[1][1]["EncryptedSessionValue"] == "ENC"
+    assert calls[1][1]["SortType"] == calls[2][1]["SortType"] == "reqid"     # a unique key: pages never overlap
+    first = out[0]
+    assert first["title"] == "Full Title 1"                                  # JobFieldsToDisplay.JobTitle
+    assert first["location_primary"] == "US-Herndon-VA (Hybrid)" and first["workplace_type"] == "hybrid"
+    assert first["country"] == "US" and first["posted_at"] == date(2026, 11, 4)
+    assert first["url"].endswith("jobid=600001")
+    assert json.loads(out[1]["locations"]) == ["US (Remote)", "US-Herndon-VA (Hybrid)", "US-Tampa-FL"]
+    assert out[1]["country"] == "US"
+    assert out[2]["country"] == "IN" and out[2]["workplace_type"] == "remote"
+
+
+def test_brassring_prefers_a_formtext_location_over_a_facility_name(monkeypatch):
+    cfg = {"JobFieldsToDisplay": {"JobTitle": "jobtitle"}, "LocationCustomSolrFields": "Location,FORMTEXT5"}
+    job = _br_job(1, loc="", location="Performance TPC Logistics (0754)", formtext5="Rock Island, Illinois (IL)")
+    monkeypatch.setattr(A, "client", _br_server(cfg, [job], []))
+    (p,) = A.brassring_jobs(_BR_ROW)
+    assert p["location_primary"] == "Rock Island, Illinois (IL)" and p["country"] == "US"
+    assert json.loads(p["locations"]) == ["Rock Island, Illinois (IL)"]
+
+
+def test_brassring_short_read_is_truncated_and_bad_board_raises(monkeypatch):
+    monkeypatch.setattr(A, "PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "client", _br_server(_BR_DELTEK_CFG, [_br_job(1)], [], total=5))
+    assert getattr(A.brassring_jobs(_BR_ROW), "truncated", False)
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw):
+            return _BrResp(text=_br_home(_BR_DELTEK_CFG)) if method == "GET" else _BrResp({"error": "x"})
+    monkeypatch.setattr(A, "client", lambda: _C())
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.brassring_jobs(_BR_ROW)
+    with pytest.raises(ValueError):
+        A.brassring_jobs({**_BR_ROW, "identifier_2": ""})
+
+
+def _br_detail_server(responses, calls):
+    class _C:
+        def close(self): pass
+
+        def request(self, method, url, json=None, **kw):
+            calls.append(url.rsplit("/", 1)[-1])
+            if method == "GET":
+                return _BrResp(text=_br_home(_BR_DELTEK_CFG))
+            return responses.pop(0)
+    return lambda: _C()
+
+
+_BR_DETAIL = {"ServiceResponse": {"Jobdetails": {"JobDetailQuestions": [
+    {"VerityZone": "lastupdated", "QuestionName": "", "AnswerValue": "25-Sep-2026"},
+    {"VerityZone": "formtext3", "QuestionName": "Career Interests", "AnswerValue": "Consulting"},
+    {"VerityZone": "formtext31", "QuestionName": "Position Type", "AnswerValue": "FT"},
+    {"VerityZone": "formtext5", "QuestionName": "Position Responsibilities",
+     "AnswerValue": "<ul><li>Lead BI implementations for clients across the project lifecycle.</li>"
+                    "<li>Design dashboards.</li></ul>"},
+    {"VerityZone": "formtext6", "QuestionName": "Qualifications",
+     "AnswerValue": "<p>5+ years of BI consulting experience with Power BI or similar tools.</p>"
+                    "<p>The salary range for this role is $72,000 - $127,000.</p>"},
+    {"VerityZone": "formtext15", "QuestionName": "EEO Statement",
+     "AnswerValue": "Deltek, Inc. is an Equal Opportunity / Affirmative Action employer and more text here."},
+    {"VerityZone": "dateclosed", "QuestionName": "", "AnswerValue": "25-Sep-2027"},
+]}}}
+
+
+def test_brassring_detail_sections_pay_and_gone(monkeypatch):
+    monkeypatch.setattr(A, "_br_sessions", {})
+    calls = []
+    monkeypatch.setattr(A, "client", _br_detail_server(
+        [_BrResp(text="err", status=500), _BrResp(text="err", status=500), _BrResp(text="err", status=500),
+         _BrResp(_BR_DETAIL), _BrResp({"ServiceResponse": {"Jobdetails": None}})], calls))
+    monkeypatch.setattr(A.time, "sleep", lambda s: None)
+    posting = {"url": "https://sjobs.brassring.com/x?partnerid=1&siteid=2&jobid=623525", "req_id": "11274BR",
+               "workplace_type": "remote"}
+    d = A.brassring_detail(_BR_ROW, posting)      # three 500s exhaust the first session; a fresh one succeeds
+    assert calls.count("Home") == 2
+    text = d["description_text"]
+    assert text.startswith("Career Interests: Consulting\nPosition Type: FT")
+    assert "Position Responsibilities\n" in text and "Qualifications\n" in text
+    assert "Equal Opportunity" not in text
+    assert (d["pay_min"], d["pay_max"], d["pay_interval"]) == (72000, 127000, "year")
+    assert d["employment_type"] == "full_time" and d["workplace_type"] == "remote"
+    assert d["posted_at"] == date(2026, 9, 25) and d["posting_end_at"] == date(2027, 9, 25)
+    import pytest
+    with pytest.raises(A.Gone):
+        A.brassring_detail(_BR_ROW, posting)

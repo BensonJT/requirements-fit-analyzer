@@ -17,6 +17,7 @@ import inspect
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from urllib.parse import quote
@@ -2159,6 +2160,245 @@ def jibe_jobs(row, max_pages=None):
     return out
 
 
+# ================================================================ BrassRing (Infinite / Kenexa TalentGateway)
+# sjobs.brassring.com serves every client from one host. The home page (?partnerid=&siteid=) sets the session
+# cookies and carries three things the JSON calls need: the hidden `CookieValue` (EncryptedSessionValue), the
+# anti-forgery token (sent as header RFT), and the `searchResults` config, whose JobFieldsToDisplay /
+# LocationCustomSolrFields name the client's own question fields (Deltek's title is formtext4 and its location
+# formtext1; Performance Food Group's location is formtext5). MatchedJobs returns page 1 (50 jobs) with
+# JobsCount; ProcessSortAndShowMoreJobs returns pageNumber 2..n. The list record has no full JD, so
+# JobDetails (POST, same session; it 500s without one) fills it as labelled sections. Verified on Deltek
+# (25397/5259, 95 jobs) and Performance Food Group (26350/6930, 1,402) 2026-11-04.
+# Registry: identifier_1 = partnerid, identifier_2 = siteid, identifier_3 = optional location field override.
+BRASSRING_HOST = "https://sjobs.brassring.com"
+BRASSRING_PAGE = 50
+# The sort key decides whether paging is safe. "LastUpdated" (the site's default) ties on whole days, and the
+# server re-shuffles ties between page calls: PFG's 1,402 jobs came back as 1,223-1,386 distinct ids. "reqid"
+# is unique, so pages never overlap (2026-11-04).
+BRASSRING_SORT = "reqid"
+BRASSRING_SESSION_TTL = 1200.0       # seconds before the detail session is refreshed
+_BR_COUNTRY = {"us": "US", "usa": "US", "united states": "US", "uk": "GB", "united kingdom": "GB",
+               "india": "IN", "philippines": "PH", "canada": "CA", "australia": "AU", "germany": "DE",
+               "mexico": "MX", "ireland": "IE", "netherlands": "NL", "france": "FR", "singapore": "SG",
+               "poland": "PL", "romania": "RO", "brazil": "BR", "japan": "JP", "china": "CN"}
+_BR_COUNTRY_LEAD = re.compile(r"^\s*(" + "|".join(sorted(map(re.escape, _BR_COUNTRY), key=len, reverse=True))
+                              + r")\b(?=\s*(?:-|\(|$))", re.I)
+_BR_SPLIT = re.compile(r",\s*(?=(?:" + "|".join(sorted(map(re.escape, _BR_COUNTRY), key=len, reverse=True))
+                       + r")\b\s*(?:-|\(|,|$))", re.I)
+_BR_US_STATE = re.compile(r"\(([A-Z]{2})\)\s*$|,\s*[A-Z]{2}\s*$")
+# Sections that are never qualifications: dropped from the JD text (the splitter's footer rules are the backstop).
+_BR_SKIP_LABEL = re.compile(r"\b(eeo|e-verify|privacy|equal opportunity|accommodation)\b", re.I)
+_BR_HIDDEN = {name: re.compile(rf'id="{name}" type="hidden" value="([^"]*)"') for name in ("CookieValue",)}
+_BR_RFT = re.compile(r'name="__RequestVerificationToken" type="hidden" value="([^"]*)"')
+_BR_RESULTS = re.compile(r'id="searchResults" type="hidden" value="([^"]*)"')
+_BR_JOBID = re.compile(r"[?&]jobid=(\d+)", re.I)
+_br_sessions = {}
+_br_lock = threading.Lock()
+
+
+def _br_ids(row):
+    pid, sid = (row.get("identifier_1") or "").strip(), (row.get("identifier_2") or "").strip()
+    if not (pid.isdigit() and sid.isdigit()):
+        raise ValueError(f"{row.get('employer')}: brassring needs identifier_1=partnerid, identifier_2=siteid")
+    return pid, sid
+
+
+def _br_open(c, pid, sid):
+    """GET the home page on client `c`; returns (rft, cookie_value, config dict)."""
+    import html as _html
+    t = _request(c, "GET", f"{BRASSRING_HOST}/TGnewUI/Search/Home/Home",
+                 params={"partnerid": pid, "siteid": sid}).text
+    cookie, rft = _BR_HIDDEN["CookieValue"].search(t), _BR_RFT.search(t)
+    if not cookie or not rft:
+        raise RuntimeError(f"brassring {pid}/{sid}: no session token on the home page")
+    cfg = {}
+    m = _BR_RESULTS.search(t)
+    if m:
+        try:
+            cfg = json.loads(_html.unescape(m.group(1)))
+        except ValueError:
+            cfg = {}
+    return rft.group(1), cookie.group(1), cfg
+
+
+def _br_fields(row, cfg):
+    """(title field, [location fields]) for this client."""
+    show = cfg.get("JobFieldsToDisplay") or {}
+    title = (show.get("JobTitle") or "jobtitle").lower()
+    override = (row.get("identifier_3") or "").strip().lower()
+    if override:
+        return title, [override]
+    pos3 = show.get("Position3")
+    pos3 = [pos3] if isinstance(pos3, str) else list(pos3 or [])
+    solr = [f.strip().lower() for f in (cfg.get("LocationCustomSolrFields") or "").split(",") if f.strip()]
+    # A client's "location" field can be a facility name (PFG: "Performance TPC Logistics (0754)"), so the
+    # formtext fields it lists for location search come first, then the displayed ones, then "location".
+    locs = [f for f in solr if f != "location"] + [f.lower() for f in pos3 if f.lower().startswith("formtext")]
+    return title, list(dict.fromkeys(locs + ["location"]))
+
+
+def _br_split_locations(text):
+    return [p.strip() for p in _BR_SPLIT.split(text or "") if p.strip()]
+
+
+def _br_country(locs):
+    codes = []
+    for loc in locs:
+        m = _BR_COUNTRY_LEAD.match(loc)
+        if m:
+            codes.append(_BR_COUNTRY[m.group(1).lower()])
+        elif _BR_US_STATE.search(loc):
+            codes.append("US")
+    return "US" if "US" in codes else (codes[0] if codes else None)
+
+
+def _br_position(pid, sid, job, title_f, loc_fs):
+    q = {x.get("QuestionName", "").lower(): x.get("Value") for x in job.get("Questions") or []}
+    reqid = str(q.get("reqid") or "").strip()
+    if not reqid:
+        raise RuntimeError(f"brassring {pid}/{sid}: a job with no reqid")
+    loc_text = next((str(q[f]).strip() for f in loc_fs if q.get(f) and str(q[f]).strip()), None)
+    locs = _br_split_locations(loc_text)
+    title = (q.get(title_f) or q.get("jobtitle") or "").strip() or None
+    url = job.get("Link") or (f"{BRASSRING_HOST}/TGnewUI/Search/home/HomeWithPreLoad?partnerid={pid}"
+                              f"&siteid={sid}&PageType=JobDetails&jobid={reqid}")
+    return N.base(
+        # autoreq ("11202BR") is the number the posting shows a candidate; reqid is the jobid in the URL.
+        req_id=str(q.get("autoreq") or reqid).strip(),
+        title=title,
+        url=url,
+        location_primary=locs[0] if locs else None,
+        locations=N.locations_json(locs),
+        country=_br_country(locs),
+        workplace_type=N.workplace_type(None, *locs),
+        posted_at=_avature_date(q.get("lastupdated")),
+        raw_json=N.raw({k: v for k, v in q.items() if not str(k).startswith("formtext") or k in loc_fs
+                        or k == title_f}),
+    )
+
+
+def brassring_jobs(row, max_pages=None):
+    pid, sid = _br_ids(row)
+    out, seen = [], set()
+    with client() as c:
+        rft, cookie, cfg = _br_open(c, pid, sid)
+        title_f, loc_fs = _br_fields(row, cfg)
+        base = {"Keyword": "", "Location": "", "KeywordCustomSolrFields": "", "LocationCustomSolrFields": "",
+                "Latitude": 0, "Longitude": 0, "SortType": BRASSRING_SORT, "LinkID": "", "TurnOffHttps": False}
+        data = _request(c, "POST", f"{BRASSRING_HOST}/TgNewUI/Search/Ajax/MatchedJobs", headers={"RFT": rft},
+                        json={**base, "PartnerId": pid, "SiteId": sid, "EncryptedSessionValue": cookie,
+                              "FacetFilterFields": {"Facet": []},
+                              "PowerSearchOptions": {"PowerSearchOption": []}}).json()
+        if not isinstance(data, dict) or "JobsCount" not in data:
+            # Never return []: an unread board must raise, or the close pass would close everything.
+            raise RuntimeError(f"{row['employer']}: brassring MatchedJobs gave no JobsCount")
+        total, page = int(data.get("JobsCount") or 0), 1
+        jobs = (data.get("Jobs") or {}).get("Job") or []
+        while True:
+            for j in jobs:
+                p = _br_position(pid, sid, j, title_f, loc_fs)
+                if p["req_id"] not in seen:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            if not jobs or len(out) >= total:
+                break
+            if max_pages and page >= max_pages:
+                return Truncated(out)
+            page += 1
+            time.sleep(PAGE_DELAY)
+            more = _request(c, "POST", f"{BRASSRING_HOST}/TgNewUI/Search/Ajax/ProcessSortAndShowMoreJobs",
+                            headers={"RFT": rft},
+                            json={"partnerId": pid, "siteId": sid, "keyword": "", "location": "",
+                                  "keywordCustomSolrFields": "", "locationCustomSolrFields": "", "linkId": "",
+                                  "Latitude": 0, "Longitude": 0, "facetfilterfields": {"Facet": []},
+                                  "powersearchoptions": {"PowerSearchOption": []}, "SortType": BRASSRING_SORT,
+                                  "pageNumber": page, "encryptedSessionValue": cookie}).json()
+            jobs = ((more or {}).get("Jobs") or {}).get("Job") or []
+    if len(out) < total:
+        return Truncated(out)
+    return out
+
+
+def _br_session(pid, sid, fresh=False):
+    with _br_lock:
+        s = _br_sessions.get((pid, sid))
+        if s and not fresh and time.monotonic() - s["at"] < BRASSRING_SESSION_TTL:
+            return s
+        if s:
+            s["client"].close()
+        c = client()
+        rft, cookie, cfg = _br_open(c, pid, sid)
+        s = _br_sessions[(pid, sid)] = {"client": c, "rft": rft, "cfg": cfg, "at": time.monotonic()}
+        return s
+
+
+_BR_EMPLOYMENT = re.compile(r"^(?:ft|pt|full[- ]?time|part[- ]?time|regular full time|contract(?:or)?|temporary|"
+                            r"intern(?:ship)?)\b", re.I)
+
+
+def _br_employment(qs):
+    """Employment type from whichever field says it (Deltek "Position Type: FT", PFG an unlabelled "Full Time")."""
+    for x in qs:
+        v = N.html_to_text(str(x.get("AnswerValue") or "")).strip() if x.get("AnswerValue") else ""
+        label = (x.get("QuestionName") or "").lower()
+        if v and len(v) <= 30 and (("type" in label or "status" in label or not label) and _BR_EMPLOYMENT.match(v)):
+            return {"ft": "full_time", "pt": "part_time"}.get(v.lower()) or N.employment_type(v)
+    return None
+
+
+def _br_detail_fields(row, jd, posting):
+    """Fields from one JobDetails ServiceResponse.Jobdetails record."""
+    qs = jd.get("JobDetailQuestions") or []
+    by_zone = {(x.get("VerityZone") or "").lower(): x.get("AnswerValue") for x in qs}
+    facts, sections = [], []
+    for x in qs:
+        label, val = (x.get("QuestionName") or "").strip(), x.get("AnswerValue")
+        if not label or not val or _BR_SKIP_LABEL.search(label):
+            continue
+        text = N.html_to_text(str(val)) or ""
+        if not text.strip():
+            continue
+        if len(text) <= 80 and "\n" not in text.strip():
+            facts.append(f"{label}: {text.strip()}")
+        else:
+            sections.append(f"{label}\n{text.strip()}")
+    if not sections:
+        raise RuntimeError(f"no job description in BrassRing JobDetails for {posting.get('url')}")
+    text = "\n\n".join((["\n".join(facts)] if facts else []) + sections)
+    pay = N.pay_from_text(text)
+    return dict(
+        description_text=text,
+        posted_at=_avature_date(by_zone.get("lastupdated")) or posting.get("posted_at"),
+        posting_end_at=_avature_date(by_zone.get("dateclosed")) or posting.get("posting_end_at"),
+        workplace_type=posting.get("workplace_type") or N.workplace_type(None, text[:400]),
+        employment_type=_br_employment(qs) or posting.get("employment_type"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_interval=pay[2] if pay else None, pay_source="text" if pay else None,
+    )
+
+
+def brassring_detail(row, posting):
+    pid, sid = _br_ids(row)
+    m = _BR_JOBID.search(posting.get("url") or "")
+    if not m:
+        raise RuntimeError(f"brassring: no jobid in {posting.get('url')}")
+    body = {"partnerId": pid, "siteId": sid, "jobid": m.group(1), "configMode": "", "jobSiteId": sid,
+            "turnOffHttps": False}
+    for attempt in (0, 1):
+        s = _br_session(pid, sid, fresh=attempt == 1)
+        try:
+            data = _request(s["client"], "POST", f"{BRASSRING_HOST}/TgNewUI/Search/Ajax/JobDetails",
+                            headers={"RFT": s["rft"]}, json=body).json()
+        except (httpx.HTTPStatusError, ValueError):
+            if attempt == 0:
+                continue      # an expired session also answers 500: retry once on a fresh one
+            raise
+        jd = ((data or {}).get("ServiceResponse") or {}).get("Jobdetails")
+        if not jd or not jd.get("JobDetailQuestions"):
+            raise Gone(f"brassring job {m.group(1)} has no details (taken down)")
+        return _br_detail_fields(row, jd, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2177,6 +2417,7 @@ _LIST = {
     "successfactors_rmk": successfactors_rmk_jobs,
     "avature": avature_jobs,
     "jibe": jibe_jobs,
+    "brassring": brassring_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -2191,6 +2432,7 @@ _DETAIL = {
     "phenom": phenom_detail,
     "successfactors_rmk": successfactors_rmk_detail,
     "avature": avature_detail,
+    "brassring": brassring_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

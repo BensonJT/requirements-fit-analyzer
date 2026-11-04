@@ -72,7 +72,8 @@ NAT and isn't reachable from the LAN.
   `~/jobsearch_native/freeze_clean.txt` is gone; `.venv/bin/pip freeze` makes a new one). DuckDB job
   store lives in `db/jobsearch.duckdb` (gitignored; see `db/README.md`). Gitignored files that a
   clone does NOT bring: `.env` (incl. `RESUME_DB_URL`), `evidence.local.toml`,
-  `.personal_patterns`, `backend/profile_local.py`, `backend/finder/rubric_local.py`, `db/`.
+  `.personal_patterns`, `backend/profile_local.py`, `backend/finder/rubric_local.py`,
+  `backend/jd_keywords/career_summary.local.md` (the keyword classifier's candidate background), `db/`.
   Caveat: the ext4 disk is a VHDX on C:, which is nearly full — keep large backups on E:.
 - **OptiPlex** (backup): Xubuntu Linux, conda env `jobsearch`, Python 3.12+. Still runnable
   standalone (`source ~/miniconda3/etc/profile.d/conda.sh && conda run -n jobsearch python

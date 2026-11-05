@@ -471,7 +471,18 @@ def clear(aid: str, job_dir: Path | None = None) -> bool:
     return True
 
 
+def load_env(path: Path | None = None) -> None:
+    """Load <repo>/.env (JOBSEARCH_VAULT_DIR and friends) without overriding real environment variables,
+    so `clear` works from a bare shell, not only from the cron wrapper. Same pattern as trk."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path or Path(__file__).resolve().parents[1] / ".env", override=False)
+    except Exception:  # noqa: BLE001 - a missing or unreadable .env must never stop the command
+        pass
+
+
 def main(argv=None):
+    load_env()
     ap = argparse.ArgumentParser(prog="inbox_watch")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")

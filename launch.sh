@@ -61,6 +61,11 @@ fi
 # ── presets ────────────────────────────────────────────────────────────────
 # A preset is a list of steps joined by '|':
 #   retrain            finder.py retrain (gated + ledgered; promotes AND rescreens only if a model passes)
+#   calib              finder.py coverage --calibrate --if-stale: re-tunes the coverage thresholds only when no
+#                      calibration matches the encoder / splitter / evidence version (one log line otherwise);
+#                      keeps the incumbent thresholds unless the new ones gain >= 0.005 AUC on the same rows.
+#                      FULL + RETRAIN only (user 2026-11-05): nightly re-tuning would move the ruler run to run.
+#                      First run ~20-45 min (embeds ~1,600 postings' requirement lines), ~2-3 GB RAM; then seconds
 #   sweep:<args>       sweep_ats.py <args> -- sweep, JD fetch, tracker sync, screen, coverage,
 #                      required-embed, [Gemma judge if --llm-top N], Jobs_Found, snapshots
 #                      (with --skip-sweep --no-screen it is only a JD fetch: the directional backfill preset;
@@ -102,7 +107,7 @@ fi
 LABELS=(
   "Overnight FULL            sweep + screen + coverage + Jev demotion pass (Gemma on the demotions only) + Top_Jobs + maintenance"
   "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (~3.5 h extra)"
-  "Overnight FULL + RETRAIN  retrain models on new labels first, then as FULL"
+  "Overnight FULL + RETRAIN  retrain models on new labels, re-tune coverage thresholds if stale, then as FULL"
   "Overnight LIGHT           sweep + screen + coverage + Jev demotion pass + Top_Jobs + maintenance; no Gemma at all"
   "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
@@ -111,11 +116,11 @@ LABELS=(
   "Disk maintenance          compact the DuckDB file, scratch files, worktrees, old in-repo backups (what every overnight preset ends with)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~1.5-2.5 h (no top-100 Gemma since 9/30; Gemma reads the ~20-40 demotions)" "~5-6 h (FULL + ~3.5 h eval set)" "~3-3.5 h (retrain ~65 min + FULL)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
+ESTIMATES=("~1.5-2.5 h (no top-100 Gemma since 9/30; Gemma reads the ~20-40 demotions)" "~5-6 h (FULL + ~3.5 h eval set)" "~3-3.5 h (retrain ~65 min + FULL; +20-45 min when calibration is stale)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
   "sweep:|jevtop|maint"
   "sweep:|judge2run|judge2eval|jevtop|maint"
-  "retrain|sweep:|jevtop|maint"
+  "retrain|calib|sweep:|jevtop|maint"
   "sweep:|jevtop|maint"
   "judge2run|judge2eval|maint"
   "sweep:--skip-sweep --detail-pattern directional --detail-budget 2000 --no-screen"
@@ -132,7 +137,8 @@ last = None
 try:
     for line in open("logs/launch_timings.jsonl", encoding="utf-8"):
         r = json.loads(line)
-        if r.get("preset") == sys.argv[1] and r.get("status") == 0:
+        # "calib|" (added to FULL + RETRAIN 2026-11-05) is ignored so that preset keeps its run history
+        if r.get("preset", "").replace("calib|", "") == sys.argv[1].replace("calib|", "") and r.get("status") == 0:
             last = r
 except OSError:
     pass
@@ -211,6 +217,7 @@ WAIT_SECS=$((START_EPOCH - $(date +%s)))
 step_cmd() {  # the literal command line a step runs
   case "$1" in
     retrain) echo "$PY -u finder.py retrain" ;;
+    calib)   echo "$PY -u finder.py coverage --calibrate --if-stale" ;;
     sync)    echo "$PY -u finder.py sync" ;;
     top)     echo "$PY -u finder.py top" ;;
     jevtop)  echo "$PY -u finder.py top --jev --background-file $JUDGE_BG" ;;   # Gemma on the demotions needs judge_env

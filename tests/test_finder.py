@@ -3098,6 +3098,32 @@ def test_calibrate_against_hard_negatives_stores_thresholds(tmp_path, monkeypatc
     lines = []
     unmatched = coverage.current_calibration(con, encoder="fake", reranker=None, req_context="title", log=lines.append)
     assert unmatched is None and any("no calibration matches" in ln for ln in lines)
+    # The overnight `calib` step (plain config again: no title context, no reranker).
+    monkeypatch.delenv("JOBSEARCH_REQ_CONTEXT")
+    monkeypatch.delenv("JOBSEARCH_RERANKER")
+    # A fresh calibration for this setup is current, so the step is one line, no row.
+    lines = []
+    assert coverage.calibrate_if_stale(con, m, FakeEncoder(), log=lines.append) is None
+    assert lines and lines[0].startswith("Calibration: skipped") and result["version"] in lines[0]
+    n_rows = con.execute("SELECT count(*) FROM models WHERE kind = 'coverage'").fetchone()[0]
+    # A splitter change makes it stale; a huge margin keeps the incumbent's thresholds (stability rule) while the
+    # new row carries today's fingerprint, so the next night skips again.
+    monkeypatch.setattr(coverage.R, "splitter_fingerprint", lambda: "splitter-next")
+    stale, reason, inc = coverage.calibration_staleness(con, m, FakeEncoder())
+    assert stale and "splitter" in reason and inc["version"] == result["version"]
+    lines = []
+    kept = coverage.calibrate_if_stale(con, m, FakeEncoder(), keep_margin=1.0, n_pseudo=5, hard_top=5,
+                                       log=lines.append)
+    assert kept["kept_incumbent"] and (kept["strong"], kept["partial"]) == (result["strong"], result["partial"])
+    assert kept["splitter"] == "splitter-next" and kept["incumbent_version"] == result["version"]
+    assert any("kept the incumbent thresholds" in ln for ln in lines)
+    assert con.execute("SELECT count(*) FROM models WHERE kind = 'coverage'").fetchone()[0] == n_rows + 1
+    assert coverage.calibrate_if_stale(con, m, FakeEncoder(), log=_quiet) is None
+    # The step never stores a reranker row, even with the experiment switch on: cover() never reranks.
+    monkeypatch.setattr(coverage.R, "splitter_fingerprint", lambda: "splitter-third")
+    monkeypatch.setenv("JOBSEARCH_RERANKER", "fake-reranker")
+    plain_step = coverage.calibrate_if_stale(con, m, FakeEncoder(), n_pseudo=5, hard_top=5, log=_quiet)
+    assert plain_step["reranker"] is None
     con.close()
 
 

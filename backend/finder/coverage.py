@@ -647,10 +647,18 @@ def _oof_fit(con, log=print) -> dict:
     return {r["label_id"]: p for r, p in zip(rows, cvr["oof"])}
 
 
-def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 200, log=print) -> dict:
+def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 200, log=print,
+              incumbent: Optional[dict] = None, keep_margin: float = 0.0, use_reranker: bool = True) -> dict:
     """Chooses COVER_STRONG / COVER_PARTIAL on a grid to maximize positives-vs-hard-negative AUC of the gated coverage,
     sets COVERAGE_REJECT / REVIEW at the positives' 5th / 15th percentile, compares blend weights, prints the paired
-    vault-vs-career-site gap, and stores a `models` row of kind 'coverage'."""
+    vault-vs-career-site gap, and stores a `models` row of kind 'coverage'.
+
+    Stability rule (the overnight `calib` step): with an `incumbent` calibration and `keep_margin` > 0, the
+    incumbent's strong / partial are scored on TODAY's rows and kept unless the grid's best beats them by at least
+    `keep_margin` AUC. The grid maximum can never lose to the incumbent on the same rows, so the margin is what keeps
+    the ruler from moving on noise. reject / review and the fingerprints are always recomputed and a new row is
+    stored either way (notes `kept_incumbent`). `use_reranker=False` ignores JOBSEARCH_RERANKER, so the stored row
+    matches what `cover()` runs (it never reranks)."""
     import time
     import numpy as np
     from . import evidence as E
@@ -666,7 +674,7 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     refresh_hard_negatives(con, hard_top=hard_top, log=log)
     default = {"strong": DEFAULT_STRONG, "partial": DEFAULT_PARTIAL}
     reranker = None
-    if os.getenv("JOBSEARCH_RERANKER"):
+    if use_reranker and os.getenv("JOBSEARCH_RERANKER"):
         from .embed import Reranker
         reranker = Reranker(os.environ["JOBSEARCH_RERANKER"])
     log(f"Experiment: encoder {getattr(encoder, 'name', model)} · requirement context "
@@ -768,6 +776,20 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
     if partial_grid and (abs(partial - float(partial_grid[0])) < 1e-9 or abs(partial - float(partial_grid[-1])) < 1e-9):
         log(f"  WARNING: grid search picked COVER_PARTIAL={partial} at the edge of its search grid "
             f"({partial_grid[0]:.2f}-{partial_grid[-1]:.2f}); widen the grid before trusting this threshold")
+    kept_incumbent, incumbent_auc = False, None
+    if incumbent and keep_margin > 0 and incumbent.get("strong") is not None and incumbent.get("partial") is not None:
+        inc_strong, inc_partial = float(incumbent["strong"]), float(incumbent["partial"])
+        incumbent_auc = _auc_np([s["primary"] for s in _grid_scores(pos_docs, inc_strong, inc_partial, avail)],
+                                [s["primary"] for s in _grid_scores(hard_docs, inc_strong, inc_partial, avail)]) or 0.0
+        if best_auc - incumbent_auc < keep_margin:
+            kept_incumbent = True
+            log(f"  kept the incumbent thresholds {incumbent.get('version')} (strong {inc_strong}, partial "
+                f"{inc_partial}): on today's rows they score AUC {incumbent_auc:.3f}, the grid's best ({strong}, "
+                f"{partial}) {best_auc:.3f}; gain under the {keep_margin} margin")
+            strong, partial, best_auc = inc_strong, inc_partial, incumbent_auc
+        else:
+            log(f"  new thresholds ({strong}, {partial}) AUC {best_auc:.3f} beat the incumbent {incumbent.get('version')} "
+                f"({inc_strong}, {inc_partial}) {incumbent_auc:.3f} by at least {keep_margin}")
     pos_s = _grid_scores(pos_docs, strong, partial, avail)
     hard_s = _grid_scores(hard_docs, strong, partial, avail)
     pseudo_s = _grid_scores(pseudo_docs, strong, partial, avail)
@@ -839,7 +861,9 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
              "paired_gap_vault_minus_site": gap, "paired_n": len(paired), "evidence_version": ev_version,
              "splitter": R.splitter_fingerprint(), "n_pos": len(pos_docs), "n_hard": len(hard_docs),
              "aucs_stretch": aucs_stretch, "aucs_judged_wrong": aucs_judged, "n_judged_wrong": len(judged), "n_stretch": len(stretch_docs), "encoder": getattr(encoder, "name", model),
-             "req_context": req_context() or None, "reranker": reranker.name if reranker else None}
+             "req_context": req_context() or None, "reranker": reranker.name if reranker else None,
+             "kept_incumbent": kept_incumbent, "incumbent_version": (incumbent or {}).get("version"),
+             "incumbent_auc": incumbent_auc}
     version = hashlib.sha1(json.dumps(notes, sort_keys=True, default=str).encode()).hexdigest()[:12]
     con.execute("INSERT OR REPLACE INTO models (model_version, kind, trained_at, n_pos, n_neg, cv_auc, notes) "
                 "VALUES (?, 'coverage', ?, ?, ?, ?, ?)", [version, _now(), len(pos_docs), len(hard_docs), best_auc,
@@ -865,3 +889,44 @@ def calibrate(con, manifest, encoder, *, n_pseudo: int = 300, hard_top: int = 20
         log(f"    {fmt(hard_s[i]['primary']):>6}  fit {fmt(hard_fit[i])}  {source:<18} {(employer or '')[:24]:<24} "
             f"{(title or '')[:60]:<60} {pid}")
     return {"version": version, **notes}
+
+
+def calibration_staleness(con, manifest, encoder) -> tuple:
+    """(stale, reason, incumbent) for the overnight `calib` step. The incumbent is the newest calibration whose
+    encoder / reranker (none: `cover()` never reranks) / requirement context match the running config -- the row
+    `cover()` would use. It is stale when there is none, or when the splitter fingerprint or the evidence version
+    (the resume bullets) has moved since it was tuned. Syncs the evidence store first, as `calibrate()` does, so a
+    bullet edit is seen."""
+    from . import evidence as E
+    model = manifest.embed_model
+    if E.stored_version(con, model) is not None:
+        E.ensure_current(con, manifest, encoder, log=lambda *_: None)
+    enc_name = getattr(encoder, "name", model)
+    incumbent = current_calibration(con, encoder=enc_name, reranker=None, req_context=req_context() or None,
+                                    log=lambda *_: None)
+    if incumbent is None or incumbent.get("version") == "default":
+        return True, f"no calibration for this setup (encoder {enc_name}, requirement context " \
+                     f"{req_context() or 'none'})", None
+    changed = []
+    splitter = R.splitter_fingerprint()
+    if incumbent.get("splitter") != splitter:
+        changed.append(f"splitter {incumbent.get('splitter')} -> {splitter}")
+    ev_version = E.stored_version(con, model)
+    if incumbent.get("evidence_version") != ev_version:
+        changed.append(f"evidence {incumbent.get('evidence_version')} -> {ev_version}")
+    if changed:
+        return True, f"calibration {incumbent['version']} is stale: " + "; ".join(changed), incumbent
+    return False, f"calibration {incumbent['version']} is current (encoder, splitter and evidence unchanged)", incumbent
+
+
+def calibrate_if_stale(con, manifest, encoder, *, keep_margin: float = 0.005, n_pseudo: int = 300,
+                       hard_top: int = 200, log=print) -> Optional[dict]:
+    """The overnight `calib` step (launch.sh, FULL + RETRAIN): one log line and None when the calibration is current;
+    otherwise `calibrate()` with the stability rule against the incumbent and the reranker experiment off."""
+    stale, reason, incumbent = calibration_staleness(con, manifest, encoder)
+    if not stale:
+        log(f"Calibration: skipped, {reason}")
+        return None
+    log(f"Calibration: running, {reason}")
+    return calibrate(con, manifest, encoder, n_pseudo=n_pseudo, hard_top=hard_top, log=log,
+                     incumbent=incumbent, keep_margin=keep_margin, use_reranker=False)

@@ -26,6 +26,7 @@ Usage:
     .venv/bin/python finder.py evidence --rebuild             # embed new evidence units
     .venv/bin/python finder.py coverage [--all] [--limit N]   # requirement coverage for survivors
     .venv/bin/python finder.py coverage --calibrate           # thresholds vs hard negatives (§16.1)
+    .venv/bin/python finder.py coverage --calibrate --if-stale  # only when encoder/splitter/evidence moved (FULL + RETRAIN)
     .venv/bin/python finder.py feedback --load CSV --agreement --export OUT  # golden-source load/check/re-export
     .venv/bin/python finder.py feedback sheet --n 20 [--seed S] [--out PATH]  # monthly blind sheet w/ decoys (§26)
     .venv/bin/python finder.py feedback sheet-import PATH                    # import it; basis='blind'
@@ -825,6 +826,10 @@ def cmd_coverage(con, a):
     from backend.finder import coverage, embed
     manifest = _manifest(a)
     encoder = embed.load_encoder(model_name=manifest.embed_model)
+    if a.calibrate and a.if_stale:
+        coverage.calibrate_if_stale(con, manifest, encoder, keep_margin=a.keep_margin, n_pseudo=a.pseudo,
+                                    hard_top=a.hard_top)
+        return
     if a.calibrate:
         coverage.calibrate(con, manifest, encoder, n_pseudo=a.pseudo, hard_top=a.hard_top)
         return
@@ -1180,6 +1185,14 @@ def main():
     s.add_argument("--pseudo", type=int, default=300, help="--calibrate: pseudo-negatives for the sanity AUC (default 300)")
     s.add_argument("--hard-top", type=int, default=200,
                    help="--calibrate: highest-fit unlabeled postings added as hard negatives (default 200)")
+    s.add_argument("--if-stale", action="store_true",
+                   help="--calibrate: skip with one log line when a calibration already matches this setup "
+                        "(encoder, requirement context, splitter, evidence version); otherwise calibrate with "
+                        "JOBSEARCH_RERANKER ignored and keep the incumbent thresholds unless the new ones beat "
+                        "them by --keep-margin. The overnight FULL + RETRAIN `calib` step runs this")
+    s.add_argument("--keep-margin", type=float, default=0.005,
+                   help="--calibrate --if-stale: AUC gain on today's rows the new thresholds need over the "
+                        "incumbent's before they replace them (default 0.005)")
     s.set_defaults(func=cmd_coverage)
 
     s = sub.add_parser("required-embed", parents=[common],

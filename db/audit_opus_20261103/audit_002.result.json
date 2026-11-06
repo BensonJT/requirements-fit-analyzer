@@ -1,0 +1,222 @@
+[
+ {
+  "posting_id": "f8ac1b009e6e5cd7ca57",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Data center construction project management experience and data center facilities knowledge",
+  "required_fit": "fails",
+  "required_unmet": "Extended knowledge of data center facilities, infrastructure ; Experience managing data center construction projects ; Experience managing and leading data construction project resources ; experience managing large construction project budgets",
+  "rationale": "The duties are standardization and process improvement across a global data center construction programme, which overlaps the process lens, but the seat is a construction programme manager whose Required block wants data center build experience, and there is no modelling or AI work."
+ },
+ {
+  "posting_id": "c17382938a8beda95e0b",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "adjacent",
+  "confidence": "high",
+  "blocker": "Client-facing consulting delivery pedigree (project economics, billing and utilization)",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Hands-on OCM: readiness assessment, standing up an enterprise change capability and tying adoption to outcome metrics is a process-lens bullseye; outcome-metric design is the only technical overlap, and the AI line is using and teaching enterprise AI tools inside OCM work rather than delivering AI."
+ },
+ {
+  "posting_id": "e34cc44733bf8f5820ca",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "bullseye",
+  "confidence": "medium",
+  "blocker": "Product-management career building external-facing B2B SaaS features on the Salesforce platform",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Workflow mapping, finding automation opportunities and building process blueprints with AI agents and prompting, then validating them for accuracy and consistency, is applied-AI delivery around an existing model; the process work is real but framed as product ownership (PRDs, feature lifecycle, backlog), and the build is low-code configuration rather than analytics."
+ },
+ {
+  "posting_id": "abbfa92341970a37c59a",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Import/export trade-compliance domain familiarity",
+  "required_fit": "arguable",
+  "required_unmet": "Familiarity with international trade processes, import/export compliance, or customs-related business functions ; Experience with system audits",
+  "rationale": "Requirements gathering, process modeling and recommending process improvements for internally built trade applications overlaps the process lens with the software application as the object; there is no data or modelling work and no AI."
+ },
+ {
+  "posting_id": "d349ed4ae9f3ff1b054b",
+  "grade_process": "wrong",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Federal budget formulation experience at the FG/GS-14/15 level, managing analysts through subordinate managers",
+  "required_fit": "fails",
+  "required_unmet": "Experience with the budget formulation process to participate in the formulation of out year requirements ; specialized experience equivalent to the FV-J, FG/GS-14/15 level",
+  "rationale": "This seat manages an FAA budget-formulation team inside the finance function; forecasting operational expense needs is a genuine technical overlap, but the centre is the federal budget cycle, with no process-change or AI work."
+ },
+ {
+  "posting_id": "99fd975b495ce4106cb4",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Supply chain information systems and domain experience",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Applying Lean Six Sigma to standardize supply chain processes and build standard-work training across cross-functional teams is a process-lens bullseye; analyzing supply chain data for inefficiencies is a supporting technical share, and there is no AI duty."
+ },
+ {
+  "posting_id": "82723b14effd062c7f60",
+  "grade_process": "adjacent",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Large-scale data center / cloud infrastructure, networking and hardware deployment programme experience",
+  "required_fit": "arguable",
+  "required_unmet": "Deep understanding of cloud infrastructure, networking, and hardware deployment",
+  "rationale": "Technical programme management of data center cabling-vendor builds with a named pillar of building the large datasets, models and dashboards that drive vendor throughput decisions, so both the process and technical lenses overlap; nothing in it is AI."
+ },
+ {
+  "posting_id": "bb74879f59f6dcf7c325",
+  "grade_process": "stretch",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Multi-cloud (Azure, AWS) FinOps tooling and cloud cost management experience",
+  "required_fit": "arguable",
+  "required_unmet": "Demonstrated expertise with multi-cloud environments (Azure, AWS, VAEC) and cloud financial management tools",
+  "rationale": "Cloud cost models, forecasting, unit-economics analytics, automated financial feeds and dashboards are the candidate's cost-modelling work aimed at cloud spend (technical adjacent); the seat runs VA's FinOps function, so only its continuous-improvement mandate touches the process lens, and there is no AI work."
+ },
+ {
+  "posting_id": "fe9c5728710c789372fd",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Clinical trial operations expertise (ICH-GCP, RBM, Veeva Vault Clinical/CTMS)",
+  "required_fit": "fails",
+  "required_unmet": "Clinical Operations, Clinical Systems, Clinical Analytics, RBM, or related functions ; Deep understanding of clinical trial execution processes and operational metrics ; Demonstrated experience with Clinical Operations technology platforms ; Strong knowledge of ICH-GCP, regulatory requirements, and inspection readiness",
+  "rationale": "Building a performance-measurement framework, KPIs, scorecards and dashboards is real overlap on both lenses, but the Required block makes clinical-trial execution and ICH-GCP knowledge the substance of those metrics, and AI appears only as a directed roadmap priority inside that specialist function."
+ },
+ {
+  "posting_id": "1f9b85d4109d6ea69b64",
+  "grade_process": "adjacent",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Product-management subject-matter expertise (roadmap, OKR and discovery maturity assessment)",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Designing the measurement framework, maturity model and executive scorecards for enterprise adoption of a new product operating model, and surfacing adoption friction, overlaps both the process lens (operating-model adoption) and the technical lens (measurement baseline and dashboards), with product-management practice as the object; no AI."
+ },
+ {
+  "posting_id": "743ec8a75a41f681e8ca",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "adjacent",
+  "confidence": "medium",
+  "blocker": "Platform product-management career (APIs, BFF, event-driven, IAM architecture)",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "This is product management of a healthcare digital-workspace and API platform whose AI part is shaping conversational and generative assistants and measuring their accuracy, containment and time savings (AI adjacent); workflow pain-point discovery and API service requirements are only partial overlaps on the process and technical lenses."
+ },
+ {
+  "posting_id": "00429bffcf5b85b484ff",
+  "grade_process": "bullseye",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Managing managers and scaling global customer-servicing operations in financial services",
+  "required_fit": "arguable",
+  "required_unmet": "managing other managers or senior professionals",
+  "rationale": "The seat owns how the customer-servicing operating model evolves globally and leads a team of program and process managers who define methods and standards, which is process-lens work; there is no modelling or analytics duty beyond performance transparency, and no AI."
+ },
+ {
+  "posting_id": "72088b010daa5b5cb649",
+  "grade_process": "wrong",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "HR / talent acquisition analytics background",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "A director of people analytics for talent acquisition uses data and business economics to solve unstructured problems, which is senior analytics with HR as the object (technical adjacent); the posting names no process ownership or AI work."
+ },
+ {
+  "posting_id": "ddcd7d43fd78099d0c22",
+  "grade_process": "stretch",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Production software / AI engineering of RAG and knowledge-retrieval systems on AWS (Bedrock, Lambda, OpenSearch)",
+  "required_fit": "arguable",
+  "required_unmet": "Demonstrable experience building LLM knowledge management or retrieval systems, such as RAG ; Strong AWS experience, including relevant services such as Lambda, Bedrock, IAM, S3, and vector search",
+  "rationale": "An engineering seat whose Required block asks for production Python/TypeScript, RAG builds and production agent harnesses; the Claude Code skills, subagents, MCP and eval work overlaps but cannot be credited under the engineering rule, and the change-management line is the only process overlap."
+ },
+ {
+  "posting_id": "e1c9190b0bf011fdff71",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Deep Enterprise Order Management / Order-to-Cash expertise at VP level with global multidisciplinary teams",
+  "required_fit": "fails",
+  "required_unmet": "Demonstrate deep expertise in Enterprise Order Management and Order-to-Cash ; Build and lead global, multidisciplinary teams with a track record of developing leaders",
+  "rationale": "Establishing operating models, governance, decision rights, global standards and adoption for the order-to-cash capability is process-lens work on a different function's process; the business-case and benefits-realization line is the only technical overlap, and there is no AI."
+ },
+ {
+  "posting_id": "71b6b67f859b9c2d55a2",
+  "grade_process": "wrong",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Child welfare / human services program experience",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "SQL data profiling and data-quality assessment of legacy systems for migration readiness matches the candidate's legacy-to-replacement reconciliation work, with migration readiness rather than an operating decision as the object (technical adjacent); no process ownership or AI."
+ },
+ {
+  "posting_id": "164a77211fa7e7228c22",
+  "grade_process": "wrong",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Talent / people analytics domain",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Building the metrics, models and reusable data products behind performance-assessment, growth and organizational-planning experiences is senior analytics with talent data as the object (technical adjacent); no process or AI duties, and the posting lists only degree lines as qualifications."
+ },
+ {
+  "posting_id": "1de80533811669b8a422",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Managing and developing a team of technical program managers and program managers",
+  "required_fit": "arguable",
+  "required_unmet": "Experience managing and developing technical program managers and program managers",
+  "rationale": "Driving cross-functional process improvement, standards and change adoption across Oracle while leading program managers is a process-lens bullseye; defining KPIs to track impact is a minor technical share, and automation is named without AI work."
+ },
+ {
+  "posting_id": "42d1f15f538af9fca3ae",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "bullseye",
+  "confidence": "high",
+  "blocker": "Client-facing management consulting pedigree leading AI engagements",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Identifying where AI creates value, prioritizing use cases, building business cases and running AI readiness assessments is the applied-AI opportunity-evaluation bullseye; operating-model and process redesign delivered as consulting engagements is process adjacent, and business-case analysis is the only technical overlap."
+ },
+ {
+  "posting_id": "c7aa36bb49598e8a2385",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Finance-transformation consulting with SME in ERP / CPM / enterprise BI tools",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Advising clients on business-process improvement and operating-model alignment in a finance-transformation practice is process work on the finance function plus practice development; data visualization appears only as one accepted SME route, and there is no AI."
+ }
+]

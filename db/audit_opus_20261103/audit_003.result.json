@@ -1,0 +1,222 @@
+[
+ {
+  "posting_id": "93595d5b16922dfdfc08",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Required 'strong operations background: Manufacturing, Logistics, Materials, Fulfillment' -- his operations are telecom field service, not manufacturing",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Enterprise Lean operating-method deployment -- corporate Kaizen ownership, a Lean community of practice, standardizing shared processes and acting as change agent for new processes -- is process-lens core work; KPI tracking is a minor technical share and there is no AI work."
+ },
+ {
+  "posting_id": "9a39b34971d0a1208102",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Forward-deployed engineering seat requiring production experience shipping AI agents and data pipelines (Snowflake, Databricks, Data 360)",
+  "required_fit": "fails",
+  "required_unmet": "Production experience required ; own technical components end-to-end ... deployed, validated, and observable in production",
+  "rationale": "A forward-deployed engineer building and deploying Agentforce agents and data pipelines to production; the overlap (prompt and tool-call design, agent KPI dashboards) does not change an engineering seat, so it is wrong on all three lenses."
+ },
+ {
+  "posting_id": "5087ada9d3a5f51c76b9",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "adjacent",
+  "confidence": "medium",
+  "blocker": "A Strategic Finance seat: program economics and incentive-cost modelling for a consumer membership program inside the finance planning cadence",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Strategic Finance business-partnering for Membership -- business cases, program ROI and incentive economics, KPIs/OKRs and annual and long-range planning -- is a finance-profession seat (technical stretch, process overlap only in KPI framework design), with 'AI proficient (Claude or Gemini)' as a general expectation and no AI duty behind it."
+ },
+ {
+  "posting_id": "b05b1333beebaba1a07d",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Government-contract program control: EAC, revenue recognition, BOEs and FAR/DFARS/CAS compliance",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "DoD-contractor program control -- program budgets, EAC updates, revenue recognition, cost proposals and FAR/DFARS/CAS compliance -- is a finance-function seat where his budget forecasting and variance work overlaps but does not centre it; process improvement is one line and there is no AI."
+ },
+ {
+  "posting_id": "a075b2c7c08bdcae146b",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "stretch",
+  "confidence": "medium",
+  "blocker": "Wants a SaaS/DevOps technology-company background and leadership of reliability programs across multiple engineering organizations",
+  "required_fit": "arguable",
+  "required_unmet": "Strong background in SaaS, cloud infrastructure, or DevOps technology companies ; Proven experience leading complex reliability programs across multiple engineering organizations ; shaping R&D direction",
+  "rationale": "Principal TPM in GitLab's R&D PMO delivering engineering, reliability and AI-platform programs: program management is adjacent on process, there is no analytical or modelling duty, and AI-platform capabilities are only one of the program types it coordinates."
+ },
+ {
+  "posting_id": "0e29d4e3b09d606b291f",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Payments-network acceptance strategy and partnership/deal evaluation experience",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Corporate strategy for Capital One's payment network -- evaluating partnership deals, market and competitive analysis and executive strategy narratives -- is strategy/deal-evaluation work that is stretch on the technical lens, with project management and requirements as the only process overlap and no AI."
+ },
+ {
+  "posting_id": "905570ce533aa8962867",
+  "grade_process": "adjacent",
+  "grade_technical": "bullseye",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Hands-on SQL/Python analytics with program management of OCI business-operations reporting -- defining metrics and calculation logic, data-quality validation, reusable datasets and dashboards on operational performance -- is technical-lens core work, with coordinating the reporting program adjacent on process and no AI duty."
+ },
+ {
+  "posting_id": "b66614d42d37221bad23",
+  "grade_process": "wrong",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Required pharma sales analytics / field (sales-force) effectiveness experience",
+  "required_fit": "fails",
+  "required_unmet": "sales analytics and/or field effectiveness experience",
+  "rationale": "Leading a pharma Field Effectiveness team that enables the sales force -- field programs, targeting, field reporting and sales-force sizing -- is sales operations (wrong on process), with field reporting and sizing a minor analytic share of a seat that runs the function, and no AI."
+ },
+ {
+  "posting_id": "bbd2f0cc83d9a9f3675c",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "No product-development record: leading R&D initiatives from concept through launch under phase-gate and design controls",
+  "required_fit": "arguable",
+  "required_unmet": "Demonstrated success leading complex, cross-functional product-development or innovation initiatives from insight and concept through design, transfer, launch ; Working knowledge of phase-gate product development, design controls",
+  "rationale": "Designing and deploying the operating system and Lean/Kaizen/Obeya continuous-improvement practices for an R&D organization is process work aimed at a different function's process (product development), so adjacent; there are no modelling or AI duties."
+ },
+ {
+  "posting_id": "d3370eed67d7bf250afd",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "stretch",
+  "confidence": "high",
+  "blocker": "Federal (law-enforcement) consulting context and C-suite/SES client briefings",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Leading business process improvement, reengineering and transformation engagements -- workshops, process flows, gap analyses and redesign -- is process-lens core work; quantitative data analysis supports it (technical stretch) and automation appears only as one improvement lever (AI stretch)."
+ },
+ {
+  "posting_id": "5a142291897d017438a1",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Data and AI governance, risk-management and compliance practice (GDPR, ISO 27001, SOC2, NIST, EU AI Act)",
+  "required_fit": "fails",
+  "required_unmet": "Data and AI governance, data policy development, and risk management and monitoring ; Experience implementing risk and compliance processes at scale ; Familiarity with data and AI governance tools (catalog, quality, lineage)",
+  "rationale": "Writing enterprise data and AI policies and monitoring compliance against GDPR, ISO 27001, SOC2 and the EU AI Act is enterprise data governance plus risk and compliance -- specialisms outside his record -- so wrong on all three lenses despite the process-design line."
+ },
+ {
+  "posting_id": "30475c6c7eb9386aba10",
+  "grade_process": "stretch",
+  "grade_technical": "bullseye",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Tableau/Power BI light in the record; contact-center environment",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Collecting, transforming and analyzing operational data with SQL/VBA and visualization tools to address management and operational challenges in a contact-center setting is technical-lens core work; supporting DHS process improvements is a secondary process share and 'automation' here means report automation, not AI."
+ },
+ {
+  "posting_id": "9dea8641904e414d9499",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "bullseye",
+  "confidence": "medium",
+  "blocker": "Principal-level 'engineering experience' requirement; his build record is agentic-assisted rather than an engineering career",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "AI enablement and adoption -- prototyping agents, prompts and workflows, running workshops and labs, coaching teams through the adoption lifecycle, and building evaluation and human oversight into the patterns -- is applied-AI core work, and the Required change-management/adoption-programs line makes it a process bullseye too; prototype building is only a technical stretch."
+ },
+ {
+  "posting_id": "79b4079017391d5726ed",
+  "grade_process": "stretch",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Familiarity with hospital cost reports and audited financial statements as extraction sources",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Extracting hospital financial and cost-report data from PDFs at scale, standardizing it to engagement data models and running QC checks is data-preparation work for analysts rather than an operating decision (technical adjacent); refining the standardization process is a minor process share and there is no AI duty."
+ },
+ {
+  "posting_id": "a5544bf7860aef304307",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "PMP and CMS (MMIS) certification and procurement experience",
+  "required_fit": "arguable",
+  "required_unmet": "Certification and CMS procurement requirements ; Performing procurement work (RFIs/RFPs, vendor selection) ; PMP or equivalent certification",
+  "rationale": "Project management of a Medicaid MMIS cloud cutover -- running the cohort project, multi-vendor coordination in MS Project, CMS certification and procurement -- is project delivery (process adjacent) with no analytical or AI work."
+ },
+ {
+  "posting_id": "752404d4a61c12728816",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "Model/analytical-tool risk validation is a risk-management discipline outside his record",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Refining an enterprise analytical-tools validation framework and assessing the quality and risk of analytical methodologies is model-risk validation work -- a risk discipline he has not practised -- so wrong on all three lenses despite the analytics vocabulary."
+ },
+ {
+  "posting_id": "3f268443a6e3504c344c",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Cybersecurity assessment data knowledge: vulnerability/finding data, CVE, CVSS, CISA KEV, EPSS, attack paths",
+  "required_fit": "fails",
+  "required_unmet": "cybersecurity analytics ... including work with technical security data ; Working knowledge of vulnerability, asset, finding, evidence ... CVE, CVSS, CISA KEV, EPSS",
+  "rationale": "Normalizing and reporting penetration-test, scan and vulnerability data for the CDM cyber program is analytics serving a security function, which is wrong on all three lenses even though the SQL/Python dashboard skills overlap."
+ },
+ {
+  "posting_id": "bdef1c4e7820fcabfc61",
+  "grade_process": "wrong",
+  "grade_technical": "adjacent",
+  "grade_ai": "stretch",
+  "confidence": "medium",
+  "blocker": "Marketing measurement specialism (MTA, MMM) and expert GA4/Adobe Analytics/tag-management leadership",
+  "required_fit": "fails",
+  "required_unmet": "Marketing analytics, digital analytics, or commercial data roles, with senior leadership positions ; Expert-level experience with GA4, Adobe Analytics, and tag management platforms ; Proven experience leading advanced analytics programs in a marketing context ; building, scaling, and leading global analytics teams",
+  "rationale": "Leading marketing analytics strategy -- attribution and mix modelling, digital analytics platforms and team building -- is senior analytics whose object is marketing (technical adjacent), with AI use-case delivery confined to the marketing function (stretch) and no process ownership."
+ },
+ {
+  "posting_id": "cd958561742ba452f91c",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "stretch",
+  "confidence": "medium",
+  "blocker": "Partner integration support experience: XML/JSON feed integrations incl. MITS schema, REST/webhooks troubleshooting",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Troubleshooting partner feed and API integrations and writing integration playbooks is integration-support work; the named overlaps are turning issue patterns into process fixes (process), support-trend dashboards (technical) and building AI-assisted diagnostic tools (AI), each a minor share."
+ },
+ {
+  "posting_id": "1bcad1a1a2d3ed74ff14",
+  "grade_process": "stretch",
+  "grade_technical": "bullseye",
+  "grade_ai": "adjacent",
+  "confidence": "medium",
+  "blocker": "No cloud/infrastructure capacity-planning record (CSP quotas and reservations, FinOps)",
+  "required_fit": "arguable",
+  "required_unmet": "Knowledge of how geopolitical, regulatory and data sovereignty factors affect regional capacity and hardware supply chains",
+  "rationale": "Building a rolling capacity forecast and scenario models that match demand from pipeline and roadmaps against CSP supply is supply-to-demand capacity modelling (technical bullseye); introducing AI-enabled forecasting tools is an adoption duty (AI adjacent) and process ownership is limited to the planning routine."
+ }
+]

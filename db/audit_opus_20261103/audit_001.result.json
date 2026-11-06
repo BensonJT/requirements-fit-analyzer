@@ -1,0 +1,222 @@
+[
+ {
+  "posting_id": "860dc4c747dc9ba4fd6b",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Limited Scrum Master tenure (about a year, PSM I) against 'expert knowledge' of SAFe/Agile on enterprise software teams",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Facilitating Scrum ceremonies, removing impediments and raising Scrum maturity for software Hosting teams is team-level delivery facilitation, adjacent on process as project/programme work, with only incidental metrics tracking and no AI duty."
+ },
+ {
+  "posting_id": "c4e2514ccd6f36c5794e",
+  "grade_process": "adjacent",
+  "grade_technical": "adjacent",
+  "grade_ai": "adjacent",
+  "confidence": "medium",
+  "blocker": "No product management or GM-style P&L ownership, and no analytics career inside a high-growth tech product organization",
+  "required_fit": "arguable",
+  "required_unmet": "Experience in Product Strategy, Product Management, or GM-style roles where you owned a P&L",
+  "rationale": "Owning Stripe's in-year performance metrics, a 'morning read' and surge diagnoses of at-risk goals is business-performance analytics on a commercial/product object (technical adjacent) plus chief-of-staff-style cross-functional intervention (process adjacent), with AI only as a general expectation."
+ },
+ {
+  "posting_id": "242ffe7567a786279f0e",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "No Quote-to-Cash / CPQ / billing domain background (setting, not the work)",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Assessing current state, defining the target operating model and roadmap, redesigning workflows, setting ownership and handoffs and running change-management programs across the Quote-to-Cash lifecycle is process transformation (bullseye); technical credit is only the transformation metrics (cycle time, rework), and automation is mentioned without any AI work. No stated qualifications."
+ },
+ {
+  "posting_id": "a6b29637534358e7879a",
+  "grade_process": "wrong",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "No event planning or event marketing career; no Cvent event-management platform experience",
+  "required_fit": "fails",
+  "required_unmet": "Event planning, marketing, or a related field ; Strong knowledge & experience with using Event Marketing & Management solutions (Cvent) ; Knowledge of the total marketing/sales mix, including campaign execution ... event marketing",
+  "rationale": "Managing the North America Event Design team producing 500+ events a year is running one function's operations (process wrong); the contract, budget and Excel financial analysis requirement is a minor named overlap (technical stretch), and there is no AI work."
+ },
+ {
+  "posting_id": "5733a2fdcbfecbd3a708",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "No product management career shipping voice/conversational AI; no ASR/TTS/telephony stack expertise",
+  "required_fit": "fails",
+  "required_unmet": "Product management experience, with recent hands-on work shipping voice AI or conversational AI products ; Fluency with the voice stack: ASR, TTS, streaming pipelines, latency optimization, endpointing, barge-in ; Experience with telephony integration: SIP, call transfers, IVR systems, or CCaaS platforms ; Experience working directly with enterprise customers on technical deployments",
+  "rationale": "An inbound product manager seat whose Required block demands shipped voice-AI products and deep voice-stack and LLM-orchestration expertise is specialist AI technology product work, so AI is wrong despite the named overlap in agent evaluation and prompt engineering; there is no process-ownership or business-analytics work."
+ },
+ {
+  "posting_id": "cf996cddd7a2e327d7c6",
+  "grade_process": "adjacent",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Required active accreditation (CPA, attorney, Enrolled Agent, PMP or similar) not held",
+  "required_fit": "arguable",
+  "required_unmet": "One of the following active accreditations obtained: Licensed CPA ... Enrolled Agent; Project Management Professional",
+  "rationale": "Planning, coordinating and running go/no-go and retrospectives for software releases is release management coordination (process adjacent, a domain he has standardized before), with branching/build oversight rather than analytics and no AI work."
+ },
+ {
+  "posting_id": "742855a99e9d7d69e7d6",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "bullseye",
+  "confidence": "high",
+  "blocker": "No enterprise sales-process or Salesforce seller-workflow expertise",
+  "required_fit": "arguable",
+  "required_unmet": "Enterprise sales-process expertise: ... account planning, opportunity management, QBRs, seller workflows, Salesforce, and sales enablement",
+  "rationale": "The Required block asks for practical agentic-workflow, grounding, evaluation, guardrail and human-in-the-loop design and for deciding whether a seller process should be agent-led or automated, which is applied-AI opportunity evaluation and delivery (AI bullseye); the process redesign is adjacent inside a product-lead seat and outcome measurement is a named technical overlap."
+ },
+ {
+  "posting_id": "bd9ed5b7762f49c15757",
+  "grade_process": "wrong",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "No balance-sheet, working-capital or cash-flow accounting forecasting experience inside a finance function",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Balance Sheet, Working Capital and Direct/Indirect Cash Flow forecasting with variance explanation for AOP/JSP is a finance-profession FP&A seat, so technical is stretch (named overlap: Excel financial modelling and PeopleSoft data), with no process-ownership or AI work; the Required block states only a degree and 'prior related experience'."
+ },
+ {
+  "posting_id": "fa520d06fe9e77f771dc",
+  "grade_process": "stretch",
+  "grade_technical": "wrong",
+  "grade_ai": "bullseye",
+  "confidence": "medium",
+  "blocker": "No Microsoft 365 / Power Platform platform-ownership experience; IT service-area leadership in a law firm",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Owning the firm's enterprise AI portfolio from platform selection through governance, adoption and evaluating the controlled introduction of agents and connectors is applied-AI adoption work (AI bullseye), while the M365 collaboration platform lifecycle is running an IT service area with a real change-enablement and operating-model mandate (process stretch) and no analytics duty."
+ },
+ {
+  "posting_id": "fb34044c99c448e15094",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "medium",
+  "blocker": "No construction quality assurance, contractor quality or commissioning experience",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Building a global QA operating model, standards, governance forums, KPIs, root-cause and defect-prevention frameworks is quality-system process work he has done (ISO 9000) applied to the specialist object of construction and commissioning quality (process adjacent), with QA dashboards a minor technical duty and no AI work. No stated qualifications."
+ },
+ {
+  "posting_id": "dc39e28762428097e149",
+  "grade_process": "stretch",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "low",
+  "blocker": "Retail store management; posting text gives almost no duties",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "The supplied text is benefits boilerplate plus 'champion change' and 'inspiring your team', too thin to judge the store-management work, so process is stretch at low confidence and there is no analytics or AI content. No real qualifications stated."
+ },
+ {
+  "posting_id": "cf2dd2c44e6f2b497e9d",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "low",
+  "blocker": "Financial services / payments industry experience (tenure, partly)",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "The only substantive text is a business-analyst Required block (evaluate business processes, document requirements, support cross-functional projects), which is adjacent process work, with interpreting data a named technical overlap and no AI duty; duties are otherwise boilerplate."
+ },
+ {
+  "posting_id": "86bd06c2d0b9c57a5ebb",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Leading cross-functional business-operations programs (governance reviews, purchasing workflows, commitment tracking) with a real mandate to evaluate processes, establish ownership and drive adoption is programme/business-operations work (process adjacent); operational reporting is a supporting technical overlap and there is no AI work."
+ },
+ {
+  "posting_id": "b5aebd424c48827d0d3c",
+  "grade_process": "wrong",
+  "grade_technical": "adjacent",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Oracle OTBI / BI Publisher / Oracle Analytics Cloud and HCM data not in the record; Section 508/WCAG accessible analytics",
+  "required_fit": "arguable",
+  "required_unmet": "Experience developing accessible analytics meeting Section 508 / WCAG standards",
+  "rationale": "Building OTBI dashboards, BI Publisher compliance reports and OAC predictive views over federal HCM workforce data is BI development whose stack he has not used and whose object is HR reporting (technical adjacent), with no process-ownership or AI work."
+ },
+ {
+  "posting_id": "0cdfb5091a778710bf98",
+  "grade_process": "wrong",
+  "grade_technical": "wrong",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Data-scientist seat building NLP/ML and RAG models (PyTorch/TensorFlow, Hugging Face, LangChain)",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "Developing NLP and machine-learning models through training and validation and RAG applications on PyTorch/Hugging Face/LangChain for HR is model-building data science, wrong on technical and AI, with no process ownership; visible Required lines are mostly degrees plus AWS (light)."
+ },
+ {
+  "posting_id": "f099114fb674b910d8c4",
+  "grade_process": "stretch",
+  "grade_technical": "stretch",
+  "grade_ai": "adjacent",
+  "confidence": "medium",
+  "blocker": "Creative-agency offering development (selling AI offerings to marketing clients) rather than internal workflow transformation",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Rapidly prototyping AI-native solutions, choosing the right tools and turning prototypes into repeatable client offerings is applied-AI design whose object is commercial creative offerings (AI adjacent), with named overlap in questioning established processes and playbooks (process stretch) and building prototypes (technical stretch)."
+ },
+ {
+  "posting_id": "87933d4d2f593af71687",
+  "grade_process": "stretch",
+  "grade_technical": "adjacent",
+  "grade_ai": "stretch",
+  "confidence": "medium",
+  "blocker": "No supply chain domain expertise and no customer-success expansion/renewal track record",
+  "required_fit": "arguable",
+  "required_unmet": "Skilled at identifying expansion opportunities, shaping growth narratives",
+  "rationale": "A customer-success seat driving adoption and value quantification of a supply chain decision platform rests on modelling and planning fluency (technical adjacent: his capacity and demand modelling on a supply-chain object), with customer adoption as a named process overlap and AI/ML only one of three alternative depth areas (AI stretch)."
+ },
+ {
+  "posting_id": "d039b3ff3f6c30302fc9",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "Required certification (PMP, PgMP, CBTP, Change Management Certified...) not held; list truncated",
+  "required_fit": "arguable",
+  "required_unmet": "Certification one of the following areas required (e.g., PMP, PgMP, CBTP, Change Management Certified P...)",
+  "rationale": "Leading business transformation and process redesign programs across divisions with technology-enabled operating models and large-scale change is process transformation (bullseye), with analytics initiatives a named technical overlap and no AI duty."
+ },
+ {
+  "posting_id": "4ac72130dc4c72f3047e",
+  "grade_process": "adjacent",
+  "grade_technical": "stretch",
+  "grade_ai": "bullseye",
+  "confidence": "medium",
+  "blocker": "No formal product management career at director level",
+  "required_fit": "arguable",
+  "required_unmet": "",
+  "rationale": "An enablement product lead driving enterprise adoption of AI workflows, LLM evaluation pipelines and guardrails, agent deployment into high-friction processes and behavioural adoption is applied-AI enablement (AI bullseye) whose Required block asks only for product management, with workflow transformation adjacent on process and semantic-layer/data integration a named technical overlap."
+ },
+ {
+  "posting_id": "864fd10fbbf2a8d9d44a",
+  "grade_process": "bullseye",
+  "grade_technical": "stretch",
+  "grade_ai": "wrong",
+  "confidence": "high",
+  "blocker": "No Prosci/OCM certification; Intelligence Community client setting",
+  "required_fit": "meets",
+  "required_unmet": "",
+  "rationale": "Organizational change management for IC agency system transformations (stakeholder impact assessments, readiness measurement, training strategy and adoption plans to reduce resistance) is process-lens change management (bullseye), with advanced Excel and ad hoc financial reports a minor technical overlap and no AI work."
+ }
+]

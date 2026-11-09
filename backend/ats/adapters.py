@@ -2522,6 +2522,157 @@ def amazon_alive(row, posting):
     return True
 
 
+# ================================================================ Radancy (TalentBrew career sites)
+# 2026-11-09, first site careers.unitedhealthgroup.com (Optum / UnitedHealth Group; the ATS behind it is
+# Taleo, which has no public JSON). `GET /search-jobs/results` answers JSON whose `results` field is the
+# rendered list HTML, with data-total-results / data-total-pages on its <section>. Pages of 100 are
+# served and the order is stable (three full pulls gave distinct ids == total), so this is a WHOLE-BOARD
+# pull scoped to one country facet (FacetType 2): it closes by absence like any other board. The list is
+# thin (title, requisition number, one location, a "Remote" work-setting label), so a detail fetch reads
+# the posting page's JSON-LD JobPosting. A taken-down posting's page answers 404.
+# Registry: identifier_1 = host, identifier_2 = country facet id (default 6252001, United States),
+# identifier_3 = that facet's display name (default "United States").
+RADANCY_PAGE = 100
+RADANCY_PAGE_DELAY = 1.0
+RADANCY_SHORT_TOLERANCE = 0.005     # a pull this far short of the board's own count is Truncated
+RADANCY_EMPTY_RETRIES = 2           # an empty page before the last one is asked again this many times
+_RADANCY_LDJSON = re.compile(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', re.S)
+_RADANCY_TOTAL = re.compile(r'data-total-results="(\d+)"')
+_RADANCY_PAGES = re.compile(r'data-total-pages="(\d+)"')
+_RADANCY_COUNTRY = {"united states": "US", "united states of america": "US", "usa": "US", "india": "IN",
+                    "philippines": "PH", "ireland": "IE", "united kingdom": "GB", "canada": "CA",
+                    "puerto rico": "PR"}
+
+
+def _radancy_base(row):
+    host = (row.get("identifier_1") or "").strip().rstrip("/")
+    if not host:
+        raise ValueError(f"{row.get('employer')}: radancy row needs a host in identifier_1")
+    return host if host.startswith("http") else f"https://{host}"
+
+
+def _radancy_params(row, page):
+    fid = (row.get("identifier_2") or "6252001").strip()
+    display = (row.get("identifier_3") or "United States").strip()
+    return {"ActiveFacetID": 0, "CurrentPage": page, "RecordsPerPage": RADANCY_PAGE,
+            "SearchResultsModuleName": "Search Results", "SearchType": 5,
+            "FacetFilters[0].ID": fid, "FacetFilters[0].FacetType": 2, "FacetFilters[0].Count": 0,
+            "FacetFilters[0].Display": display, "FacetFilters[0].IsApplied": "true",
+            "FacetFilters[0].FieldName": ""}
+
+
+def _radancy_page(base, html, country):
+    """(postings, total, pages) from one `results` HTML fragment."""
+    total, pages = _RADANCY_TOTAL.search(html or ""), _RADANCY_PAGES.search(html or "")
+    if not total or not pages:
+        raise RuntimeError("radancy: results carry no data-total-results / data-total-pages")
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for a in soup.select("#search-results-list li a[data-job-id]"):
+        def span(cls):
+            el = a.select_one(f"span.{cls}")
+            return el.get_text(" ", strip=True) if el else None
+        title = a.find("h2")
+        loc = span("job-location")
+        setting = (span("job-worksetting") or "").strip().lower()
+        entity = span("job-entity")     # the hiring subsidiary (e.g. a home-health brand), when shown
+        out.append(N.base(
+            req_id=span("job-id") or a["data-job-id"],
+            title=title.get_text(" ", strip=True) if title else None,
+            url=base + a["href"] if a["href"].startswith("/") else a["href"],
+            location_primary=loc,
+            locations=N.locations_json([loc]),
+            country=country,
+            # The site's own label: "Remote" or nothing. No label is NOT evidence of on-site.
+            workplace_type="remote" if setting == "remote" else None,
+            job_family=entity,
+            raw_json=N.raw({"job_id": a["data-job-id"], "href": a["href"], "location": loc,
+                            "worksetting": setting or None, "entity": entity}),
+        ))
+    return out, int(total.group(1)), int(pages.group(1))
+
+
+def radancy_jobs(row, max_pages=None):
+    base = _radancy_base(row)
+    display = (row.get("identifier_3") or "United States").strip()
+    country = _RADANCY_COUNTRY.get(display.lower())
+    seen, out, page, total = set(), [], 1, 0
+    with client() as c:
+        while True:
+            for attempt in range(RADANCY_EMPTY_RETRIES + 1):
+                data = _request(c, "GET", f"{base}/search-jobs/results", params=_radancy_params(row, page),
+                                headers={"X-Requested-With": "XMLHttpRequest"}).json()
+                postings, total, pages = _radancy_page(base, data.get("results"), country)
+                if postings or page >= pages:
+                    break
+                time.sleep(RADANCY_PAGE_DELAY * 3 * (attempt + 1))   # 2026-11-09: one live page came back empty
+            for p in postings:
+                if p["req_id"] not in seen:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            if not postings and page < pages:
+                print(f"{row['employer']} (radancy): page {page} of {pages} empty after "
+                      f"{RADANCY_EMPTY_RETRIES} retries; marking truncated (no close-pass)")
+                return Truncated(out)
+            if page >= pages:
+                break
+            if max_pages and page >= max_pages:
+                return Truncated(out)
+            page += 1
+            time.sleep(RADANCY_PAGE_DELAY)
+    if total and len(out) < total * (1 - RADANCY_SHORT_TOLERANCE):
+        print(f"{row['employer']} (radancy): pulled {len(out)} of {total}; marking truncated (no close-pass)")
+        return Truncated(out)
+    return out
+
+
+def _radancy_detail_fields(html, posting):
+    job = None
+    for blob in _RADANCY_LDJSON.findall(html or ""):
+        try:
+            d = json.loads(blob)
+        except ValueError:
+            continue
+        for item in d if isinstance(d, list) else [d]:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                job = item
+    if job is None:
+        # Not a Gone: a closed posting answers 404. A page with no JobPosting is a markup change.
+        raise RuntimeError("radancy: no JobPosting JSON-LD on the posting page")
+    places, remote = [], False
+    for loc in job.get("jobLocation") or []:
+        addr = (loc or {}).get("address") or {}
+        ctry = (addr.get("addressCountry") or "").strip()
+        if ctry.lower() == "remote":
+            remote = True        # the site's own "Remote" location entry
+            continue
+        name = ", ".join(x for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
+        if name or ctry:
+            places.append(name or ctry)
+    text = N.html_to_text(job.get("description"))
+    pay = N.pay_from_text(text)
+    out = {
+        "description_text": text,
+        "posted_at": N.parse_date(job.get("datePosted")),
+        "employment_type": N.employment_type(job.get("employmentType")),
+        "pay_min": pay[0] if pay else None, "pay_max": pay[1] if pay else None,
+        "pay_interval": pay[2] if pay else None, "pay_currency": "USD" if pay else None,
+        "pay_source": "text" if pay else None,
+    }
+    if places:
+        out["locations"] = N.locations_json([posting.get("location_primary")] + places)
+    if remote:
+        out["workplace_type"] = "remote"
+    return out
+
+
+def radancy_detail(row, posting):
+    with client() as c:
+        html = _request(c, "GET", posting["url"]).text
+    return _radancy_detail_fields(html, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2542,6 +2693,7 @@ _LIST = {
     "jibe": jibe_jobs,
     "brassring": brassring_jobs,
     "amazon": amazon_jobs,
+    "radancy": radancy_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -2557,6 +2709,7 @@ _DETAIL = {
     "successfactors_rmk": successfactors_rmk_detail,
     "avature": avature_detail,
     "brassring": brassring_detail,
+    "radancy": radancy_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

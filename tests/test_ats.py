@@ -2108,3 +2108,132 @@ def test_recheck_unseen_closes_only_on_the_postings_own_gone_signal(tmp_path, mo
     monkeypatch.setattr(S.adapters, "check_alive", lambda row, p: asked.append(p["req_id"]) or True)
     S.recheck_unseen(con, [_AMAZON_ROW], log=lambda *a: None)
     assert asked == ["ERR"]
+
+
+# ---------------------------------------------------------------- Radancy (TalentBrew career sites)
+_RADANCY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "radancy")
+_RADANCY_ROW = {"employer": "Optum/UnitedHealth Group", "platform": "radancy",
+                "identifier_1": "careers.unitedhealthgroup.com", "identifier_2": "6252001",
+                "identifier_3": "United States"}
+
+
+def _radancy_results():
+    with open(os.path.join(_RADANCY_DIR, "results.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_radancy_registered_as_whole_board_with_detail():
+    assert "radancy" in A.IMPLEMENTED_PLATFORMS and "radancy" in A.DETAIL_PLATFORMS
+    assert "radancy" not in A.RECHECK_PLATFORMS and "radancy" not in store.CLOSE_BY_DATE_PLATFORMS
+
+
+def test_radancy_page_maps_req_title_url_location_and_the_remote_label_only():
+    out, total, pages = A._radancy_page("https://careers.unitedhealthgroup.com",
+                                        _radancy_results()["results"], "US")
+    assert (total, pages, len(out)) == (3, 1, 3)
+    remote, aide, chaplain = out
+    assert remote["req_id"] == "2394632" and remote["title"] == "Data Analyst - Remote"
+    assert remote["url"].startswith("https://careers.unitedhealthgroup.com/job/")
+    assert remote["location_primary"] == "Eden Prairie, Minnesota" and remote["country"] == "US"
+    assert remote["workplace_type"] == "remote"            # the site's own "Remote" label
+    assert aide["workplace_type"] is None                  # no label is not evidence of on-site
+    assert chaplain["job_family"] == "Amedisys" and chaplain["req_id"] == "2401516"
+
+
+def test_radancy_page_without_totals_raises():
+    import pytest
+    with pytest.raises(RuntimeError):
+        A._radancy_page("https://x", "<section id='search-results'></section>", "US")
+
+
+def _radancy_client(pages, calls):
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            p = kw["params"]
+            calls.append((p["CurrentPage"], p["FacetFilters[0].ID"], p["FacetFilters[0].Display"]))
+            return _Resp({"results": pages[p["CurrentPage"] - 1]})
+    return lambda: _Client()
+
+
+def _radancy_split(total, per_page):
+    """The fixture's three <li> served as pages of `per_page`, claiming `total` results."""
+    import re as _re
+    html = _radancy_results()["results"]
+    head, rest = html.split("<ul>", 1)
+    items = _re.findall(r"<li>.*?</li>", rest, _re.S)
+    npages = -(-len(items) // per_page)
+    head = _re.sub(r'data-total-results="\d+"', f'data-total-results="{total}"', head)
+    head = _re.sub(r'data-total-pages="\d+"', f'data-total-pages="{npages}"', head)
+    return [head + "<ul>" + "".join(items[i:i + per_page]) + "</ul></section></section>"
+            for i in range(0, len(items), per_page)]
+
+
+def test_radancy_jobs_pages_the_country_facet_and_is_a_complete_board(monkeypatch):
+    monkeypatch.setattr(A, "RADANCY_PAGE_DELAY", 0)
+    calls = []
+    monkeypatch.setattr(A, "client", _radancy_client(_radancy_split(3, 2), calls))
+    out = A.radancy_jobs(_RADANCY_ROW)
+    assert not getattr(out, "truncated", False)            # whole board: the close-pass may run
+    assert [p["req_id"] for p in out] == ["2394632", "2401361", "2401516"]
+    assert calls == [(1, "6252001", "United States"), (2, "6252001", "United States")]
+
+
+def test_radancy_jobs_short_of_the_boards_own_count_is_truncated(monkeypatch):
+    monkeypatch.setattr(A, "RADANCY_PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "client", _radancy_client(_radancy_split(10, 3), []))
+    assert getattr(A.radancy_jobs(_RADANCY_ROW), "truncated", False) is True
+
+
+def test_radancy_jobs_max_pages_is_truncated(monkeypatch):
+    monkeypatch.setattr(A, "RADANCY_PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "client", _radancy_client(_radancy_split(3, 1), []))
+    out = A.radancy_jobs(_RADANCY_ROW, max_pages=1)
+    assert getattr(out, "truncated", False) is True and len(out) == 1
+
+
+def test_radancy_detail_reads_the_json_ld_and_its_remote_location():
+    with open(os.path.join(_RADANCY_DIR, "detail.html"), encoding="utf-8") as f:
+        html = f.read()
+    d = A._radancy_detail_fields(html, {"location_primary": "Eden Prairie, Minnesota"})
+    assert d["workplace_type"] == "remote"                 # jobLocation addressCountry "Remote"
+    assert d["posted_at"] == date(2026, 10, 5)
+    assert (d["pay_min"], d["pay_max"], d["pay_interval"]) == (91700, 163700, "year")
+    assert "Primary Responsibilities" in d["description_text"]
+    assert json.loads(d["locations"]) == ["Eden Prairie, Minnesota"]
+
+
+def test_radancy_detail_without_json_ld_is_an_error_not_gone():
+    import pytest
+    with pytest.raises(RuntimeError):
+        A._radancy_detail_fields("<html><body>new markup</body></html>", {})
+
+
+def test_radancy_jobs_retries_an_empty_middle_page_then_truncates(monkeypatch):
+    """2026-11-09: one live page came back empty mid-pull; it must never read as the board's end."""
+    monkeypatch.setattr(A, "RADANCY_PAGE_DELAY", 0)
+    pages = _radancy_split(3, 1)
+    empty = pages[1].split("<ul>")[0] + "<ul></ul></section></section>"
+    served = {"n": 0}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            page = kw["params"]["CurrentPage"]
+            if page == 2:
+                served["n"] += 1
+                return _Resp({"results": pages[1] if served["n"] == 2 else empty})   # empty once, then real
+            return _Resp({"results": pages[page - 1]})
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    out = A.radancy_jobs(_RADANCY_ROW)
+    assert not getattr(out, "truncated", False) and len(out) == 3
+    monkeypatch.setattr(A, "client", lambda: type("C", (_Client,), {
+        "request": lambda self, m, u, **kw: _Resp({"results": empty if kw["params"]["CurrentPage"] == 2
+                                                   else pages[kw["params"]["CurrentPage"] - 1]})})())
+    out = A.radancy_jobs(_RADANCY_ROW)
+    assert getattr(out, "truncated", False) is True and len(out) == 1

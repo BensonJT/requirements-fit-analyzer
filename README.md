@@ -194,6 +194,7 @@ The daily pipeline runs a gated Jev stage just before the second judge only when
 | Paylocity | title, location, remote flag, department, date (from the JSON block embedded in the all-jobs page) | yes | company GUID, slug |
 | USAJobs | everything, including full duties/qualifications, clearance, grade, pay | not needed | none — one registry row; needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` in `.env` |
 | Amazon (amazon.jobs) | everything, including the JD and per-location pay lines; keyword search, US by default | liveness only (HEAD on the posting page) | host (`www.amazon.jobs`), country code (`USA`) |
+| Radancy / TalentBrew career sites (Taleo behind them) | title, requisition number, location, a "Remote" label; one country facet per row | yes (JSON-LD JobPosting: full JD, date, pay text) | host, country facet id (`6252001` = United States), facet display name |
 | BrassRing (Infinite TalentGateway) | title, location (the client's own field), last-updated date; needs a home-page session | yes (labelled sections, same session) | partnerid, siteid, optional location field override |
 
 USAJobs is the one adapter that is not a whole-board pull: it's a keyword search over `backend/profile.py`'s title phrases, so a posting missing from a run's results is never taken as evidence it's gone — only its own `ApplicationCloseDate` closes it. Missing credentials skip the adapter (one log line), they never fail the sweep. One registry row enables it regardless of `identifier_*` values (leave them blank).
@@ -203,7 +204,7 @@ Amazon works the same way: its US board is past the search API's 10,000-result w
 **Not supported:**
 - **iCIMS** answers scripted requests with a human-verification page.
 - **Dayforce** returns 403 even with cookies and CSRF tokens.
-- **Taleo** has no public JSON. Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
+- **Taleo** has no public JSON (an employer whose Taleo sits behind a Radancy/TalentBrew front end, such as `careers.<employer>.com/search-jobs`, is supported through the `radancy` platform). Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
 - **Phenom, SuccessFactors, ADP, and UKG** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
 
 ## Setup

@@ -2673,6 +2673,166 @@ def radancy_detail(row, posting):
     return _radancy_detail_fields(html, posting)
 
 
+# ================================================================ iCIMS (careers-<tenant>.icims.com)
+# 2026-11-09 spike (Peraton, Cadmus, Aptive): the portal's own `jobs/search?ss=1&in_iframe=1&pr=N` pages
+# answer plain HTML to a normal browser User-Agent, 50 cards a page ("Page N of M"), and 80 sequential job
+# pages at 0.6 s drew no human-verification page and no throttling. The README used to say iCIMS serves a
+# verification page to scripts; that held for curl's default agent, not for this. If a verification page
+# ever appears, `_icims_check` raises and the board fails (no bypass is attempted).
+# The card carries the numeric job id, title, link, "CC-ST-City" location(s) and an exact posted time, but
+# only a snippet of the JD, so each posting gets a detail fetch: its JSON-LD JobPosting holds the full JD,
+# every location, `jobLocationType: TELECOMMUTE` (the ATS's own remote flag), date and category. A taken-down
+# job answers 410. A tenant's free-form "Telecommute Options" field is NOT read: its wording varies.
+# Registry: identifier_1 = tenant host ("careers-peraton" or "careers-peraton.icims.com").
+ICIMS_PAGE_DELAY = 1.0
+ICIMS_MAX_PAGES = 400                # a runaway guard, far past any tenant's size
+_ICIMS_PAGE_OF = re.compile(r"Page\s+(\d+)\s+of\s+(\d+)", re.I)
+_ICIMS_JOB_ID = re.compile(r"/jobs/(\d+)/")
+_ICIMS_LDJSON = re.compile(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', re.S)
+_ICIMS_VERIFY = re.compile(r"human verification|verify (?:that )?you are (?:a )?human|captcha", re.I)
+_ICIMS_POSTED = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y")
+
+
+def _icims_host(row):
+    host = (row.get("identifier_1") or "").strip()
+    host = re.sub(r"^https?://", "", host).split("/")[0].lower()
+    if not host:
+        raise ValueError(f"{row.get('employer')}: icims row needs a tenant host in identifier_1")
+    return host if host.endswith(".icims.com") else f"{host}.icims.com"
+
+
+def _icims_check(html, url):
+    if _ICIMS_VERIFY.search(html or "") and not _ICIMS_LDJSON.search(html or ""):
+        raise RuntimeError(f"icims: human-verification page at {url}; not worked around")
+
+
+def _icims_place(text):
+    """('McLean, VA', 'US') from iCIMS's "US-VA-McLean"; anything else is kept as written."""
+    t = (text or "").strip()
+    parts = [x.strip() for x in t.split("-", 2)]
+    if len(parts) == 3 and re.fullmatch(r"[A-Z]{2}", parts[0]) and parts[1] and parts[2]:
+        return f"{parts[2]}, {parts[1]}", parts[0]
+    if len(parts) == 2 and re.fullmatch(r"[A-Z]{2}", parts[0]) and parts[1]:
+        return parts[1], parts[0]
+    return (t or None), None
+
+
+def _icims_page(host, html):
+    """(postings, page, pages) from one search-results page."""
+    from bs4 import BeautifulSoup
+    m = _ICIMS_PAGE_OF.search(html or "")
+    soup = BeautifulSoup(html or "", "lxml")
+    cards = soup.select("li.iCIMS_JobCardItem")
+    if not cards and not m:
+        raise RuntimeError("icims: results page has neither job cards nor 'Page N of M'")
+    out = []
+    for card in cards:
+        a = card.select_one("div.title a[href*='/jobs/']") or card.select_one("a[href*='/jobs/']")
+        jid = _ICIMS_JOB_ID.search(a["href"]) if a else None
+        if not jid:
+            continue
+        h3 = a.find("h3")
+        spans = card.select("div.header.left span:not(.sr-only)")
+        places = [p for p in (_icims_place(x) for x in (spans[0].get_text(" ", strip=True).split("|") if spans else [])) if p[0]]
+        stamp = card.select_one("div.header.right span[title]")
+        posted = None
+        if stamp:
+            for fmt in _ICIMS_POSTED:
+                try:
+                    posted = datetime.strptime(stamp["title"].strip(), fmt).date()
+                    break
+                except ValueError:
+                    continue
+        out.append(N.base(
+            req_id=jid.group(1),
+            title=(h3 or a).get_text(" ", strip=True) or None,
+            url=re.sub(r"\?.*$", "", a["href"]),
+            location_primary=places[0][0] if places else None,
+            locations=N.locations_json([p[0] for p in places]),
+            country=places[0][1] if places else None,
+            posted_at=posted,
+            raw_json=N.raw({"job_id": jid.group(1), "title_attr": a.get("title"),
+                            "locations": [p[0] for p in places]}),
+        ))
+    return out, int(m.group(1)) if m else 1, int(m.group(2)) if m else 1
+
+
+def icims_jobs(row, max_pages=None):
+    host = _icims_host(row)
+    base = f"https://{host}"
+    seen, out, pr, dup = set(), [], 0, False
+    with client() as c:
+        while True:
+            url = f"{base}/jobs/search"
+            html = _request(c, "GET", url, params={"ss": 1, "in_iframe": 1, "pr": pr}).text
+            _icims_check(html, url)
+            postings, page, pages = _icims_page(host, html)
+            if not postings and page < pages:
+                print(f"{row['employer']} (icims): page {page} of {pages} empty; marking truncated (no close-pass)")
+                return Truncated(out)
+            for p in postings:
+                if p["req_id"] in seen:
+                    dup = True      # the board shifted under the pull: something may have been missed
+                else:
+                    seen.add(p["req_id"])
+                    out.append(p)
+            if page >= pages:
+                break
+            pr += 1
+            if (max_pages and pr >= max_pages) or pr >= ICIMS_MAX_PAGES:
+                return Truncated(out)
+            time.sleep(ICIMS_PAGE_DELAY)
+    if dup:
+        print(f"{row['employer']} (icims): duplicate cards across pages (board shifted); marking truncated")
+        return Truncated(out)
+    return out
+
+
+def _icims_detail_fields(html, posting):
+    job = None
+    for blob in _ICIMS_LDJSON.findall(html or ""):
+        try:
+            d = json.loads(blob)
+        except ValueError:
+            continue
+        for item in d if isinstance(d, list) else [d]:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                job = item
+    if job is None:
+        raise RuntimeError("icims: no JobPosting JSON-LD on the job page")   # a closed job is a 410, not this
+    text = N.html_to_text(job.get("description"))
+    pay = N.pay_from_text(text)
+    places = []
+    for loc in job.get("jobLocation") or []:
+        a = (loc or {}).get("address") or {}
+        name = ", ".join(x for x in (a.get("addressLocality"), a.get("addressRegion")) if x and x != "UNAVAILABLE")
+        if name:
+            places.append(name)
+    emp = (job.get("employmentType") or "")
+    out = {
+        "description_text": text,
+        "posted_at": N.parse_date(job.get("datePosted")),
+        "job_family": job.get("occupationalCategory") or None,
+        "employment_type": N.employment_type(emp) if emp.upper() != "OTHER" else None,
+        "pay_min": pay[0] if pay else None, "pay_max": pay[1] if pay else None,
+        "pay_interval": pay[2] if pay else None, "pay_currency": "USD" if pay else None,
+        "pay_source": "text" if pay else None,
+    }
+    if places:
+        out["locations"] = N.locations_json(places)
+        out["location_primary"] = places[0]
+    if str(job.get("jobLocationType") or "").upper() == "TELECOMMUTE":
+        out["workplace_type"] = "remote"
+    return out
+
+
+def icims_detail(row, posting):
+    with client() as c:
+        html = _request(c, "GET", posting["url"], params={"in_iframe": 1}).text
+    _icims_check(html, posting["url"])
+    return _icims_detail_fields(html, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2694,6 +2854,7 @@ _LIST = {
     "brassring": brassring_jobs,
     "amazon": amazon_jobs,
     "radancy": radancy_jobs,
+    "icims": icims_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -2710,6 +2871,7 @@ _DETAIL = {
     "avature": avature_detail,
     "brassring": brassring_detail,
     "radancy": radancy_detail,
+    "icims": icims_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

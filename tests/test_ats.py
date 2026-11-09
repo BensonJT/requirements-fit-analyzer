@@ -2237,3 +2237,111 @@ def test_radancy_jobs_retries_an_empty_middle_page_then_truncates(monkeypatch):
                                                    else pages[kw["params"]["CurrentPage"] - 1]})})())
     out = A.radancy_jobs(_RADANCY_ROW)
     assert getattr(out, "truncated", False) is True and len(out) == 1
+
+
+# ---------------------------------------------------------------- iCIMS (careers-<tenant>.icims.com)
+_ICIMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "icims")
+_ICIMS_ROW = {"employer": "Example Co", "platform": "icims", "identifier_1": "careers-cadmusgroup"}
+
+
+def _icims_read(name):
+    with open(os.path.join(_ICIMS_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_icims_registered_whole_board_with_detail():
+    assert "icims" in A.IMPLEMENTED_PLATFORMS and "icims" in A.DETAIL_PLATFORMS
+
+
+def test_icims_host_accepts_tenant_with_or_without_domain():
+    assert A._icims_host({"identifier_1": "careers-peraton"}) == "careers-peraton.icims.com"
+    assert A._icims_host({"identifier_1": "https://careers-peraton.icims.com/jobs"}) == "careers-peraton.icims.com"
+    import pytest
+    with pytest.raises(ValueError):
+        A._icims_host({"employer": "x", "identifier_1": ""})
+
+
+def test_icims_place_parses_country_state_city():
+    assert A._icims_place("US-VA-McLean") == ("McLean, VA", "US")
+    assert A._icims_place("US-Remote") == ("Remote", "US")
+    assert A._icims_place("Somewhere") == ("Somewhere", None)
+
+
+def test_icims_page_maps_cards_with_no_workplace_guess():
+    out, page, pages = A._icims_page("h", _icims_read("search.html"))
+    assert (page, pages, len(out)) == (1, 2, 3)
+    first, multi, _ = out
+    assert first["req_id"] == "3263" and first["title"] == "Senior Data Analyst"
+    assert first["url"].startswith("https://careers-cadmusgroup.icims.com/jobs/3263/") and "?" not in first["url"]
+    assert first["location_primary"] == "McLean, VA" and first["country"] == "US"
+    assert first["posted_at"] == date(2026, 11, 5)
+    assert first["description_text"] is None and first["workplace_type"] is None
+    assert json.loads(multi["locations"])[:2] == ["Boulder, CO", "Boston, MA"] and len(json.loads(multi["locations"])) == 6
+
+
+def _icims_client(pages, calls):
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            pr = kw["params"]["pr"]
+            calls.append(pr)
+            r = _Resp429(200)
+            r.text = pages[pr]
+            return r
+    return lambda: _Client()
+
+
+def _icims_pages(per_page, total_pages=None):
+    """The fixture's three cards re-served `per_page` to a page, header rewritten to 'Page N of M'."""
+    import re as _re
+    html = _icims_read("search.html")
+    head, rest = html.split('<ul class="container-fluid iCIMS_JobsTable">', 1)
+    cards = _re.findall(r'<li class="iCIMS_JobCardItem">.*?</li>', rest, _re.S)
+    chunks = [cards[i:i + per_page] for i in range(0, len(cards), per_page)]
+    m = total_pages or len(chunks)
+    return [_re.sub(r"Page 1 of 2", f"Page {n + 1} of {m}", head) + '<ul class="container-fluid iCIMS_JobsTable">'
+            + "".join(ch) + "</ul></body></html>" for n, ch in enumerate(chunks)]
+
+
+def test_icims_jobs_pages_to_the_last_page_and_is_a_complete_board(monkeypatch):
+    monkeypatch.setattr(A, "ICIMS_PAGE_DELAY", 0)
+    calls = []
+    monkeypatch.setattr(A, "client", _icims_client(_icims_pages(2), calls))
+    out = A.icims_jobs(_ICIMS_ROW)
+    assert not getattr(out, "truncated", False) and len(out) == 3 and calls == [0, 1]
+
+
+def test_icims_jobs_max_pages_and_duplicate_cards_are_truncated(monkeypatch):
+    monkeypatch.setattr(A, "ICIMS_PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "client", _icims_client(_icims_pages(1), []))
+    assert getattr(A.icims_jobs(_ICIMS_ROW, max_pages=1), "truncated", False) is True
+    pages = _icims_pages(2)
+    pages[1] = pages[1].replace("</ul>", "") + pages[0].split('<ul class="container-fluid iCIMS_JobsTable">')[1]
+    monkeypatch.setattr(A, "client", _icims_client(pages, []))
+    assert getattr(A.icims_jobs(_ICIMS_ROW), "truncated", False) is True       # a shifted board
+
+
+def test_icims_jobs_verification_page_fails_the_board_without_a_bypass(monkeypatch):
+    monkeypatch.setattr(A, "ICIMS_PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "client", _icims_client(["<html><body>Human Verification required</body></html>"], []))
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.icims_jobs(_ICIMS_ROW)
+
+
+def test_icims_detail_reads_json_ld_remote_pay_locations_and_ignores_other_employment():
+    d = A._icims_detail_fields(_icims_read("job.html"), {})
+    assert d["workplace_type"] == "remote"                 # jobLocationType TELECOMMUTE
+    assert d["posted_at"] == date(2026, 10, 9)
+    assert (d["pay_min"], d["pay_max"], d["pay_interval"]) == (85000, 110000, "year")
+    assert d["employment_type"] is None                    # the feed said OTHER
+    assert json.loads(d["locations"])[0] == "Arlington, VA" and d["location_primary"] == "Arlington, VA"
+    assert d["job_family"] and d["description_text"].startswith("Overview")
+
+
+def test_icims_detail_without_json_ld_is_an_error_not_gone():
+    import pytest
+    with pytest.raises(RuntimeError):
+        A._icims_detail_fields("<html><body>new markup</body></html>", {})

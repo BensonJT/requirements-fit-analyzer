@@ -195,6 +195,9 @@ The daily pipeline runs a gated Jev stage just before the second judge only when
 | USAJobs | everything, including full duties/qualifications, clearance, grade, pay | not needed | none — one registry row; needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` in `.env` |
 | Amazon (amazon.jobs) | everything, including the JD and per-location pay lines; keyword search, US by default | liveness only (HEAD on the posting page) | host (`www.amazon.jobs`), country code (`USA`) |
 | Radancy / TalentBrew career sites (Taleo behind them) | title, requisition number, location, a "Remote" label; one country facet per row | yes (JSON-LD JobPosting: full JD, date, pay text) | host, country facet id (`6252001` = United States), facet display name |
+| iCIMS (`careers-<tenant>.icims.com`) | title, job id, location(s), exact posted time (from the portal's search pages) | yes (JSON-LD: full JD, locations, remote flag, pay text) | tenant host (`careers-<tenant>`) |
+| Pinpoint (`<slug>.pinpointhq.com`) | everything, including structured pay and workplace type; no posted date | not needed | subdomain slug |
+| UKG Pro Recruiting (UltiPro job boards) | title, locations, posted date, category, remote flag | yes (embedded opportunity record: JD, pay) | tenant code, board GUID, host (`recruiting` or `recruiting2`) |
 | BrassRing (Infinite TalentGateway) | title, location (the client's own field), last-updated date; needs a home-page session | yes (labelled sections, same session) | partnerid, siteid, optional location field override |
 
 USAJobs is the one adapter that is not a whole-board pull: it's a keyword search over `backend/profile.py`'s title phrases, so a posting missing from a run's results is never taken as evidence it's gone — only its own `ApplicationCloseDate` closes it. Missing credentials skip the adapter (one log line), they never fail the sweep. One registry row enables it regardless of `identifier_*` values (leave them blank).
@@ -202,10 +205,10 @@ USAJobs is the one adapter that is not a whole-board pull: it's a keyword search
 Amazon works the same way: its US board is past the search API's 10,000-result window, so the adapter pages each profile phrase through `amazon.jobs/en/search.json` and unions the results. Amazon postings carry no close date, so a recheck stage after the pull asks the posting's own page about any Amazon posting no search has returned for 3 days (up to 300 a run). A 404 closes it, a live page counts as seen, and any other error leaves it alone. Workplace type comes from each location's own `type` (`ONSITE`, `VIRTUAL`); a mix of the two stays unknown.
 
 **Not supported:**
-- **iCIMS** answers scripted requests with a human-verification page.
+- **iCIMS** portals read fine at a polite pace (checked 2026-11-09: 80 job pages in a row, no verification page). If one ever serves a human-verification page, the board fails and nothing works around it.
 - **Dayforce** returns 403 even with cookies and CSRF tokens.
 - **Taleo** has no public JSON (an employer whose Taleo sits behind a Radancy/TalentBrew front end, such as `careers.<employer>.com/search-jobs`, is supported through the `radancy` platform). Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
-- **Phenom, SuccessFactors, ADP, and UKG** have documented endpoints but no adapter yet. Rows on these platforms load but are skipped.
+- **Dayforce, Cloudflare-challenged portals and generic front doors** (a bare AppOne or Dayforce address with no company code) have no adapter. Rows on platforms with no adapter load but are skipped, and the sweep names them in one log line.
 
 ## Setup
 
@@ -441,7 +444,7 @@ The first sweep of a large Workday or Oracle board is the expensive part, becaus
 - **Workday's keyword search isn't used.** It matches words loosely and can't combine phrases, so filtering happens in SQL after a full pull.
 - **Errors can hide as empty boards.** A wrong SmartRecruiters company ID, or an empty Greenhouse board, returns success with zero jobs, which looks like a board with nothing open.
 - **One writer at a time.** DuckDB allows one process to hold the write lock. Don't run two sweeps at once, and close your query session before a scheduled run.
-- **Some platforms block scripts entirely.** iCIMS and Dayforce can't be read this way, and neither can career sites behind a bot firewall. For those, find the underlying ATS, or visit by hand.
+- **Some platforms block scripts entirely.** Dayforce and career sites behind a bot firewall (a Cloudflare challenge) can't be read this way. For those, find the underlying ATS, or visit by hand.
 
 ## Responsible use
 
@@ -456,7 +459,7 @@ The unsupported list above is where help is most useful. An adapter is two funct
 
 Register the list function in `_LIST` and the detail function in `_DETAIL`, add a row to the platform table in this README, and add a test in `tests/test_ats.py` that feeds a saved JSON response through the adapter with no network. `normalize.py` has the helpers for dates, workplace type, pay parsing and HTML to text, so a new adapter is mostly field mapping. The Greenhouse adapter is the shortest example to copy from.
 
-Before writing one, open the platform's public careers page with the browser's network tab open and confirm it serves JSON to an anonymous request. If it returns a bot check or 403, as iCIMS and Dayforce do, there is nothing to adapt.
+Before writing one, open the platform's public careers page with the browser's network tab open and confirm it serves JSON to an anonymous request. If it returns a bot check or 403, as Dayforce can, there is nothing to adapt.
 
 If you resolve an employer's identifiers and want to share them, open an issue with the careers URL and the platform. Registry rows are cheap to add and hard to find.
 

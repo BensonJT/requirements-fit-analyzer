@@ -2890,6 +2890,140 @@ def pinpoint_jobs(row, max_pages=None):
     return [_pinpoint_position(j) for j in data["data"]]
 
 
+# ================================================================ UKG Pro Recruiting (UltiPro job boards)
+# 2026-11-09: `POST https://<host>/<TENANT>/JobBoard/<GUID>/JobBoardView/LoadSearchResults` with a JSON
+# search body answers {"opportunities": [...], "totalCount": N}; Top/Skip page it. The list carries title,
+# requisition number, locations, posted date and a short summary, so each posting gets a detail fetch: the
+# OpportunityDetail page embeds the full record (`new US.Opportunity.CandidateOpportunityDetail({...})`).
+# Whole-board pull, so absence closes. A missing or closed opportunity answers a normal 200 shell page with
+# no embedded record, indistinguishable from a markup change, so detail raises an ordinary error there
+# (never Gone); the next whole-board pull is what closes it.
+# `JobLocationType` is a number. 2 is remote (every 2 seen had a Virtual/Work-From-Home location or a Remote
+# title); 0 and 1 are not confirmed, so they stay unknown instead of being guessed.
+# Registry: identifier_1 = tenant code, identifier_2 = board GUID, identifier_3 = host (default
+# recruiting.ultipro.com; some tenants live on recruiting2.ultipro.com).
+UKG_PAGE = 50
+UKG_PAGE_DELAY = 1.0
+_UKG_DETAIL_MARK = "new US.Opportunity.CandidateOpportunityDetail("
+_UKG_COUNTRY = {"USA": "US", "CAN": "CA", "GBR": "GB", "NLD": "NL", "DEU": "DE", "IND": "IN", "MEX": "MX"}
+
+
+def _ukg_board(row):
+    tenant, guid = (row.get("identifier_1") or "").strip(), (row.get("identifier_2") or "").strip()
+    if not tenant or not guid:
+        raise ValueError(f"{row.get('employer')}: ukg row needs the tenant in identifier_1 and the board GUID in identifier_2")
+    host = (row.get("identifier_3") or "recruiting.ultipro.com").strip()
+    host = re.sub(r"^https?://", "", host).split("/")[0]
+    if "." not in host:
+        host += ".ultipro.com"
+    return host, tenant, guid
+
+
+def _ukg_body(skip):
+    return {"opportunitySearch": {"Top": UKG_PAGE, "Skip": skip, "QueryString": "",
+                                  "OrderBy": [{"Value": "postedDateDesc", "PropertyName": "PostedDate", "Ascending": False}],
+                                  "Filters": []},
+            "matchCriteria": {"PreferredJobs": [], "Criteria": {"PreferredSkills": [], "PreferredLocations": [],
+                                                                "PreferredJobTypes": []}, "Keywords": []}}
+
+
+def _ukg_places(opp):
+    names, country = [], None
+    for loc in opp.get("Locations") or []:
+        a = loc.get("Address") or {}
+        city, state = a.get("City"), ((a.get("State") or {}).get("Code"))
+        name = (", ".join(x for x in (city, state) if x) or loc.get("LocalizedName")
+                or loc.get("LocalizedDescription"))
+        if name:
+            names.append(name)
+        country = country or _UKG_COUNTRY.get(((a.get("Country") or {}).get("Code") or "").upper())
+    return names, country
+
+
+def _ukg_position(host, tenant, guid, o):
+    names, country = _ukg_places(o)
+    full = o.get("FullTime")
+    return N.base(
+        req_id=str(o.get("Id")),
+        title=o.get("Title"),
+        url=f"https://{host}/{tenant}/JobBoard/{guid}/OpportunityDetail?opportunityId={o.get('Id')}",
+        location_primary=names[0] if names else None,
+        locations=N.locations_json(names),
+        country=country,
+        workplace_type="remote" if o.get("JobLocationType") == 2 else None,
+        employment_type=None if full is None else ("full_time" if full else "part_time"),
+        job_family=o.get("JobCategoryName"),
+        posted_at=N.parse_date(o.get("PostedDate")),
+        raw_json=N.raw({k: v for k, v in o.items() if k not in ("BriefDescription", "Locations")}
+                       | {"locations": names}),
+    )
+
+
+def ukg_jobs(row, max_pages=None):
+    host, tenant, guid = _ukg_board(row)
+    url = f"https://{host}/{tenant}/JobBoard/{guid}/JobBoardView/LoadSearchResults"
+    seen, out, skip, pages, total = set(), [], 0, 0, 0
+    with client() as c:
+        while True:
+            data = _request(c, "POST", url, json=_ukg_body(skip), headers={"Accept": "application/json"}).json()
+            if not isinstance(data, dict) or not isinstance(data.get("opportunities"), list):
+                raise RuntimeError("ukg: search result carries no 'opportunities' list")
+            total = int(data.get("totalCount") or 0)
+            opps = data["opportunities"]
+            for o in opps:
+                if o.get("Id") and o["Id"] not in seen:
+                    seen.add(o["Id"])
+                    out.append(_ukg_position(host, tenant, guid, o))
+            pages += 1
+            skip += len(opps)
+            if not opps or skip >= total:
+                break
+            if max_pages and pages >= max_pages:
+                return Truncated(out)
+            time.sleep(UKG_PAGE_DELAY)
+    if len(out) < total:
+        print(f"{row['employer']} (ukg): pulled {len(out)} of {total}; marking truncated (no close-pass)")
+        return Truncated(out)
+    return out
+
+
+def _ukg_detail_fields(html, posting):
+    i = (html or "").find(_UKG_DETAIL_MARK)
+    if i < 0:
+        raise RuntimeError("ukg: no embedded opportunity record on the detail page")
+    try:
+        d, _ = json.JSONDecoder().raw_decode(html[i + len(_UKG_DETAIL_MARK):])
+    except ValueError as e:
+        raise RuntimeError(f"ukg: unreadable opportunity record: {e}") from None
+    text = N.html_to_text(d.get("Description"))
+    pay = None
+    rng = d.get("PayRange") or {}
+    if d.get("PayRangeVisible") and (rng.get("PayRangeMinimum") or rng.get("PayRangeMaximum")):
+        pay = (int(float(rng.get("PayRangeMinimum") or rng["PayRangeMaximum"])),
+               int(float(rng.get("PayRangeMaximum") or rng["PayRangeMinimum"])), "year", "ats")
+    elif d.get("CompensationAnnualMinimum") or d.get("CompensationAnnualMaximum"):
+        lo, hi = d.get("CompensationAnnualMinimum"), d.get("CompensationAnnualMaximum")
+        pay = (int(float(lo or hi)), int(float(hi or lo)), "year", "ats")
+    elif d.get("CompensationHourlyMinimum") or d.get("CompensationHourlyMaximum"):
+        lo, hi = d.get("CompensationHourlyMinimum"), d.get("CompensationHourlyMaximum")
+        pay = (int(float(lo or hi)), int(float(hi or lo)), "hour", "ats")
+    elif (t := N.pay_from_text(text)):
+        pay = (*t, "text")
+    out = {"description_text": text}
+    if pay:
+        out.update(pay_min=pay[0], pay_max=pay[1], pay_interval=pay[2], pay_source=pay[3],
+                   pay_currency=d.get("CompensationCurrencyCode") or d.get("PayRangeCurrencyCode") or "USD")
+    if d.get("JobLocationType") == 2:
+        out["workplace_type"] = "remote"
+    return out
+
+
+def ukg_detail(row, posting):
+    with client() as c:
+        html = _request(c, "GET", posting["url"]).text
+    return _ukg_detail_fields(html, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2913,6 +3047,7 @@ _LIST = {
     "radancy": radancy_jobs,
     "icims": icims_jobs,
     "pinpoint": pinpoint_jobs,
+    "ukg": ukg_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -2930,6 +3065,7 @@ _DETAIL = {
     "brassring": brassring_detail,
     "radancy": radancy_detail,
     "icims": icims_detail,
+    "ukg": ukg_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

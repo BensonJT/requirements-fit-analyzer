@@ -2397,3 +2397,94 @@ def test_pinpoint_jobs_without_a_data_list_raises(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         A.pinpoint_jobs(_PINPOINT_ROW)
+
+
+# ---------------------------------------------------------------- UKG Pro Recruiting (UltiPro job boards)
+_UKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "ukg")
+_UKG_ROW = {"employer": "Example Co", "platform": "ukg", "identifier_1": "ABC1000XYZ",
+            "identifier_2": "00000000-1111-2222-3333-444444444444", "identifier_3": "recruiting2.ultipro.com"}
+
+
+def _ukg_read(name):
+    with open(os.path.join(_UKG_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_ukg_registered_whole_board_with_detail():
+    assert "ukg" in A.IMPLEMENTED_PLATFORMS and "ukg" in A.DETAIL_PLATFORMS
+
+
+def test_ukg_board_host_defaults_and_requires_a_guid():
+    assert A._ukg_board({"identifier_1": "T", "identifier_2": "G"})[0] == "recruiting.ultipro.com"
+    assert A._ukg_board({"identifier_1": "T", "identifier_2": "G", "identifier_3": "recruiting2"})[0] == "recruiting2.ultipro.com"
+    import pytest
+    with pytest.raises(ValueError):
+        A._ukg_board({"employer": "x", "identifier_1": "T", "identifier_2": ""})
+
+
+def _ukg_client(payloads, calls):
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            assert method == "POST" and url.startswith("https://recruiting2.ultipro.com/ABC1000XYZ/JobBoard/")
+            skip = kw["json"]["opportunitySearch"]["Skip"]
+            calls.append(skip)
+            return _Resp(payloads[len(calls) - 1])
+    return lambda: _Client()
+
+
+def test_ukg_jobs_map_fields_and_only_type_two_is_remote(monkeypatch):
+    monkeypatch.setattr(A, "UKG_PAGE_DELAY", 0)
+    calls = []
+    monkeypatch.setattr(A, "client", _ukg_client([json.loads(_ukg_read("search.json"))], calls))
+    out = A.ukg_jobs(_UKG_ROW)
+    assert not getattr(out, "truncated", False) and len(out) == 3 and calls == [0]
+    first = out[0]
+    assert first["workplace_type"] == "remote"                       # JobLocationType 2
+    assert all(p["workplace_type"] is None for p in out[1:])         # None and 0/1 stay unknown
+    assert first["url"].endswith(f"OpportunityDetail?opportunityId={first['req_id']}")
+    assert first["country"] == "US" and first["posted_at"] is not None and first["description_text"] is None
+    assert "," in first["location_primary"]
+
+
+def test_ukg_jobs_pages_by_skip_and_a_short_pull_is_truncated(monkeypatch):
+    monkeypatch.setattr(A, "UKG_PAGE_DELAY", 0)
+    base = json.loads(_ukg_read("search.json"))
+    a = dict(base, opportunities=base["opportunities"][:2], totalCount=3)
+    b = dict(base, opportunities=base["opportunities"][2:], totalCount=3)
+    calls = []
+    monkeypatch.setattr(A, "client", _ukg_client([a, b], calls))
+    out = A.ukg_jobs(_UKG_ROW)
+    assert calls == [0, 2] and len(out) == 3 and not getattr(out, "truncated", False)
+    short = dict(base, opportunities=base["opportunities"][:2], totalCount=5)
+    monkeypatch.setattr(A, "client", _ukg_client([short, dict(short, opportunities=[])], []))
+    assert getattr(A.ukg_jobs(_UKG_ROW), "truncated", False) is True
+
+
+def test_ukg_jobs_without_an_opportunities_list_raises(monkeypatch):
+    import pytest
+    monkeypatch.setattr(A, "client", _ukg_client([{"error": "x"}], []))
+    with pytest.raises(RuntimeError):
+        A.ukg_jobs(_UKG_ROW)
+
+
+def test_ukg_detail_reads_the_embedded_record_and_pay():
+    d = A._ukg_detail_fields(_ukg_read("detail.html"), {})
+    assert d["description_text"] and (d["pay_min"], d["pay_max"], d["pay_interval"], d["pay_source"]) == (95000, 120000, "year", "ats")
+    assert "workplace_type" not in d                                  # that record's JobLocationType is None
+
+
+def test_ukg_detail_shell_page_is_an_error_never_gone():
+    import pytest
+    with pytest.raises(RuntimeError):
+        A._ukg_detail_fields("<html><title data-bind='text: title()'></title></html>", {})
+
+
+def test_ukg_places_fall_back_to_the_localized_name_and_keep_the_country():
+    names, country = A._ukg_places({"Locations": [{"LocalizedName": "Remote", "LocalizedDescription": None,
+                                                    "Address": {"City": None, "State": None,
+                                                                "Country": {"Code": "USA"}}}]})
+    assert names == ["Remote"] and country == "US"
+    assert A._ukg_places({"Locations": []}) == ([], None)

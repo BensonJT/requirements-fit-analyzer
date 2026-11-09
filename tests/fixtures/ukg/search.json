@@ -1,0 +1,436 @@
+{
+ "opportunities": [
+  {
+   "Id": "6c3441be-1b3f-47f3-80e3-0b50d49f06cd",
+   "Featured": false,
+   "Title": "Director of Business Transformation",
+   "RequisitionNumber": "REENG033409",
+   "FullTime": true,
+   "JobCategoryName": "Administration",
+   "Locations": [
+    {
+     "Id": "af833cf3-3ad8-5093-b1c0-639c98bf35ea",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "WFH - GA Atlanta",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Atlanta",
+      "PostalCode": "30339",
+      "State": {
+       "Code": "GA",
+       "Name": "Georgia"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "daae0bb6-a115-5f86-980c-6a80f644517d",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "WFH - TX Dallas",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Dallas",
+      "PostalCode": "75287",
+      "State": {
+       "Code": "TX",
+       "Name": "Texas"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    }
+   ],
+   "PostedDate": "2026-11-09T12:42:21.913Z",
+   "BriefDescription": "Purpose\nTo lead Confie's business process improvements and business transformation agenda across a diversified operating model that includes insurance",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": 2,
+   "OpportunityType": 0
+  },
+  {
+   "Id": "32f3c264-fd9e-441f-ae5e-0a47ab4d1b5e",
+   "Featured": false,
+   "Title": "Data Transformation Engineer",
+   "RequisitionNumber": "DATAT035238",
+   "FullTime": true,
+   "JobCategoryName": "Administration",
+   "Locations": [
+    {
+     "Id": "6eadbcce-d57e-539d-acf8-35fa155157fe",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - TX",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Addison",
+      "PostalCode": "75001",
+      "State": {
+       "Code": "TX",
+       "Name": "Texas"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "23751e15-9b32-58a1-aadf-c84ec9d00eaf",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - CA",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "CA",
+       "Name": "California"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "0974c09d-4926-5af5-b8dc-d232db6a2c3d",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - GA",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "GA",
+       "Name": "Georgia"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "00010f7c-015a-5914-b647-4ef5662757d8",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - CO",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "CO",
+       "Name": "Colorado"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "9bdd76fb-88b3-5edd-8186-4ab863d41f67",
+     "LocalizedName": null,
+     "LocalizedLocationId": "30FL01",
+     "LocalizedDescription": "Work From Home - FL",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "FL",
+       "Name": "Florida"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    }
+   ],
+   "PostedDate": "2026-11-09T12:42:05.555Z",
+   "BriefDescription": "Purpose\nWork under the guidance and supervision of the Director of Enterprise Architecture to build Confie's next-generation Enterprise Data Solutions",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": null,
+   "OpportunityType": 0
+  },
+  {
+   "Id": "dc2332ec-0df7-480e-964f-f0f93c0dc269",
+   "Featured": false,
+   "Title": "Sales Operations Specialist",
+   "RequisitionNumber": "SALES039312",
+   "FullTime": true,
+   "JobCategoryName": "Administration",
+   "Locations": [
+    {
+     "Id": "6eadbcce-d57e-539d-acf8-35fa155157fe",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - TX",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Addison",
+      "PostalCode": "75001",
+      "State": {
+       "Code": "TX",
+       "Name": "Texas"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "23751e15-9b32-58a1-aadf-c84ec9d00eaf",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - CA",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "CA",
+       "Name": "California"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "0974c09d-4926-5af5-b8dc-d232db6a2c3d",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - GA",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "GA",
+       "Name": "Georgia"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "9bdd76fb-88b3-5edd-8186-4ab863d41f67",
+     "LocalizedName": null,
+     "LocalizedLocationId": "30FL01",
+     "LocalizedDescription": "Work From Home - FL",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "FL",
+       "Name": "Florida"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "c967c523-5099-5f9d-bc97-d08f3b51d888",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - NY",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "NY",
+       "Name": "New York"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "cafe5046-d2d1-50d4-99a5-49d1447bfb2e",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - IN",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "IN",
+       "Name": "Indiana"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    },
+    {
+     "Id": "36800cb7-fcaa-5317-89ae-cb28b5a4885e",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Work From Home - OR",
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Huntington Beach",
+      "PostalCode": "92647",
+      "State": {
+       "Code": "OR",
+       "Name": "Oregon"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": null
+    }
+   ],
+   "PostedDate": "2026-11-09T12:41:31.176Z",
+   "BriefDescription": "Purpose\nSupports the creation, sustainment, evaluation, and optimization of Retail-focused sales and sales management tools, processes, and resources",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": 0,
+   "OpportunityType": 0
+  }
+ ],
+ "totalCount": 3,
+ "initialTotalOpportunitiesCount": 3,
+ "locations": []
+}

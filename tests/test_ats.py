@@ -2345,3 +2345,55 @@ def test_icims_detail_without_json_ld_is_an_error_not_gone():
     import pytest
     with pytest.raises(RuntimeError):
         A._icims_detail_fields("<html><body>new markup</body></html>", {})
+
+
+# ---------------------------------------------------------------- Pinpoint (<slug>.pinpointhq.com)
+_PINPOINT_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "pinpoint", "postings.json")
+_PINPOINT_ROW = {"employer": "Example Co", "platform": "pinpoint", "identifier_1": "example"}
+
+
+def test_pinpoint_registered_whole_board_without_detail():
+    assert "pinpoint" in A.IMPLEMENTED_PLATFORMS and "pinpoint" not in A.DETAIL_PLATFORMS
+
+
+def test_pinpoint_jobs_map_text_pay_and_the_explicit_workplace_field(monkeypatch):
+    with open(_PINPOINT_FIXTURE, encoding="utf-8") as f:
+        payload = json.load(f)
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            assert url == "https://example.pinpointhq.com/postings.json"
+            return _Resp(payload)
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    out = A.pinpoint_jobs(_PINPOINT_ROW)
+    assert not getattr(out, "truncated", False) and len(out) == 2
+    remote, hybrid = out
+    assert remote["workplace_type"] == "remote" and hybrid["workplace_type"] == "hybrid"
+    assert remote["req_id"] == "590483" and remote["url"].startswith("https://example.pinpointhq.com/")
+    assert (remote["pay_min"], remote["pay_max"], remote["pay_interval"], remote["pay_source"]) == (140000, 168000, "year", "ats")
+    assert hybrid["pay_min"] is None and hybrid["pay_source"] is None        # compensation_visible is false
+    assert remote["employment_type"] == "full_time" and remote["posted_at"] is None
+    assert remote["job_family"] == "Engineering / Product / Design"
+    assert "Primary Responsibilities" in remote["description_text"] and "Qualifications" in remote["description_text"]
+    assert "benefits" not in json.loads(remote["raw_json"])
+
+
+def test_pinpoint_unknown_workplace_value_is_left_unknown():
+    j = {"id": 1, "title": "t", "workplace_type": "something_new", "location": {}}
+    assert A._pinpoint_position(j)["workplace_type"] is None
+
+
+def test_pinpoint_jobs_without_a_data_list_raises(monkeypatch):
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw): return _Resp({"error": "nope"})
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.pinpoint_jobs(_PINPOINT_ROW)

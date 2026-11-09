@@ -2833,6 +2833,63 @@ def icims_detail(row, posting):
     return _icims_detail_fields(html, posting)
 
 
+# ================================================================ Pinpoint (<slug>.pinpointhq.com)
+# 2026-11-09: `GET https://<slug>.pinpointhq.com/postings.json` answers {"data": [...]} with every open
+# posting and its full text, structured compensation and an explicit workplace_type; there is no posted
+# date. Whole-board pull, so absence closes. Registry: identifier_1 = the subdomain slug.
+_PINPOINT_WORKPLACE = {"remote": "remote", "hybrid": "hybrid", "onsite": "onsite", "on_site": "onsite",
+                       "on-site": "onsite"}
+_PINPOINT_TEXT_FIELDS = (("", "description"), ("key_responsibilities_header", "key_responsibilities"),
+                         ("skills_knowledge_expertise_header", "skills_knowledge_expertise"))
+_PINPOINT_INTERVAL = {"year": "year", "annual": "year", "hour": "hour", "hourly": "hour"}
+
+
+def _pinpoint_position(j):
+    loc = j.get("location") or {}
+    place = ", ".join(x for x in (loc.get("city"), loc.get("province")) if x) or loc.get("name")
+    names = [n for n in (loc.get("name"), place) if n]
+    parts = []
+    for head_key, body_key in _PINPOINT_TEXT_FIELDS:
+        body = N.html_to_text(j.get(body_key))
+        if body:
+            head = (j.get(head_key) or "").strip() if head_key else ""
+            parts.append(f"{head}\n{body}" if head else body)
+    text = "\n\n".join(parts) or None
+    lo, hi = j.get("compensation_minimum"), j.get("compensation_maximum")
+    show = j.get("compensation_visible") and (lo or hi)
+    interval = _PINPOINT_INTERVAL.get(str(j.get("compensation_frequency") or "").lower())
+    job = j.get("job") or {}
+    return N.base(
+        req_id=str(j.get("id")),
+        title=j.get("title"),
+        url=j.get("url"),
+        location_primary=loc.get("name") or place,
+        locations=N.locations_json(names),
+        country="US" if "usa" in (loc.get("name") or "").lower() else None,
+        workplace_type=_PINPOINT_WORKPLACE.get(str(j.get("workplace_type") or "").lower()),
+        employment_type=N.employment_type(j.get("employment_type")),
+        job_family=(job.get("department") or {}).get("name"),
+        pay_min=int(float(lo)) if show and lo else None, pay_max=int(float(hi)) if show and hi else None,
+        pay_currency=(j.get("compensation_currency") or "USD") if show else None,
+        pay_interval=interval if show else None, pay_source="ats" if show else None,
+        posting_end_at=N.parse_date(j.get("deadline_at")),
+        description_text=text,
+        raw_json=N.raw({k: v for k, v in j.items()
+                        if k not in ("description", "benefits", "key_responsibilities", "skills_knowledge_expertise")}),
+    )
+
+
+def pinpoint_jobs(row, max_pages=None):
+    slug = quote((row.get("identifier_1") or "").strip(), safe="")
+    if not slug:
+        raise ValueError(f"{row.get('employer')}: pinpoint row needs the subdomain in identifier_1")
+    with client() as c:
+        data = _request(c, "GET", f"https://{slug}.pinpointhq.com/postings.json").json()
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise RuntimeError("pinpoint: postings.json carries no 'data' list")
+    return [_pinpoint_position(j) for j in data["data"]]
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2855,6 +2912,7 @@ _LIST = {
     "amazon": amazon_jobs,
     "radancy": radancy_jobs,
     "icims": icims_jobs,
+    "pinpoint": pinpoint_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,

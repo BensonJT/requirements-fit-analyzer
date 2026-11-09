@@ -1,0 +1,90 @@
+{
+ "data": [
+  {
+   "id": "590483",
+   "benefits": "<div><!--block-->Health insurance, dental, vision for your family, 401K, paid time off, sick leave, parental leave, and more. We believe taking care of our team is important and want to be sure you have what you need.&nbsp;</div><div><!--block--><br></div><div><!--block--><strong>Tithely is an Equal",
+   "benefits_header": "Additional Information",
+   "compensation": "$140,000 - $168,000 / year",
+   "compensation_minimum": 140000.0,
+   "compensation_maximum": 168000.0,
+   "compensation_currency": "USD",
+   "compensation_frequency": "year",
+   "compensation_visible": true,
+   "deadline_at": null,
+   "description": "<div><!--block-->As the <strong>Senior Growth Product Manager</strong>, you\u2019ll lead strategies that drive revenue, user acquisition, product led activation, and market expansion. Working cross-functionally across the product lifecycle, you\u2019ll combine product led growth (PLG) expertise with analytica",
+   "employment_type": "full_time",
+   "employment_type_text": "Full Time",
+   "key_responsibilities": "<div><!--block--><strong>Growth Strategy &amp; Lifecycle Management</strong></div><ul><li><!--block-->Define and execute the product growth vision, strategy, and roadmap, with a focus on customer acquisition, activation, retention, monetization, and revenue growth.</li><li><!--block-->Own the growth",
+   "key_responsibilities_header": "Primary Responsibilities of the Role",
+   "reporting_to": "Director of Product",
+   "skills_knowledge_expertise": "<div><!--block--><strong>A Successful Candidate Will:</strong></div><ul><li><!--block--><strong>Manage Complexity</strong> by gathering and synthesizing information from multiple sources, identifying root causes, and turning complex problems into clear, actionable solutions.</li><li><!--block--><str",
+   "skills_knowledge_expertise_header": "Qualifications ",
+   "title": "Sr. Growth Product Manager",
+   "url": "https://example.pinpointhq.com/en/postings/1b35f825-e0a1-4eb9-9262-099e3e9981f6",
+   "path": "/en/postings/1b35f825-e0a1-4eb9-9262-099e3e9981f6",
+   "workplace_type": "remote",
+   "workplace_type_text": "Fully remote",
+   "job": {
+    "id": "590735",
+    "requisition_id": "Form #185",
+    "department": {
+     "id": "71310",
+     "name": "Engineering / Product / Design"
+    },
+    "division": null,
+    "structure_custom_group_one": null
+   },
+   "location": {
+    "id": "80450",
+    "city": "Nashville",
+    "name": "Remote - USA",
+    "postal_code": "",
+    "province": "Tennessee",
+    "street_address": ""
+   }
+  },
+  {
+   "id": "591235",
+   "benefits": "<div><!--block-->Health insurance, dental, vision for your family, 401K, paid time off, sick leave, parental leave, and more. We believe taking care of our team is important and want to be sure you have what you need.&nbsp;</div><div><!--block--><br></div><div><!--block--><strong>Tithely is an Equal",
+   "benefits_header": "Additional Information",
+   "compensation": "$140,000 - $168,000 / year",
+   "compensation_minimum": 140000.0,
+   "compensation_maximum": 168000.0,
+   "compensation_currency": "USD",
+   "compensation_frequency": "year",
+   "compensation_visible": false,
+   "deadline_at": null,
+   "description": "<div><!--block-->As a <strong>Senior Product Manager</strong>, you will own Tithely\u2019s financial stewardship product areas as we expand beyond giving into a broader financial platform for the Church. This role combines deep financial services expertise, 0-to-1 product leadership, and strong build-vs-",
+   "employment_type": "full_time",
+   "employment_type_text": "Full Time",
+   "key_responsibilities": "<ul><li><!--block-->Build a strong understanding of the financial services landscape relevant to churches, including areas such as Accounting, Payroll, Spend management, and other financial products and services.</li><li><!--block-->Identify and evaluate opportunities to solve meaningful financial p",
+   "key_responsibilities_header": "Primary Responsibilities of the Role",
+   "reporting_to": "Director of Product",
+   "skills_knowledge_expertise": "<div><!--block--><strong>A Successful Candidate Will:</strong></div><ul><li><!--block--><strong>Manage Complexity</strong> by acquiring data from multiple and diverse sources, uncovering root causes to difficult problems, making sense of complex and sometimes contradictory information to effectively",
+   "skills_knowledge_expertise_header": "Qualifications ",
+   "title": "Sr. Product Manager- Financial Stewardship",
+   "url": "https://example.pinpointhq.com/en/postings/52768000-da7c-4078-987e-7812914ad78f",
+   "path": "/en/postings/52768000-da7c-4078-987e-7812914ad78f",
+   "workplace_type": "hybrid",
+   "workplace_type_text": "Fully remote",
+   "job": {
+    "id": "591413",
+    "requisition_id": "Form #186",
+    "department": {
+     "id": "71310",
+     "name": "Engineering / Product / Design"
+    },
+    "division": null,
+    "structure_custom_group_one": null
+   },
+   "location": {
+    "id": "80450",
+    "city": "Nashville",
+    "name": "Remote - USA",
+    "postal_code": "",
+    "province": "Tennessee",
+    "street_address": ""
+   }
+  }
+ ]
+}

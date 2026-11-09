@@ -2399,6 +2399,129 @@ def brassring_detail(row, posting):
         return _br_detail_fields(row, jd, posting)
 
 
+# ================================================================ Amazon (amazon.jobs)
+# Keyword search, NOT a whole-board pull (2026-11-09). Amazon's US board alone is past the search API's
+# 10,000-result window, so the adapter pages each backend/profile.py title phrase through the public
+# `search.json` endpoint (country-filtered server-side) and unions the results by job id, like USAJobs.
+# The list always comes back `Truncated`, so record_board never closes on absence. Amazon postings carry
+# no close date, so the only thing that closes one is its own page answering 404 (amazon_alive, run by
+# sweep.recheck_unseen for postings a search has not returned for RECHECK_AFTER_DAYS).
+# Registry: identifier_1 = host (default www.amazon.jobs), identifier_2 = country code (default USA).
+AMAZON_PAGE = 100            # the endpoint's largest result_limit
+AMAZON_WINDOW = 10_000       # "Cannot return more than 10000 results at once"
+AMAZON_PAGE_DELAY = 1.0
+# Each location's own `type`. Never a substring test (AT&T 2026-09-28): an unknown value maps to None.
+_AMAZON_WORKPLACE = {"ONSITE": "onsite", "VIRTUAL": "remote", "REMOTE": "remote", "HYBRID": "hybrid"}
+_AMAZON_PAY = re.compile(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*-\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*USD\s*"
+                         r"(annual\w*|yearly|hourly|per hour)", re.I)
+
+
+def _amazon_base(row):
+    host = (row.get("identifier_1") or "www.amazon.jobs").strip().rstrip("/")
+    return host if host.startswith("http") else f"https://{host}"
+
+
+def _amazon_pay(text):
+    """(min, max, interval) across the posting's per-location pay lines ("USA, CA, San Diego -
+    120,900.00 - 163,200.00 USD annually"), lowest low to highest high for the first interval seen."""
+    lows, highs, interval = [], [], None
+    for m in _AMAZON_PAY.finditer(text or ""):
+        unit = "hour" if "hour" in m.group(3).lower() else "year"
+        if interval and unit != interval:
+            continue
+        interval = unit
+        lows.append(float(m.group(1).replace(",", "")))
+        highs.append(float(m.group(2).replace(",", "")))
+    if not lows:
+        return None
+    return int(min(lows)), int(max(highs)), interval
+
+
+def _amazon_workplace(locs):
+    kinds = {_AMAZON_WORKPLACE.get((l.get("type") or "").upper()) for l in locs}
+    return kinds.pop() if len(kinds) == 1 else None   # mixed or unknown: leave it to the screen
+
+
+def _amazon_position(base, j):
+    locs = []
+    for l in j.get("locations") or []:
+        try:
+            locs.append(json.loads(l) if isinstance(l, str) else dict(l))
+        except (TypeError, ValueError):
+            continue
+    names = [l.get("normalizedLocation") or l.get("location") for l in locs]
+    parts = [N.html_to_text(j.get("description"))]
+    for heading, key in (("Basic Qualifications", "basic_qualifications"),
+                         ("Preferred Qualifications", "preferred_qualifications")):
+        body = N.html_to_text(j.get(key))
+        if body:
+            parts.append(f"{heading}\n{body}")
+    text = "\n\n".join(p for p in parts if p) or None
+    pay = _amazon_pay(text)
+    country = (locs[0].get("countryIso2a") if locs else None) or (j.get("country_code") or "")[:2] or None
+    return N.base(
+        req_id=str(j.get("id_icims") or j.get("id") or ""),
+        title=(j.get("title") or "").strip() or None,
+        url=f"{base}{j['job_path']}" if j.get("job_path") else None,
+        location_primary=j.get("normalized_location") or j.get("location") or (names[0] if names else None),
+        locations=N.locations_json(names),
+        country=country,
+        workplace_type=_amazon_workplace(locs),
+        employment_type=N.employment_type(j.get("job_schedule_type")),
+        job_family=j.get("job_category") or j.get("job_family"),
+        pay_min=pay[0] if pay else None, pay_max=pay[1] if pay else None,
+        pay_currency="USD" if pay else None, pay_interval=pay[2] if pay else None,
+        pay_source="text" if pay else None,
+        posted_at=N.parse_date(re.sub(r"\s+", " ", j.get("posted_date") or "")),
+        description_text=text,
+        raw_json=N.raw({k: v for k, v in j.items()
+                        if k not in ("description", "description_short", "basic_qualifications",
+                                     "preferred_qualifications")}),
+    )
+
+
+def amazon_jobs(row, max_pages=None):
+    """Every backend/profile.py phrase through amazon.jobs search.json, de-duplicated by job id.
+    Always `Truncated` -- see the section comment."""
+    base = _amazon_base(row)
+    country = (row.get("identifier_2") or "USA").strip()
+    phrases = P.FUNCTION_PHRASES + P.SEPARATE_PASS_PHRASES
+    seen, out = set(), []
+    with client() as c:
+        for phrase in phrases:
+            offset, pages = 0, 0
+            while True:
+                params = {"base_query": phrase, "result_limit": AMAZON_PAGE, "offset": offset,
+                          "sort": "recent", "normalized_country_code[]": country}
+                data = _request(c, "GET", f"{base}/en/search.json", params=params).json()
+                if data.get("error"):
+                    raise RuntimeError(f"amazon search {phrase!r} offset {offset}: {data['error']}")
+                jobs = data.get("jobs") or []
+                for j in jobs:
+                    p = _amazon_position(base, j)
+                    if p["req_id"] and p["req_id"] not in seen:
+                        seen.add(p["req_id"])
+                        out.append(p)
+                pages += 1
+                offset += len(jobs)
+                hits = data.get("hits") or 0
+                if not jobs or offset >= min(hits, AMAZON_WINDOW):
+                    break
+                if max_pages and pages >= max_pages:
+                    break
+                time.sleep(AMAZON_PAGE_DELAY)
+            time.sleep(AMAZON_PAGE_DELAY)
+    return Truncated(out)
+
+
+def amazon_alive(row, posting):
+    """True while the posting's own page answers; raises Gone on 404 (a closed Amazon job 404s)."""
+    url = posting.get("url") or f"{_amazon_base(row)}/en/jobs/{posting['req_id']}"
+    with client() as c:
+        _request(c, "HEAD", url)
+    return True
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -2418,6 +2541,7 @@ _LIST = {
     "avature": avature_jobs,
     "jibe": jibe_jobs,
     "brassring": brassring_jobs,
+    "amazon": amazon_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -2436,6 +2560,15 @@ _DETAIL = {
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)
+
+# Liveness checks for keyword-search platforms whose postings carry no close date (2026-11-09): a
+# posting a search stops returning is NOT evidence it is gone, so sweep.recheck_unseen asks the
+# posting's own page instead. Each function returns True while it is live and raises Gone when the
+# page says it is gone; any other error leaves the posting alone.
+_ALIVE = {
+    "amazon": amazon_alive,
+}
+RECHECK_PLATFORMS = frozenset(_ALIVE)
 
 # Platforms with a real places-strategy implementation (sprint plan §31.3). Orchestrator audit
 # 2026-09-21, letter A: `list_jobs` must never silently do an ordinary whole-board pull for a
@@ -2468,6 +2601,14 @@ def list_jobs(row, max_pages=None, scope=None):
     if scope is not None and "scope" in inspect.signature(fn).parameters:
         return fn(row, max_pages=max_pages, scope=scope)
     return fn(row, max_pages=max_pages)
+
+
+def check_alive(row, posting):
+    """The posting's own liveness signal (see _ALIVE). Raises Gone when it has been taken down."""
+    fn = _ALIVE.get(row["platform"])
+    if fn is None:
+        raise ValueError(f"no liveness check for platform {row['platform']!r}")
+    return fn(row, posting)
 
 
 def fetch_detail(row, posting):

@@ -1967,3 +1967,144 @@ def test_brassring_detail_sections_pay_and_gone(monkeypatch):
     import pytest
     with pytest.raises(A.Gone):
         A.brassring_detail(_BR_ROW, posting)
+
+
+# ---------------------------------------------------------------- Amazon (keyword search + liveness recheck)
+_AMAZON_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "amazon", "search.json")
+_AMAZON_ROW = {"employer": "Amazon / AWS", "platform": "amazon", "identifier_1": "www.amazon.jobs",
+               "identifier_2": "USA"}
+
+
+def _amazon_fixture():
+    with open(_AMAZON_FIXTURE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_amazon_registered_with_a_liveness_check_and_no_detail():
+    assert "amazon" in A.IMPLEMENTED_PLATFORMS and "amazon" in A.RECHECK_PLATFORMS
+    assert "amazon" not in A.DETAIL_PLATFORMS      # search.json carries the whole JD
+
+
+def test_amazon_position_maps_fields_pay_and_workplace_from_the_location_type():
+    jobs = _amazon_fixture()["jobs"]
+    onsite, virtual, hourly = (A._amazon_position("https://www.amazon.jobs", j) for j in jobs)
+    assert onsite["req_id"] == "10577660"
+    assert onsite["url"].startswith("https://www.amazon.jobs/en/jobs/10577660/")
+    assert onsite["location_primary"] == "Bellevue, Washington, USA" and onsite["country"] == "US"
+    assert onsite["workplace_type"] == "onsite"            # type ONSITE, not a text sniff
+    assert (onsite["pay_min"], onsite["pay_max"], onsite["pay_interval"]) == (115600, 160000, "year")
+    assert onsite["pay_source"] == "text" and onsite["employment_type"] == "full_time"
+    assert onsite["posted_at"] is not None
+    assert "Basic Qualifications\n" in onsite["description_text"]
+    assert "Preferred Qualifications\n" in onsite["description_text"]
+    assert virtual["workplace_type"] == "remote"           # type VIRTUAL
+    assert (hourly["pay_min"], hourly["pay_max"], hourly["pay_interval"]) == (27, 40, "hour")
+    assert hourly["workplace_type"] == "onsite"
+    assert "description" not in json.loads(onsite["raw_json"])
+
+
+def test_amazon_workplace_mixed_or_unknown_location_types_stay_unknown():
+    assert A._amazon_workplace([{"type": "ONSITE"}, {"type": "VIRTUAL"}]) is None
+    assert A._amazon_workplace([{"type": "SOMETHING_NEW"}]) is None
+    assert A._amazon_workplace([]) is None
+
+
+def test_amazon_pay_takes_the_widest_range_of_the_first_interval():
+    text = ("USA, CA, San Diego - 120,900.00 - 163,200.00 USD annually\n"
+            "USA, TN, Nashville - 108,800.00 - 146,900.00 USD annually\n"
+            "USA, TN, Nashville - 27.21 - 40.91 USD hourly")
+    assert A._amazon_pay(text) == (108800, 163200, "year")
+    assert A._amazon_pay("no pay here") is None
+
+
+def test_amazon_jobs_pages_each_phrase_dedupes_and_is_always_truncated(monkeypatch):
+    monkeypatch.setattr(A, "AMAZON_PAGE_DELAY", 0)
+    monkeypatch.setattr(A, "AMAZON_PAGE", 2)
+    monkeypatch.setattr(A.P, "FUNCTION_PHRASES", ["Process Excellence", "Change Management"])
+    monkeypatch.setattr(A.P, "SEPARATE_PASS_PHRASES", [])
+    jobs = _amazon_fixture()["jobs"]
+    calls = []
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            p = kw["params"]
+            calls.append((p["base_query"], p["offset"], p["normalized_country_code[]"]))
+            page = jobs[p["offset"]:p["offset"] + p["result_limit"]]
+            return _Resp({"error": None, "hits": len(jobs), "jobs": page})
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    got = A.amazon_jobs(_AMAZON_ROW)
+    assert getattr(got, "truncated", False) is True       # a keyword result set, never a full board
+    assert sorted(p["req_id"] for p in got) == ["10479167", "10529298", "10577660"]
+    assert calls == [("Process Excellence", 0, "USA"), ("Process Excellence", 2, "USA"),
+                     ("Change Management", 0, "USA"), ("Change Management", 2, "USA")]
+
+
+def test_amazon_jobs_raises_on_an_api_error(monkeypatch):
+    monkeypatch.setattr(A, "AMAZON_PAGE_DELAY", 0)
+    monkeypatch.setattr(A.P, "FUNCTION_PHRASES", ["Process Excellence"])
+    monkeypatch.setattr(A.P, "SEPARATE_PASS_PHRASES", [])
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw):
+            return _Resp({"error": "Cannot return more than 10000 results at once", "hits": 0, "jobs": None})
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.amazon_jobs(_AMAZON_ROW)
+
+
+def test_amazon_alive_raises_gone_on_404(monkeypatch):
+    class _Client:
+        def __init__(self, code): self.code = code
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, method, url, **kw):
+            assert method == "HEAD"
+            return _Resp429(self.code)
+
+    monkeypatch.setattr(A, "client", lambda: _Client(200))
+    assert A.check_alive(_AMAZON_ROW, {"req_id": "1", "url": "https://www.amazon.jobs/en/jobs/1"}) is True
+    monkeypatch.setattr(A, "client", lambda: _Client(404))
+    import pytest
+    with pytest.raises(A.Gone):
+        A.check_alive(_AMAZON_ROW, {"req_id": "1", "url": "https://www.amazon.jobs/en/jobs/1"})
+
+
+def test_recheck_unseen_closes_only_on_the_postings_own_gone_signal(tmp_path, monkeypatch):
+    """Absent from a keyword search never closes an Amazon posting; its own 404 does, a live page
+    refreshes last_seen_at, and an error leaves it alone."""
+    from backend.ats import sweep as S
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    old = datetime(2026, 9, 1)
+    jobs = [N.base(req_id=r, title=r, url=f"https://www.amazon.jobs/en/jobs/{r}") for r in ("GONE", "LIVE", "ERR")]
+    store.record_board(con, "Amazon / AWS", "amazon", jobs, old, truncated=True)
+    _, _, _, closed = store.record_board(con, "Amazon / AWS", "amazon", [], datetime(2026, 9, 2), truncated=True)
+    assert closed == 0
+
+    def fake_alive(row, posting):
+        if posting["req_id"] == "GONE":
+            raise A.Gone("404")
+        if posting["req_id"] == "ERR":
+            raise RuntimeError("timeout")
+        return True
+
+    monkeypatch.setattr(S.adapters, "check_alive", fake_alive)
+    monkeypatch.setattr(S.adapters, "PAGE_DELAY", 0)
+    n = S.recheck_unseen(con, [_AMAZON_ROW], log=lambda *a: None)
+    assert n == 1
+    rows = {r[0]: (r[1], r[2]) for r in con.execute("SELECT req_id, status, last_seen_at FROM postings").fetchall()}
+    assert rows["GONE"][0] == "closed"
+    assert rows["LIVE"][0] == "active" and rows["LIVE"][1] > old
+    assert rows["ERR"] == ("active", old)
+    # LIVE was just seen, so a second pass the same day leaves it alone (only ERR is asked again).
+    asked = []
+    monkeypatch.setattr(S.adapters, "check_alive", lambda row, p: asked.append(p["req_id"]) or True)
+    S.recheck_unseen(con, [_AMAZON_ROW], log=lambda *a: None)
+    assert asked == ["ERR"]

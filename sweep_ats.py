@@ -4,7 +4,9 @@
 Every run: whole-board pull (no cap) -> upsert (existing reqs are updated, never
 re-added) -> close what went missing -> spend a bounded budget on per-posting JD
 detail calls for platforms whose list endpoint carries no JD (Workday, Oracle,
-Workable, BambooHR, SmartRecruiters). Then query the views:
+Workable, BambooHR, SmartRecruiters). Keyword-search boards (USAJobs, Amazon) are never closed
+by absence: USAJobs closes on its own close date, and an Amazon posting no search has returned for
+3 days gets its own page checked (up to 300 a run); a 404 closes it. Then query the views:
 
     SELECT employer, title, location_primary FROM new_postings(1);          -- new since yesterday
     SELECT employer, title, days_visible FROM taken_down(7);

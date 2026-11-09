@@ -193,9 +193,12 @@ The daily pipeline runs a gated Jev stage just before the second judge only when
 | Eightfold | title, locations, workplace flag, date, department | yes | host URL, domain |
 | Paylocity | title, location, remote flag, department, date (from the JSON block embedded in the all-jobs page) | yes | company GUID, slug |
 | USAJobs | everything, including full duties/qualifications, clearance, grade, pay | not needed | none — one registry row; needs `USAJOBS_API_KEY` + `USAJOBS_EMAIL` in `.env` |
+| Amazon (amazon.jobs) | everything, including the JD and per-location pay lines; keyword search, US by default | liveness only (HEAD on the posting page) | host (`www.amazon.jobs`), country code (`USA`) |
 | BrassRing (Infinite TalentGateway) | title, location (the client's own field), last-updated date; needs a home-page session | yes (labelled sections, same session) | partnerid, siteid, optional location field override |
 
 USAJobs is the one adapter that is not a whole-board pull: it's a keyword search over `backend/profile.py`'s title phrases, so a posting missing from a run's results is never taken as evidence it's gone — only its own `ApplicationCloseDate` closes it. Missing credentials skip the adapter (one log line), they never fail the sweep. One registry row enables it regardless of `identifier_*` values (leave them blank).
+
+Amazon works the same way: its US board is past the search API's 10,000-result window, so the adapter pages each profile phrase through `amazon.jobs/en/search.json` and unions the results. Amazon postings carry no close date, so a recheck stage after the pull asks the posting's own page about any Amazon posting no search has returned for 3 days (up to 300 a run). A 404 closes it, a live page counts as seen, and any other error leaves it alone. Workplace type comes from each location's own `type` (`ONSITE`, `VIRTUAL`); a mix of the two stays unknown.
 
 **Not supported:**
 - **iCIMS** answers scripted requests with a human-verification page.

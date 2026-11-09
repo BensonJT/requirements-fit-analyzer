@@ -257,6 +257,45 @@ def fetch_details(con, registry_rows, budget=300, title_pattern=DETAIL_TITLE_PAT
     return fetched, closed
 
 
+RECHECK_AFTER_DAYS = 3     # a keyword-search posting unseen this long gets its own page checked
+RECHECK_BUDGET = 300       # liveness requests per run, across every keyword-search board
+
+
+def recheck_unseen(con, registry_rows, budget=RECHECK_BUDGET, after_days=RECHECK_AFTER_DAYS, log=print):
+    """Liveness pass for keyword-search platforms with no close date (adapters.RECHECK_PLATFORMS,
+    2026-11-09: Amazon). Absence from a search never closes one of their postings; after `after_days`
+    unseen, its own page is asked: Gone closes it, live refreshes last_seen_at, any other error leaves
+    it alone. One board at a time, sequential, PAGE_DELAY * 4 apart. Returns the number closed."""
+    rows = {(r["employer"], r["platform"]): r for r in registry_rows
+            if r["platform"] in adapters.RECHECK_PLATFORMS}
+    if not rows or not budget:
+        return 0
+    from datetime import timedelta
+    cands = store.recheck_candidates(con, adapters.RECHECK_PLATFORMS, sorted({k[0] for k in rows}),
+                                     _now() - timedelta(days=after_days), budget)
+    if not cands:
+        return 0
+    log(f"Recheck: asking {len(cands)} unseen keyword-search posting(s) whether they are still up...")
+    closed = alive = errors = 0
+    for pid, employer, platform, req_id, url in cands:
+        row = rows.get((employer, platform))
+        if row is None:
+            continue
+        t = time.monotonic()
+        try:
+            adapters.check_alive(row, {"req_id": req_id, "url": url})
+            store.mark_seen_alive(con, pid, _now())
+            alive += 1
+        except adapters.Gone:
+            store.close_posting(con, pid, _now())
+            closed += 1
+        except Exception:  # noqa: BLE001 -- a failed check is never evidence the posting is gone
+            errors += 1
+        time.sleep(max(0.0, adapters.PAGE_DELAY * 4 - (time.monotonic() - t)))
+    log(f"Recheck done: {closed} closed as gone, {alive} still up, {errors} errors.")
+    return closed
+
+
 def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_pages=None,
         detail_budget=300, detail_all=False, skip_sweep=False, new_detail_cap=5000,
         screen=True, report=True, llm_top=0, full_screen=False, track="all", max_ring=1, log=print,
@@ -308,6 +347,7 @@ def run(db_path=None, platform=None, limit=None, employer=None, workers=8, max_p
         if not skip_sweep:
             if track in ("fit", "all") and fit_rows:
                 stats = sweep(con, fit_rows, workers=workers, max_pages=max_pages, log=log)
+                stats["closed"] += recheck_unseen(con, fit_rows, log=log)
                 if new_detail_cap:
                     n, _ = fetch_details(con, fit_rows, budget=new_detail_cap, title_pattern=None,
                                          since=stats["started"], label="New-posting details")

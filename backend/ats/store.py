@@ -2192,6 +2192,26 @@ def close_expired_postings(con, platforms, now):
     """, [now, list(platforms), now.date()]).fetchone()[0]
 
 
+def recheck_candidates(con, platforms, employers, older_than, limit):
+    """Active fit postings on a keyword-search platform (adapters.RECHECK_PLATFORMS) that no search has
+    returned since `older_than`, longest-unseen first. Their own page decides whether they are gone."""
+    if not platforms or not employers or not limit:
+        return []
+    return con.execute("""
+        SELECT posting_id, employer, platform, req_id, url
+        FROM postings
+        WHERE status = 'active' AND track = 'fit' AND last_seen_at < ?
+          AND platform IN (SELECT unnest(?::VARCHAR[])) AND employer IN (SELECT unnest(?::VARCHAR[]))
+        ORDER BY last_seen_at ASC
+        LIMIT ?""", [older_than, list(platforms), list(employers), limit]).fetchall()
+
+
+def mark_seen_alive(con, pid, now):
+    """A recheck found the posting's own page live: it counts as seen, so it is not rechecked again
+    until it has gone RECHECK_AFTER_DAYS without a search returning it."""
+    con.execute("UPDATE postings SET last_seen_at = ? WHERE posting_id = ? AND status = 'active'", [now, pid])
+
+
 def close_moved_board_postings(con, employer, platform, now, track="fit"):
     """Closes `employer`'s active postings on any platform OTHER than `platform`, the board it was
     just pulled from. The registry keeps one board per employer, so a row left on another platform

@@ -208,7 +208,8 @@ Amazon works the same way: its US board is past the search API's 10,000-result w
 - **iCIMS** portals read fine at a polite pace (checked 2026-11-09: 80 job pages in a row, no verification page). If one ever serves a human-verification page, the board fails and nothing works around it.
 - **Dayforce** returns 403 even with cookies and CSRF tokens.
 - **Taleo** has no public JSON (an employer whose Taleo sits behind a Radancy/TalentBrew front end, such as `careers.<employer>.com/search-jobs`, is supported through the `radancy` platform). Taleo Enterprise career sections increasingly redirect to a vendor front end, and Taleo Business Edition serves only rendered HTML.
-- **Dayforce, Cloudflare-challenged portals and generic front doors** (a bare AppOne or Dayforce address with no company code) have no adapter. Rows on platforms with no adapter load but are skipped, and the sweep names them in one log line.
+- **Dayforce** serves its job list only from a search API that answers 403 to scripts even with the page's session cookies (checked 2026-11-09; Cloudflare bot management). The job-board pages embed no postings and there is no sitemap, so there is nothing to read.
+- **Cloudflare-challenged portals and generic front doors** (a bare AppOne or Dayforce address with no company code) have no adapter. Rows on platforms with no adapter load but are skipped, and the sweep names them in one log line.
 
 ## Setup
 

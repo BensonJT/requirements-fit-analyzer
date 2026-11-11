@@ -504,7 +504,8 @@ def judge2_stage(con, *, top_n: int = 0, log=print) -> Optional[dict]:
         # JUDGE2_BACKGROUND = public | file: the SAME background the evaluated prompt_version used, or the bar
         # that was passed says nothing about these reviews (prompt_version hashes the background text).
         result = judge2.run(con, top_n=top_n, i_have_approval=True,
-                            background=os.environ.get("JUDGE2_BACKGROUND", "public"), log=log)
+                            background=os.environ.get("JUDGE2_BACKGROUND", "public"),
+                            background_path=judge2.gemma_background_path(), log=log)
         log(f"Judge2 stage: {result.get('reviewed', 0)} reviewed ({time.monotonic() - t:.1f}s)")
         return result
     except Exception as exc:  # logged, never fatal to the sweep

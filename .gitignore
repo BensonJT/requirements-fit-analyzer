@@ -180,6 +180,8 @@ db/embed_lab/
 # The second judge's user-curated background sheet (sprint plan §25, `background="file"`). The example file
 # ships with placeholder content; the real one never does.
 judge2_background.local.md
+# The abbreviated Gemma-only copy (free tier: 16K input tokens a minute) and its drafts.
+judge2_background.gemma*.local.md
 
 # The Jev tier's pinned sentinel posting ids (`finder.py jev sentinel --init`), local to its database.
 db/jev_sentinel_ids.txt

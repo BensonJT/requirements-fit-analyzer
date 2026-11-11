@@ -222,8 +222,8 @@ step_cmd() {  # the literal command line a step runs
     top)     echo "$PY -u finder.py top" ;;
     jevtop)  echo "$PY -u finder.py top --jev --background-file $JUDGE_BG" ;;   # Gemma on the demotions needs judge_env
     sweep:*) echo "$PY -u sweep_ats.py ${1#sweep:}" ;;
-    judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $JUDGE_BG --i-have-approval" ;;
-    judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $JUDGE_BG" ;;
+    judge2run)  echo "$PY -u finder.py judge2 run --eval-set --background file --background-file $GEMMA_BG --i-have-approval" ;;
+    judge2eval) echo "$PY -u finder.py judge2 eval --background file --background-file $GEMMA_BG" ;;
     jevrun)     echo "$PY -u finder.py jev run --eval-set --background-file $JUDGE_BG --i-have-approval" ;;
     jevrep:*)   echo "$PY -u finder.py jev run --eval-set --run-tag ${1#jevrep:} --background-file $JUDGE_BG --i-have-approval" ;;
     jevinj)     echo "$PY -u finder.py jev run --injection --background-file $JUDGE_BG --i-have-approval" ;;
@@ -237,8 +237,13 @@ step_cmd() {  # the literal command line a step runs
 # Defined before step_cmd is first called (the plan printout below); the eval steps name it on the command line
 # because `finder.py judge2` defaults --background to public and does not read JUDGE2_BACKGROUND from the env.
 JUDGE_BG="$ROOT/judge2_background.local.md"
+# Gemma (free tier, 16K input tokens a minute) reads its own abbreviated sheet once the approved copy exists
+# (2026-11-11); until then it falls back to the full sheet. Jev always reads $JUDGE_BG.
+GEMMA_BG="$ROOT/judge2_background.gemma.local.md"
+[ -f "$GEMMA_BG" ] || GEMMA_BG="$JUDGE_BG"
 judge_env() {
-  export JUDGE2_LIVE_OK=1 JUDGE2_BACKGROUND=file JUDGE2_BACKGROUND_FILE="$JUDGE_BG"
+  export JUDGE2_LIVE_OK=1 JUDGE2_BACKGROUND=file JUDGE2_BACKGROUND_FILE="$JUDGE_BG" \
+         JUDGE2_GEMMA_BACKGROUND_FILE="$GEMMA_BG"
 }
 # The Jev tier's live gate, the same way judge_env opens judge2's. Only a preset with a jev* step calls it.
 jev_env() {

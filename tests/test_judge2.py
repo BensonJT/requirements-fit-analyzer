@@ -1473,3 +1473,32 @@ def test_unparseable_response_logs_finish_reason_and_token_counts_never_the_text
     # never the raw response text -- confirm the sentinel fragment of the (unparseable) body text is absent
     assert '"lines": [' not in diag[0]
     con.close()
+
+
+def test_prompt_over_the_input_limit_is_skipped_without_a_call(tmp_path, monkeypatch):
+    # 2026-11-11: a prompt bigger than the free tier's per-minute input window can never be accepted.
+    monkeypatch.setenv("JUDGE2_LIVE_OK", "1")
+    monkeypatch.setenv("GEMINI_API_MODEL", "gemma-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "unused-fake-key")
+    monkeypatch.setenv("GEMINI_INPUT_TPM_LIMIT", "10")   # every prompt is far above 10 tokens
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    pid, _ = _make_posting(con, "R1")
+    _insert_screen(con, pid)
+    calls = []
+    result = judge2.run(con, top_n=5, dry_run=False, transport=lambda *a, **k: calls.append(a),
+                        sleep_fn=lambda s: None)
+    assert calls == []
+    assert result["skipped_too_large"] == 1 and result["reviewed"] == 0
+    con.close()
+
+
+def test_gemma_background_path_prefers_an_existing_gemma_sheet(tmp_path, monkeypatch):
+    monkeypatch.delenv(judge2.GEMMA_BACKGROUND_ENV, raising=False)
+    assert judge2.gemma_background_path("full.md") == "full.md"
+    monkeypatch.setenv(judge2.GEMMA_BACKGROUND_ENV, str(tmp_path / "missing.md"))
+    assert judge2.gemma_background_path("full.md") == "full.md"     # named but absent: fall back
+    short = tmp_path / "gemma.md"
+    short.write_text("# Candidate Fact Sheet\n", encoding="utf-8")
+    monkeypatch.setenv(judge2.GEMMA_BACKGROUND_ENV, str(short))
+    assert judge2.gemma_background_path("full.md") == str(short)
+    assert judge2.gemma_background_path() == str(short)

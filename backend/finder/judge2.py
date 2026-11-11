@@ -80,6 +80,13 @@ MAX_RESPONSIBILITY_LINES = 12      # §30.1: the model rates at most this many r
                                    # code-side cap (parse_response) in case the model returns more
 
 BACKGROUND_ENV = "JUDGE2_BACKGROUND_FILE"
+# 2026-11-11 (user): Gemma gets its OWN abbreviated fact sheet. The full sheet was ~9.4K of a ~13.9K-token
+# prompt against the free tier's 16K input tokens a minute, so 429s skipped rows; Jev (paid) keeps the full
+# sheet. When this env var names a file that exists, every Gemma call site uses it; otherwise nothing changes.
+GEMMA_BACKGROUND_ENV = "JUDGE2_GEMMA_BACKGROUND_FILE"
+# The free tier's per-model input window. A prompt estimated above it can never be accepted, so it is skipped
+# with one log line instead of spending ~3 minutes of 429 retries (McKesson 7816d218, ~16.4K, 2026-11-10).
+INPUT_TPM_LIMIT = 16_000
 LIVE_OK_ENV = "JUDGE2_LIVE_OK"
 THINKING_ENV = "JUDGE2_THINKING"   # §29.5: thinkingLevel is now a setting, not a constant -- it joins the
                                    # prompt_version hash (below), so a higher level is evaluated as its own
@@ -250,6 +257,15 @@ def file_background(path: Optional[str] = None) -> str:
     if not p.exists():
         raise FileNotFoundError(f"{BACKGROUND_ENV} points at a file that does not exist: {p}")
     return p.read_text(encoding="utf-8")
+
+
+def gemma_background_path(fallback: Optional[str] = None) -> Optional[str]:
+    """The Gemma-only fact sheet (`JUDGE2_GEMMA_BACKGROUND_FILE`) when it is set and exists, else `fallback`.
+    Only Gemma call sites use this; Jev reads the full sheet through `jev_cli.background_path`."""
+    resolved = os.environ.get(GEMMA_BACKGROUND_ENV)
+    if resolved and Path(resolved).expanduser().exists():
+        return resolved
+    return fallback
 
 
 def get_background(mode: str = "public", *, path: Optional[str] = None) -> str:
@@ -1303,8 +1319,9 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
     import time as _time_mod
     run_start = _time_mod.monotonic()   # §29.5: elapsed time for the per-call progress line only -- never
                                         # read by any code path a test asserts on, so it stays real wall time
-    reviewed, unparseable, skipped_no_model = 0, 0, 0
-    pace = (60.0 / rpm) if rpm > 0 else 0.0   # paid on EVERY request (a failed or re-asked one too), never only on success
+    reviewed, unparseable, skipped_no_model, skipped_too_large = 0, 0, 0, 0
+    input_limit = int(os.environ.get("GEMINI_INPUT_TPM_LIMIT", INPUT_TPM_LIMIT) or INPUT_TPM_LIMIT)
+    pace =(60.0 / rpm) if rpm > 0 else 0.0   # paid on EVERY request (a failed or re-asked one too), never only on success
     tpm = int(os.environ.get("GEMINI_TPM", DEFAULT_TPM) or DEFAULT_TPM)
 
     def _wait(prompt_text: str) -> float:
@@ -1317,6 +1334,12 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
     n_candidates = len(candidates)
     for i, (pid, description_hash, title, employer, payload) in enumerate(candidates):
         prompt_text = render_prompt(payload)
+        prompt_tokens = len(prompt_text) // CHARS_PER_TOKEN
+        if input_limit > 0 and prompt_tokens > input_limit:
+            skipped_too_large += 1
+            log(f"judge2.run: {i + 1}/{n_candidates} · {pid} skipped: ~{prompt_tokens} prompt tokens is over "
+                f"the {input_limit}/min input limit, so no model can accept it")
+            continue
         if i and _wait(last_prompt):
             sleep_fn(_wait(last_prompt))
         last_prompt = prompt_text
@@ -1349,9 +1372,10 @@ def run(con, *, top_n: int = 150, dry_run: bool = False, force: bool = False, sh
         reviewed += 1
 
     log(f"judge2.run: {reviewed} reviewed, {unparseable} unparseable (skipped), "
-       f"{skipped_no_model} skipped (every model failed), prompt_version={pv}")
+       f"{skipped_no_model} skipped (every model failed), {skipped_too_large} skipped (prompt over the "
+       f"input limit), prompt_version={pv}")
     return {"dry_run": False, "reviewed": reviewed, "unparseable": unparseable,
-           "skipped_no_model": skipped_no_model, **summary}
+           "skipped_no_model": skipped_no_model, "skipped_too_large": skipped_too_large, **summary}
 
 
 # ---------------------------------------------------------------- 5. evaluation (the §25 acceptance bar)

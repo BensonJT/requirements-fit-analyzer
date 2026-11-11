@@ -1747,7 +1747,10 @@ def phenom_detail(row, posting):
 # `/job/<slug>/<id>/`. The RSS feed (/services/rss/job/) stops at ~20 items, so it is not used.
 # The JD is the job page's schema.org microdata (itemprop=description / datePosted / address*).
 # A removed job redirects to /errorpage/; that is read as an error, never Gone -- the board
-# close-pass handles removal.
+# close-pass handles removal. It does NOT catch a requisition closed behind a career site that keeps
+# listing it (L3Harris 32717, 2026-11-11): Apply says "no longer available" while search and the job
+# page still show it. The requisition host's robots.txt disallows all, so there is no liveness check;
+# backend/ats/listing_age.py flags old listings on the reports instead.
 _RMK_TOTAL = (re.compile(r"Results\s*<b>[^<]*</b>\s*of\s*<b>\s*([\d,]+)\s*</b>"),
               re.compile(r"Showing\s+\d+\s+to\s+\d+\s+of\s+([\d,]+)\s+Jobs"))
 _RMK_JOB_ID = re.compile(r"/job/[^/]+/(\d+)/?")

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from backend import profile as P
-from backend.ats import store
+from backend.ats import listing_age, store
 
 from .jev_questions import CANARY_FLAG_AT
 from .tracker_sync import job_search_dir
@@ -771,6 +771,10 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
                 [r[0] for r in unclear[:unclear_cap]] + list(demoted) + list(checks)
     far = _long_commute_sites(con, shown_ids)
     held = _held_ids(con, shown_ids)
+    try:  # 2026-11-11 (#570): a career-site leftover gets a "verify open" flag; the check must never cost the page
+        stale = listing_age.stale_listings(con, shown_ids)
+    except Exception:  # noqa: BLE001
+        stale = {}
     apply_gates = _gate_counts(con, "apply", levels)
     review_gates = _gate_counts(con, "review", levels)
 
@@ -817,7 +821,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         else:
             grades = f"{_grade_compact(gp)} / {_grade_compact(gt)} / {_grade_compact(ga)}"
         return (f"| {(rank or 0):.0f} | {star}{_cell(employer)} | {_link(title, url)} | "
-                f"{'⏸ held; ' if pid in held else ''}{_cell(why)} | {grades} | "
+                f"{'⏸ held; ' if pid in held else ''}{'⚠ ' + _cell(stale[pid]) + '; ' if pid in stale else ''}"
+                f"{_cell(why)} | {grades} | "
                 f"{(breadth or 0):.2f} | {req_fit or '—'} | {_j3_cell(*j3) if j3 else '—'} | {level_fit or '—'} | "
                 f"{_loc_cell(loc, far.get(pid))} | "
                 f"{_pay(lo, hi, interval)} | {age if age is not None else '—'}d |")
@@ -897,7 +902,8 @@ def write_top_jobs(con, vault_dir: Optional[str], *, out_path=None, apply_cap: i
         for (pid, employer, title, url, score, band, level_fit, loc, lo, hi, interval, age, shown,
              fp, ft, fa, fr) in unclear[:unclear_cap]:
             shown_cell = f"{shown:%Y-%m-%d}" if shown else "never"
-            w.append(f"| {score} | {band} | {_cell(employer)} | {'⏸ ' if pid in held else ''}{_link(title, url)} | "
+            w.append(f"| {score} | {band} | {_cell(employer)} | {'⏸ ' if pid in held else ''}"
+                     f"{'⚠ verify open; ' if pid in stale else ''}{_link(title, url)} | "
                      f"{_prob(fp)} / {_prob(ft)} / {_prob(fa)} | {_prob(fr)} | {level_fit or '—'} | "
                      f"{_loc_cell(loc, far.get(pid))} | {_pay(lo, hi, interval)} | "
                      f"{age if age is not None else '—'}d | {shown_cell} |")

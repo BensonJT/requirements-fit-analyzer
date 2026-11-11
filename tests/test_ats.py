@@ -2488,3 +2488,23 @@ def test_ukg_places_fall_back_to_the_localized_name_and_keep_the_country():
                                                                 "Country": {"Code": "USA"}}}]})
     assert names == ["Remote"] and country == "US"
     assert A._ukg_places({"Locations": []}) == ([], None)
+
+
+# ---------------------------------------------------------------- stale SuccessFactors listings (2026-11-11, #570)
+def test_rmk_listing_age_flags_old_ids_only(tmp_path):
+    from backend.ats import listing_age as LA
+    anchor = 1_449_695_000
+    assert LA.rmk_age_days(1_355_475_200, anchor) == (anchor - 1_355_475_200) // LA.RMK_IDS_PER_DAY  # ~314 days
+    assert LA.rmk_age_days("not-a-number", anchor) is None and LA.rmk_age_days(1_000, None) is None
+    assert LA.rmk_age_days(anchor + 5, anchor) == 0
+    assert LA.verify_note(LA.RMK_STALE_DAYS - 1) is None
+    assert "~10 mo" in LA.verify_note(314)
+
+    con = store.connect(str(tmp_path / "t.duckdb"))
+    t = datetime(2026, 11, 11)
+    store.record_board(con, "L3Harris", "successfactors_rmk", [_job("1355475200"), _job(str(anchor))], t)
+    store.record_board(con, "Acme", "workday", [_job("1")], t)  # a non-RMK id is never dated
+    ids = {r[1]: r[0] for r in con.execute("SELECT posting_id, req_id FROM postings").fetchall()}
+    flagged = LA.stale_listings(con, list(ids.values()))
+    assert set(flagged) == {ids["1355475200"]}
+    assert LA.stale_listings(con, []) == {}

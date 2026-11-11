@@ -24,12 +24,15 @@ Per posting:
   two_reviewer_fail Jev demotes it on clear-cut lines AND the judge or Gemma also says fails: obviously not a
                     fit, left off the gem list
   screen_reasons    the screen's reject reasons, '; '-joined
+  verify_note       (2026-11-11, #570) a SuccessFactors listing old enough to be a career-site leftover whose
+                    requisition is closed: click Apply before building (backend/ats/listing_age.py)
 """
 import json
 import re
 from typing import Optional
 
 from .. import screen as S
+from ..ats import listing_age
 from . import jev_gate, report
 from .judge import non_us_primary
 from .rules import listing_from_row
@@ -39,7 +42,7 @@ LOGISTICS_REASON_RE = re.compile(
     r"travel|comp:|hard-avoid industry)", re.I)
 GEM_EXCLUDED_SECTIONS = ("apply", "review")
 COLUMNS = ("us_primary", "location_ok", "location_note", "lens_strong", "top_jobs", "gem_gate", "judge_required",
-           "judge2_required", "jev_required", "two_reviewer_fail", "screen_reasons")
+           "judge2_required", "jev_required", "two_reviewer_fail", "screen_reasons", "verify_note")
 
 
 def _reasons(raw) -> list:
@@ -140,8 +143,10 @@ def compute(con, ids: list, jev: Optional[dict] = None, *, levels=report.TOP_LEV
         FROM postings p LEFT JOIN vw_lens_fit f USING (posting_id) LEFT JOIN vw_screen_latest s USING (posting_id)
         WHERE p.posting_id IN (SELECT unnest(?::VARCHAR[]))""", [list(ids)])
     names = [d[0] for d in cur.description]
+    fetched = cur.fetchall()
+    stale = listing_age.stale_listings(con, ids)
     out = {}
-    for t in cur.fetchall():
+    for t in fetched:
         row = dict(zip(names, t))
         pid, reasons = row["posting_id"], _reasons(row["reasons"])
         ok, note = location_check(row, reasons)
@@ -159,5 +164,6 @@ def compute(con, ids: list, jev: Optional[dict] = None, *, levels=report.TOP_LEV
             "two_reviewer_fail": jres in ("Demoted", "Would demote")
                                  and "fails" in (row["required_fit"], row["judge2_required"]),
             "screen_reasons": "; ".join(reasons) or None,
+            "verify_note": stale.get(pid),
         }
     return out

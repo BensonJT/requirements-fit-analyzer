@@ -106,17 +106,17 @@ fi
 # the later steps stop cleanly at the cap (logged in RunSummary.stopped_by_cap, never an error).
 LABELS=(
   "Overnight FULL            sweep + screen + coverage + Jev demotion pass (Gemma on the demotions only) + Top_Jobs + maintenance"
-  "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the gold eval set and scores it (~3.5 h extra)"
+  "Overnight FULL + GOLD SCORE  as FULL, then Gemma judges the NEW gold rows and scores them (cached rows skip)"
   "Overnight FULL + RETRAIN  retrain models on new labels, re-tune coverage thresholds if stale, then as FULL"
   "Overnight LIGHT           sweep + screen + coverage + Jev demotion pass + Top_Jobs + maintenance; no Gemma at all"
-  "Gold score only           Gemma judges the gold eval set + scores it; no sweep (~3.5 h per 110 rows)"
+  "Gold score only           Gemma judges the new gold rows + scores the set; no sweep (cached rows skip)"
   "JD backfill: directional  fetch JDs for the vw_jd_missing 'directional' tier (wider than the prefilter); no sweep, no screen"
   "Jev gold score (MSA)      Jev reviews the gold set, two repeat runs, the injection set, then jev eval; no sweep"
   "Report only               tracker sync + Top_Jobs (minutes)"
   "Disk maintenance          compact the DuckDB file, scratch files, worktrees, old in-repo backups (what every overnight preset ends with)"
   "Dry run                   pre-flight checks + the plan; schedules and writes nothing"
 )
-ESTIMATES=("~1.5-2.5 h (no top-100 Gemma since 9/30; Gemma reads the ~20-40 demotions)" "~5-6 h (FULL + ~3.5 h eval set)" "~3-3.5 h (retrain ~65 min + FULL; +20-45 min when calibration is stale)" "~1.5 h (estimate)" "~3.5 h (estimate)" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
+ESTIMATES=("~1.5-2.5 h (no top-100 Gemma since 9/30; Gemma reads the ~20-40 demotions)" "~2 h (FULL + ~3-4 min per new gold row; ~8 h after a judge prompt change re-judges all ~144)" "~3-3.5 h (retrain ~65 min + FULL; +20-45 min when calibration is stale)" "~1.5 h (estimate)" "~3-4 min per new gold row; ~7.5 h after a judge prompt change" "~8 min per 2,000 JDs" "~15 min (estimate; ~6.8M tokens, ~\$0.30)" "~2 min" "~2-3 min" "seconds")
 PRESETS=(
   "sweep:|jevtop|maint"
   "sweep:|judge2run|judge2eval|jevtop|maint"

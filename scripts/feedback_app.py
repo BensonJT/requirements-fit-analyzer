@@ -29,6 +29,10 @@ live, so a pass or a new application leaves the untapped lists on the next brows
 "Apply queue + refresh snapshot" runs scripts/refresh_now.sh (apply-queue, pg_snapshot, the report rebuild)
 and stops cleanly when a pipeline run holds the database.
 
+"Re-grade study" opens scripts/regrade_study.py's window: blind Meets / Fails re-grades of a drawn sample of the
+user's own gold rows, shown from the stored posting text (dead links don't matter), kept in jobs.regrade_study and
+never written to the gold set.
+
 When the window gains focus and the clipboard holds a posting ID, it fills the ID box and looks it up.
 
     .venv/bin/python scripts/feedback_app.py
@@ -242,6 +246,7 @@ class App:
         ttk.Button(bar, text="Undo selected (pending only)", command=self.undo).pack(side="left")
         self.refresh_btn = ttk.Button(bar, text="Apply queue + refresh snapshot", command=self.run_refresh)
         self.refresh_btn.pack(side="left", padx=(10, 0))
+        ttk.Button(bar, text="Re-grade study", command=self.open_regrade).pack(side="left", padx=(10, 0))
         self.on_top = tk.BooleanVar()
         ttk.Checkbutton(bar, text="Keep on top", variable=self.on_top,
                         command=lambda: root.attributes("-topmost", self.on_top.get())).pack(side="right")
@@ -579,6 +584,15 @@ class App:
         self.msg.set(final + ("" if rc in (0, 2) else "  (log: logs/refresh_now.log)"))
         self.refresh_btn.configure(state="normal")
         self.refresh()
+
+    def open_regrade(self):
+        """The re-grade study window (scripts/regrade_study.py): blind re-grades kept apart from the gold set."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import regrade_study
+        if getattr(self, "_regrade", None) and self._regrade.win.winfo_exists():
+            self._regrade.win.lift()
+            return
+        self._regrade = regrade_study.RegradeWindow(self.root, os.environ.get("REGRADE_STUDY", regrade_study.DEFAULT_STUDY), self.pg)
 
     def tick(self):
         """Refresh the queue list every minute, so applied / refused states show up on their own."""

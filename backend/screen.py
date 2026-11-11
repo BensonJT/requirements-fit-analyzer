@@ -86,8 +86,11 @@ def annual_top(job: Listing) -> Optional[float]:
 _REMOTE_DUTY_RE = re.compile(
     r"\b(?:remote|virtual)\s+(?:\w+\s+){0,2}(?:team|teams|site|sites|staff|workforce|employee|employees|"
     r"office|offices|customer|customers|client|clients|user|users|support|assistant|assistants|agent|"
-    r"agents|chatbot|chatbots|recruiter|recruiters|collaboration|machine|machines|doctor|visit|visits)\b|"
+    r"agents|chatbot|chatbots|recruiter|recruiters|collaboration|machine|machines|doctor|visit|visits|"
+    r"network|networks|community|communities|champion|champions|event|events)\b|"
     r"\bremote\s+sensing\b|\bvirtuali[sz]\w*", re.I)
+# 2026-11-10: network/community/champions/event added. MetLife AVP, AI Orchestration (hybrid, 3 days a week in
+# the Cary office) read as remote off "Lead a virtual network of AI champions", a duties phrase.
 # Locations too generic for an ATS on-site/hybrid flag to be trusted at all (Microsoft's
 # "United States, Multiple Locations" onsite tag being the case that surfaced this).
 _GENERIC_LOCATION_RE = re.compile(r"\b(?:multiple locations?|united states|nationwide)\b", re.I)
@@ -201,10 +204,17 @@ _REMOTE_HYBRID_POLICY_RE = re.compile(
     r"\bunless\s+(?:specified|designated)\s+as\s+(?:primarily\s+)?(?:virtual|remote)\b|"
     r"\boffice\s+engagement\b[^.]{0,60}\bvirtual\s+work\b|"
     r"\bhybrid\s+(?:work\s+)?(?:schedule|role|position)\b)", re.I)
+# 2026-11-10: a remote-ELIGIBILITY POLICY sentence is a statement about which roles may be remote, not an
+# offer. FormFactor (Farmers Branch, TX) closes every req with "For roles that are designated as
+# remote-eligible, employees cannot be located in: AL, AK ..." and "A role is remote-eligible only when it is
+# listed as "Remote" in the job location"; the posting's own location was a Texas plant.
+_REMOTE_ELIGIBILITY_POLICY_RE = re.compile(
+    r"\bdesignated\s+as\s+remote[-\s]eligible\b|\bremote[-\s]eligible\s+only\s+when\b|"
+    r"\bremote[-\s]eligible\b[^.]{0,60}\bcannot\s+be\s+located\b", re.I)
 _REMOTE_BOILERPLATE_RES = (_REMOTE_NEGATION_RE, _REMOTE_ENUMERATION_RE, _REMOTE_GLOSSARY_RE,
                            _REMOTE_PAY_BAND_RE, _REMOTE_EEO_RE, _REMOTE_BARE_HEADING_RE,
                            _REMOTE_VIRTUAL_MODE_RE, _REMOTE_VIRTUAL_TRAINING_RE, _REMOTE_POPULATION_SCOPED_RE,
-                           _REMOTE_HYBRID_CADENCE_RE, _REMOTE_HYBRID_POLICY_RE)
+                           _REMOTE_HYBRID_CADENCE_RE, _REMOTE_HYBRID_POLICY_RE, _REMOTE_ELIGIBILITY_POLICY_RE)
 
 # 2026-09-19 amendment (user ruling): conditional remote phrasing is a GENUINE possible-remote fact, not
 # boilerplate -- "remote work may be considered for the right candidate" means the door is open, even
@@ -318,10 +328,24 @@ def is_remote(job: Listing) -> bool:
     #      otherwise have started waving them through, since the old parse only missed them by accident
     #      (it read "Corp" / nothing as the state). A street address is the tell.
     #   3. Require 3+ entries: one field naming three states is an address or a coverage area, not a spread.
+    return multi_city_signature(job)
+
+
+def multi_city_signature(job: Listing) -> bool:
+    """True when the ATS lists 3+ sites across 3+ states (the "remote" signature), unless the JD itself states an
+    in-office requirement. 2026-11-10: that guard is new. Wells Fargo (hybrid, Iselin NJ / Irving TX / Charlotte NC)
+    and USAA ("in the office 4 days per week", eight campuses) listed several offices BECAUSE they are on-site at
+    several offices, and the spread alone made both read as remote."""
     if sum(_ADDRESS_LIKE_RE.search(loc or "") is not None for loc in job.locations) * 2 >= len(job.locations):
         return False
     states = set().union(*(states_in(loc) for loc in job.locations)) if job.locations else set()
-    return len(job.locations) >= 3 and len(states) >= 3
+    if not (len(job.locations) >= 3 and len(states) >= 3):
+        return False
+    text = f"{job.title}\n{job.description}"
+    if office_days(text) is not None:
+        return False
+    return not any(rx.search(line) for line in re.split(r"[\n.]+", text)
+                   for rx in (_REMOTE_HYBRID_CADENCE_RE, _REMOTE_HYBRID_POLICY_RE))
 
 
 _STATES = {

@@ -46,3 +46,36 @@ def test_gem_gate_names_the_first_judgment_gate(kw, expect):
     args = dict(verdict="review", reasons=[], level="in_range", top_jobs=None, judge_required=None, fit_required=None)
     args.update(kw)
     assert G.gem_gate(**args) == expect
+
+
+def _desc_row(location, description, locations, workplace=None):
+    r = _row(location, workplace, locations)
+    r["description_text"] = description
+    return r
+
+
+@pytest.mark.parametrize("row, ok, note_start", [
+    # 11/10: a multi-campus employer lists its offices because the job is in one of them; the JD says in-office
+    (_desc_row("Dallas, TX", "We require being in the office 4 days per week.",
+               '["Dallas, TX", "Phoenix, AZ", "Charlotte, NC"]'), False, "not remote and outside"),
+    (_desc_row("Newark, NJ", "This position offers a hybrid work schedule.",
+               '["Newark, NJ", "Irving, TX", "Charlotte, NC"]'), False, "not remote and outside"),
+    # silent spread: kept by the screen, but the report cannot call it remote
+    (_desc_row("Denver, CO", "Program role.", '["Denver, CO", "Austin, TX", "Atlanta, GA"]'), False, "multi-city"),
+    # a spread that also says remote stays
+    (_desc_row("Denver, CO", "This is a fully remote role.", '["Denver, CO", "Austin, TX", "Atlanta, GA"]'), True, None),
+    # "virtual network" is a duties phrase; the ATS flag says hybrid, three days in the office
+    (_desc_row("Cary, United States", "Lead a virtual network of champions. This is a hybrid role requiring "
+               "a minimum of 3 days per week in office.", '["Cary, United States"]', "hybrid"), False, "not remote and outside"),
+    # a remote-eligibility POLICY sentence is not an offer
+    (_desc_row("Plano, TX", 'A role is remote-eligible only when it is listed as "Remote" in the job location.',
+               '["Plano, TX"]'), False, "not remote and outside"),
+    # the posting itself says remote
+    (_desc_row("Remote", "Join us.", '["Remote"]', "remote"), True, None),
+    # a nationwide listing with nothing against it stays (unverified, the screen flags it)
+    (_desc_row("United States", "Strategy role.", '["United States"]'), True, None),
+])
+def test_location_check_reads_the_place_live(row, ok, note_start):
+    got_ok, note = G.location_check(row, [])
+    assert got_ok is ok
+    assert (note is None) if note_start is None else note.startswith(note_start)

@@ -1562,6 +1562,29 @@ def test_multi_city_remote_signature_counts_states_not_comma_tails():
     assert not S.is_remote(rules.listing_from_row(single))
 
 
+def test_in_office_jd_beats_the_multi_city_spread_and_two_duties_phrases_are_not_remote():
+    """2026-11-10: the Focus Report listed roles that were neither remote nor commutable. Three holes in the
+    remote read, each found on a real row (fake data here): a multi-office employer whose JD says in-office,
+    a "virtual network" duties phrase, and a remote-eligibility policy sentence."""
+    spread = '["Dallas, TX", "Phoenix, AZ", "Charlotte, NC"]'
+    for text in ("We require being in the office 4 days per week.", "This position offers a hybrid work schedule."):
+        row = _row(location_primary="Dallas, TX", workplace_type=None, locations=spread, description_text=text)
+        assert not S.is_remote(rules.listing_from_row(row)), text
+        assert "not remote and outside the commute area (per listing)" in rules.screen_row(row).reasons
+    quiet = _row(location_primary="Dallas, TX", workplace_type=None, locations=spread, description_text="Team role.")
+    assert S.is_remote(rules.listing_from_row(quiet))   # the silent spread is unchanged
+    virtual = _row(location_primary="Cary, United States", workplace_type="hybrid", locations='["Cary, United States"]',
+                   description_text="Lead a virtual network of champions across the firm.")
+    assert not S.is_remote(rules.listing_from_row(virtual))
+    policy = _row(location_primary="Plano, TX", workplace_type=None, locations='["Plano, TX"]',
+                  description_text='For roles that are designated as remote-eligible, employees cannot be located in: AL, AK. '
+                                   'A role is remote-eligible only when it is listed as "Remote" in the job location.')
+    assert not S.is_remote(rules.listing_from_row(policy))
+    real = _row(location_primary="Plano, TX", workplace_type=None, locations='["Plano, TX"]',
+                description_text="This role is remote-eligible and can be performed from anywhere in the US.")
+    assert S.is_remote(rules.listing_from_row(real))
+
+
 def test_office_directory_is_not_the_multi_city_remote_signature():
     """An employer that lists every office as a STREET ADDRESS spans many states and is not remote -- you
     sit at one building. Accenture posts 43 such addresses, RTX three plant addresses. Parsing states

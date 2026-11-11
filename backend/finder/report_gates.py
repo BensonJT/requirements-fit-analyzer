@@ -61,10 +61,33 @@ def location_check(row: dict, reasons: list) -> tuple:
     if logistics:
         return False, logistics[0]
     workplace = row.get("workplace_type")
+    listing = listing_from_row(row)
     if workplace in ("hybrid", "onsite") and not S._GENERIC_LOCATION_RE.search(row.get("location_primary") or ""):
-        if not S.is_commutable(listing_from_row(row)):
+        if not S.is_commutable(listing):
             return False, f"{workplace} outside the commute area (ATS flag)"
+    # 2026-11-10 (user: the Focus Report listed roles that were neither remote nor commutable). The stored screen
+    # reasons are only as current as the last rescreen, and the screen's remote read had three holes (a "virtual
+    # network" duties phrase, a remote-eligibility policy sentence, a multi-city spread on a JD that says
+    # in-office), so Iselin NJ, San Antonio, Denver and a hybrid Cary role all passed. Read the place again here.
+    local = bool(listing.is_local_pass) or S.is_commutable(listing)
+    remote = S.is_remote(listing)
+    if not remote and not local and not S.is_nationwide(listing):
+        return False, "not remote and outside the commute area (live read)"
+    # A spread of offices in 3+ states with no remote statement anywhere is the shape of a multi-site on-site
+    # employer (Cisco 12 cities, BlinkRx 4). The screen keeps reading it as remote (Coinbase lists its remote
+    # reqs that way), but a report that promises "remote or commutable" cannot rest on it alone.
+    if remote and not local and _remote_by_spread_only(listing):
+        return False, "multi-city listing with no remote statement"
     return True, None
+
+
+def _remote_by_spread_only(listing) -> bool:
+    """True when the only thing making the screen read this posting as remote is the multi-city spread."""
+    blob = "\n".join([listing.location or "", *(listing.locations or []), listing.description or ""])
+    return (listing.extra.get("workplace_type") != "remote" and not S._remote_location_entry(listing)
+            and not S._US_OFFSITE_RE.search(blob)
+            and not S._remote_in_context(f"{listing.title}\n{listing.location}\n{listing.description}")
+            and S.multi_city_signature(listing))
 
 
 def judgment_reasons(reasons: list) -> list:

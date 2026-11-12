@@ -313,6 +313,7 @@ echo "────────────────────────�
 for s in "${STEPS[@]}"; do echo "  step    : $(step_cmd "$s")"; done
 echo "  step    : $PY -u finder.py apply-queue   (first, and again before the snapshot; non-fatal)"
 echo "  step    : $PY -u scripts/pg_snapshot.py   (always last, non-fatal)"
+echo "  step    : $PY -u scripts/pg_control_snapshot.py   (after a good snapshot, non-fatal)"
 [ "$USES_JUDGE" = true ] && echo "  judge   : Gemma second judge ON, fact sheet $(basename "$JUDGE_BG")"
 [ "$USES_JEV" = true ] && echo "  jev     : Jev tier ON (JEV_LIVE_OK=1), fact sheet $(basename "$JUDGE_BG"); jevtop = the demotion pass over Apply / Review"
 if [ "$WAIT_SECS" -gt 0 ]; then
@@ -427,6 +428,10 @@ apply_queue
 echo
 echo "════ $(date '+%H:%M:%S')  $PY -u scripts/pg_snapshot.py"
 if timeout 900 "$PY" -u scripts/pg_snapshot.py; then
+  # Control-chart points (judge tests, verdict mix, run health) for the public control-charts page;
+  # non-fatal, read-only on DuckDB. The page itself is rebuilt by the POST_SNAPSHOT_CMD hook below.
+  timeout 300 "$PY" -u scripts/pg_control_snapshot.py \
+    || echo "launch: WARNING pg_control_snapshot failed (non-fatal; control charts are stale)"
   # Optional hook for downstream readers of the snapshot (reports, charts). The command comes from .env
   # (POST_SNAPSHOT_CMD, never committed); it runs detached after POST_SNAPSHOT_DELAY seconds (default 45)
   # so the launcher never waits on it. Output goes to logs/post_snapshot.log.

@@ -17,11 +17,11 @@ Checks loaded (rates and counts of the pipeline's own behaviour only; no employe
   run_boards_failed / run_pull_minutes  per full sweep (runs with 100 or more boards)
   regrade_msa1_agreement          the user's own re-grade study (Postgres jobs.regrade_study)
 
-Judge tests: a test whose reason starts "insufficient" was cut short and never scored (status 'cut short');
-"inherited from" is a carried-over result, not a fresh measurement ('inherited'). Of the rest, each UTC day keeps
-ONE test: its last passing test, else its last test ('pass' or 'fail'); earlier tests that day are 'superseded'.
-Only 'pass' tests are scored (count toward the centre line and limits). The day rule reproduces the ten tests
-published for 9/30-11/2 (agreement 261 of 294).
+Judge tests: one point per judge version (prompt_version): its last test that was neither cut short (reason
+"insufficient...", status 'cut short', shown but never scored) nor inherited ("inherited from...", a carried-over
+result, 'inherited'). The point is 'pass' and scored if that test passed, else 'fail' (shown, not scored); the
+version's earlier tests are 'superseded'. The ten most recent passing versions are the ten tests published for
+9/30-11/2 (agreement 261 of 294).
 
 Exit 0 on success, 1 on any failure. One source failing prints a WARNING, the other sources still load, and the
 exit is 1.
@@ -64,12 +64,13 @@ def point(check_id, source_ref, measured_at, n=None, k=None, value=None, model=N
 # ---------------------------------------------------------------- judge tests
 
 def classify_tests(tests):
-    """tests: dicts with run_id, evaluated_at, passed, reason. Returns {run_id: status}.
+    """tests: dicts with run_id, prompt_version, evaluated_at, passed, reason. Returns {run_id: status}.
 
-    'cut short' (reason starts "insufficient") and 'inherited' (reason starts "inherited from") are never a
-    day's test. Of the rest, per UTC day: the last passing test is kept ('pass'); with no pass that day, the
-    last test ('fail'). Every other test that day is 'superseded'."""
-    status, by_day = {}, {}
+    One point per judge version (prompt_version): that version's last test that is neither cut short (reason
+    starts "insufficient") nor inherited (reason starts "inherited from"). It is 'pass' if that test passed, else
+    'fail' (a version that never passed). Its earlier tests are 'superseded'. Cut-short tests keep their own
+    'cut short' mark; inherited results are 'inherited' (a carried-over number, not a measurement)."""
+    status, by_version = {}, {}
     for t in sorted(tests, key=lambda t: (t["evaluated_at"], t["run_id"])):
         reason = (t.get("reason") or "").lower()
         if reason.startswith("insufficient"):
@@ -77,11 +78,10 @@ def classify_tests(tests):
         elif reason.startswith("inherited from"):
             status[t["run_id"]] = "inherited"
         else:
-            by_day.setdefault(t["evaluated_at"].date(), []).append(t)
-    for day_tests in by_day.values():
-        passes = [t for t in day_tests if t["passed"]]
-        keep = (passes or day_tests)[-1]
-        for t in day_tests:
+            by_version.setdefault(t["prompt_version"], []).append(t)
+    for version_tests in by_version.values():
+        keep = version_tests[-1]
+        for t in version_tests:
             status[t["run_id"]] = ("pass" if t["passed"] else "fail") if t is keep else "superseded"
     return status
 
@@ -95,7 +95,7 @@ def test_points(tests, prefix, models=None):
         st = status[t["run_id"]]
         note = {"cut short": "cut short: never scored",
                 "inherited": (t.get("reason") or "")[:200],
-                "superseded": "a later test the same day replaces this one",
+                "superseded": "a later test of the same judge version replaces this one",
                 "fail": "below the pass bar: not used for the limits"}.get(st)
         for side in ("agree", "catch"):
             n, k = t[f"n_{side}"] or 0, t[f"n_{side}_hits"] or 0

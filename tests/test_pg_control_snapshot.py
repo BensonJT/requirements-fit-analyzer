@@ -1,5 +1,5 @@
-"""Tests for scripts/pg_control_snapshot.py: the judge-test day rule and cut-short handling, the verdict and run
-transforms, the upsert, and (when the reporting SQL is reachable) the control-chart limit math in the views.
+"""Tests for scripts/pg_control_snapshot.py: one point per judge version, cut-short handling, the verdict and run
+transforms, the upsert, and (when the reporting SQL is reachable) the control-chart limit math in the views (p, Laney p' and XmR).
 Fake data only; Postgres tests use a throwaway database and skip when it is unreachable."""
 import datetime as dt
 import importlib.util
@@ -24,46 +24,50 @@ def t(run_id, when, passed, agree, catch=(20, 23), reason=PASS, pv="pv"):
                 reason=reason, n_agree=agree[1], n_agree_hits=agree[0], n_catch=catch[1], n_catch_hits=catch[0])
 
 
-# The shape of the real history: a failing day, a day with repeated passes, a cut-short test and an inherited one.
+# The shape of the real history: versions that never passed, a version tested several times, an eleventh earlier
+# passing version, a cut-short test inside a version that later passed, and an inherited result.
 TESTS = [
-    t("f1", "2026-09-29 20:00", False, (15, 29), reason="catch_rate=0.85, agree_rate=0.52"),
-    t("f2", "2026-09-29 22:56", False, (23, 28), reason="catch_rate=0.86, agree_rate=0.82"),
-    t("f3", "2026-09-30 00:24", False, (20, 31), reason="catch_rate=0.87, agree_rate=0.65"),
-    t("p1", "2026-09-30 03:37", True, (26, 28)),
-    t("p2", "2026-09-30 13:09", True, (26, 28)),
-    t("p3", "2026-09-30 14:20", True, (26, 28)),
-    t("p4", "2026-10-15 12:06", True, (26, 28)),
-    t("p5", "2026-10-20 20:14", True, (25, 29)),
-    t("p6", "2026-10-21 04:01", True, (26, 29)),
-    t("p7", "2026-10-24 04:32", True, (25, 29)),
-    t("p8", "2026-10-27 02:04", True, (25, 29)),
-    t("cs", "2026-10-27 14:45", False, (0, 0), catch=(0, 0), reason=CUT),
-    t("p9", "2026-10-28 13:38", True, (25, 29)),
-    t("pa", "2026-10-30 06:07", True, (27, 31)),
-    t("pb", "2026-11-01 20:19", True, (28, 31)),
-    t("pc", "2026-11-02 12:07", True, (28, 31)),
-    t("in", "2026-11-03 07:08", True, (28, 31), reason="inherited from pc (only the fact sheet changed)"),
+    t("f1", "2026-09-29 05:20", False, (15, 31), reason="catch_rate=0.63, agree_rate=0.48", pv="v307"),
+    t("f2", "2026-09-29 19:48", False, (15, 29), reason="catch_rate=0.89, agree_rate=0.52", pv="v4a6"),
+    t("f3", "2026-09-29 22:56", False, (23, 28), reason="catch_rate=0.86, agree_rate=0.82", pv="v4a6"),
+    t("f4", "2026-09-30 00:24", False, (20, 31), reason="catch_rate=0.87, agree_rate=0.65", pv="vd1d"),
+    t("p0a", "2026-09-30 03:37", True, (26, 28), catch=(21, 24), pv="v5f7"),
+    t("p0b", "2026-09-30 14:01", True, (26, 28), pv="v5f7"),
+    t("p1", "2026-09-30 14:20", True, (26, 28), pv="v0f3"),
+    t("p2", "2026-10-15 12:06", True, (26, 28), pv="v7fd"),
+    t("p3", "2026-10-20 20:14", True, (25, 29), pv="vc81"),
+    t("p4", "2026-10-21 04:01", True, (26, 29), pv="v1b3"),
+    t("p5", "2026-10-24 04:32", True, (25, 29), pv="v0cc"),
+    t("p6", "2026-10-27 02:04", True, (25, 29), pv="vc08"),
+    t("cs", "2026-10-27 14:45", False, (0, 0), catch=(0, 0), reason=CUT, pv="v0e2"),
+    t("p7", "2026-10-28 13:38", True, (25, 29), pv="v0e2"),
+    t("p8", "2026-10-30 06:07", True, (27, 31), pv="v4c7"),
+    t("p9", "2026-11-01 20:19", True, (28, 31), pv="vd85"),
+    t("pa", "2026-11-02 12:07", True, (28, 31), pv="ve8b"),
+    t("in", "2026-11-03 07:08", True, (28, 31), reason="inherited from ve8b (only the fact sheet changed)", pv="vcf1"),
 ]
 
 
-def test_day_rule_reproduces_the_published_ten():
+def test_one_point_per_judge_version():
     st = snap.classify_tests(TESTS)
     passes = [x for x in TESTS if st[x["run_id"]] == "pass"]
-    assert [x["n_agree_hits"] for x in passes] == [26, 26, 25, 26, 25, 25, 25, 27, 28, 28]
-    assert sum(x["n_agree_hits"] for x in passes) == 261 and sum(x["n_agree"] for x in passes) == 294
-    assert st["p3"] == "pass" and st["p1"] == st["p2"] == st["f3"] == "superseded"   # last pass of the day wins
-    assert st["f2"] == "fail" and st["f1"] == "superseded"                            # no pass that day: last test
-    assert st["cs"] == "cut short" and st["in"] == "inherited"
+    assert len(passes) == 11 and st["p0b"] == "pass" and st["p0a"] == "superseded"   # last test of the version
+    ten = passes[-10:]                                                                 # the published ten
+    assert [x["n_agree_hits"] for x in ten] == [26, 26, 25, 26, 25, 25, 25, 27, 28, 28]
+    assert sum(x["n_agree_hits"] for x in ten) == 261 and sum(x["n_agree"] for x in ten) == 294
+    assert st["f1"] == st["f3"] == st["f4"] == "fail" and st["f2"] == "superseded"     # never passed: last test
+    assert st["cs"] == "cut short" and st["p7"] == "pass"                              # cut short is its own mark
+    assert st["in"] == "inherited"
 
 
 def test_cut_short_is_shown_never_scored():
-    pts = {(p["check_id"], p["source_ref"]): p for p in snap.test_points(TESTS, "jev_required", {"pv": "m-1"})}
+    pts = {(p["check_id"], p["source_ref"]): p for p in snap.test_points(TESTS, "jev_required", {"ve8b": None})}
     cut = pts[("jev_required_agree", "cs")]
     assert cut["value"] is None and cut["scored"] is False and cut["status"] == "cut short"
     assert pts[("jev_required_catch", "cs")]["value"] is None
-    assert pts[("jev_required_agree", "f2")]["scored"] is False                        # a failing test: no limits
-    ok = pts[("jev_required_agree", "pc")]
-    assert ok["scored"] and ok["value"] == round(28 / 31, 6) and ok["model"] == "m-1"
+    assert pts[("jev_required_agree", "f3")]["scored"] is False                        # a failing version: no limits
+    ok = pts[("jev_required_agree", "pa")]
+    assert ok["scored"] and ok["value"] == round(28 / 31, 6) and ok["model"] is None
     assert ok["measured_at"].tzinfo == dt.timezone.utc
 
 
@@ -128,16 +132,17 @@ def test_upsert_is_idempotent_and_p_limits_match_the_article(pg):
 
     rows = pg.execute("SELECT * FROM reporting.control_p WHERE check_id = 'jev_required_agree' AND shown "
                       "ORDER BY seq").fetchall()
-    assert len(rows) == 12                                          # 10 passes + the failing day + the cut-short test
-    pbar = 261 / 294
+    assert len(rows) == 15                     # 11 passing versions + 3 that never passed + the cut-short test
+    pbar = 287 / 322
     assert float(rows[0]["p_bar"]) == pytest.approx(pbar)
     at29 = next(r for r in rows if r["n"] == 29)
-    assert float(at29["lcl"]) == pytest.approx(pbar - 3 * math.sqrt(pbar * (1 - pbar) / 29))   # ~0.712
+    assert float(at29["lcl"]) == pytest.approx(pbar - 3 * math.sqrt(pbar * (1 - pbar) / 29))   # ~0.718
     assert float(at29["ucl"]) == 1.0                                                          # clamped
     cut = next(r for r in rows if r["status"] == "cut short")
     assert cut["lcl"] is None and cut["ucl"] is None and cut["out_of_limits"] is None and cut["seq"] is not None
     st = pg.execute("SELECT * FROM reporting.control_status WHERE check_id = 'jev_required_agree'").fetchone()
-    assert st["status"] == "in control" and st["scored_points"] == 10 and st["signals"] == 0
+    assert st["status"] == "in control" and st["scored_points"] == 11 and st["signals"] == 0
+    assert st["last_signal_at"] is None
 
 
 def test_xmr_limits(pg):
@@ -151,3 +156,21 @@ def test_xmr_limits(pg):
     assert float(rows[0]["lcl"]) == 0                                   # mean - 2.66 * MR-bar < 0, clamped
     st = pg.execute("SELECT status FROM reporting.control_status WHERE check_id = 'run_pull_minutes'").fetchone()
     assert st["status"] == "in control"
+
+
+def test_laney_limits(pg):
+    """verdict_meets is a Laney p' chart in the plan: limits = p-bar +/- 3 * sigma_p * sigma_z."""
+    data = [(100, 30), (100, 50), (100, 20), (100, 40), (100, 35)]
+    pts = [snap.point("verdict_meets", f"r{i}", dt.datetime(2026, 11, 1 + i), n=n, k=k, value=k / n)
+           for i, (n, k) in enumerate(data)]
+    snap.load(pg, pts)
+    rows = pg.execute("SELECT * FROM reporting.control_p WHERE check_id = 'verdict_meets' ORDER BY seq").fetchall()
+    pbar = 175 / 500
+    sp = math.sqrt(pbar * (1 - pbar) / 100)
+    z = [(k / n - pbar) / sp for n, k in data]
+    sz = sum(abs(b - a) for a, b in zip(z, z[1:])) / 4 / 1.128
+    assert rows[0]["chart_type"] == "laney_p" and float(rows[0]["sigma_z"]) == pytest.approx(sz)
+    assert float(rows[0]["lcl"]) == pytest.approx(max(0, pbar - 3 * sp * sz))
+    assert float(rows[0]["ucl"]) == pytest.approx(min(1, pbar + 3 * sp * sz))
+    assert not any(r["out_of_limits"] for r in rows)          # a plain p-chart would flag 0.50 and 0.20
+    assert pbar + 3 * sp < 0.50 and pbar - 3 * sp > 0.20

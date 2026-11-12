@@ -97,7 +97,15 @@ def _reporting_dir():
             if line.startswith("JOBSEARCH_VAULT_DIR="):
                 d = line.split("=", 1)[1].strip().strip('"')
     p = Path(d) / "Tools" / "reporting" if d else None
-    return p if p and (p / "control_schema.sql").exists() and (p / "control_views.sql").exists() else None
+    need = ("control_schema.sql", "control_views.sql", "control_plan.csv", "control_plan.py")
+    return p if p and all((p / n).exists() for n in need) else None
+
+
+def _plan_sql(rep):
+    s = importlib.util.spec_from_file_location("control_plan", rep / "control_plan.py")
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m.plan_sql(rep / "control_plan.csv")
 
 
 @pytest.fixture()
@@ -106,7 +114,7 @@ def pg():
     from backend.tracker import db
     rep = _reporting_dir()
     if rep is None:
-        pytest.skip("control_schema.sql / control_views.sql not found (JOBSEARCH_VAULT_DIR unset)")
+        pytest.skip("control_schema.sql / control_views.sql / control_plan.csv not found (JOBSEARCH_VAULT_DIR unset)")
     try:
         admin = db.connect("postgres")
     except psycopg.OperationalError as e:
@@ -115,8 +123,9 @@ def pg():
     admin.execute(f"CREATE DATABASE {TEST_DB}")
     c = db.connect(TEST_DB)
     c.execute("CREATE SCHEMA reporting")
-    for name in ("control_schema.sql", "control_views.sql"):
-        c.execute((rep / name).read_text(encoding="utf-8"))
+    c.execute((rep / "control_schema.sql").read_text(encoding="utf-8"))
+    c.execute(_plan_sql(rep))
+    c.execute((rep / "control_views.sql").read_text(encoding="utf-8"))
     yield c
     c.close()
     admin.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
@@ -174,3 +183,70 @@ def test_laney_limits(pg):
     assert float(rows[0]["ucl"]) == pytest.approx(min(1, pbar + 3 * sp * sz))
     assert not any(r["out_of_limits"] for r in rows)          # a plain p-chart would flag 0.50 and 0.20
     assert pbar + 3 * sp < 0.50 and pbar - 3 * sp > 0.20
+
+
+# ---------------------------------------------------------------- Phase 2 (2026-11-12)
+
+def test_jev_run_points():
+    pts = snap.jev_run_points_from([
+        dict(run_id="s1", started_at=dt.datetime(2026, 10, 28, 4), jev_runs=1, to_review=300, errors=300,
+             not_reached=0, caps=None, account_errors=None),
+        dict(run_id="s2", started_at=dt.datetime(2026, 10, 30, 4), jev_runs=2, to_review=234, errors=0,
+             not_reached=130, caps="daily_token_cap", account_errors=None),
+        dict(run_id="s3", started_at=dt.datetime(2026, 10, 31, 4), jev_runs=1, to_review=0, errors=0,
+             not_reached=0, caps=None, account_errors=None)])
+    got = {(p["check_id"], p["source_ref"]): p for p in pts}
+    assert len(pts) == 4                                                    # nothing to review: no point
+    assert got[("run_jev_failed", "s1")]["value"] == 1.0
+    assert got[("run_jev_cut_short", "s2")]["k"] == 130 and "daily token cap" in got[("run_jev_cut_short", "s2")]["note"]
+    assert got[("run_jev_failed", "s2")]["value"] == 0.0
+
+
+def test_verdict_limits_restart_at_each_judge_version(pg):
+    """verdict_meets restarts at each prompt_version and draws limits only once a version has 5 runs."""
+    data = [("a", 100, 30), ("a", 100, 34), ("a", 100, 28),                      # 3 runs: no limits
+            ("b", 100, 60), ("b", 100, 55), ("b", 100, 65), ("b", 100, 58), ("b", 100, 62)]
+    pts = [snap.point("verdict_meets", f"r{i}", dt.datetime(2026, 11, 1) + dt.timedelta(days=i), n=n, k=k,
+                      value=k / n, prompt_version=pv) for i, (pv, n, k) in enumerate(data)]
+    snap.load(pg, pts)
+    rows = pg.execute("SELECT * FROM reporting.control_p WHERE check_id = 'verdict_meets' ORDER BY seq").fetchall()
+    assert [r["phase"] for r in rows] == ["a"] * 3 + ["b"] * 5
+    assert all(r["ucl"] is None and r["out_of_limits"] is None for r in rows[:3])
+    assert float(rows[3]["p_bar"]) == pytest.approx(300 / 500)                 # its own center, not the pooled one
+    assert all(r["lcl"] is not None for r in rows[3:])
+    st = pg.execute("SELECT status FROM reporting.control_status WHERE check_id = 'verdict_meets'").fetchone()
+    assert st["status"] == "in control"
+
+
+def test_run_rules(pg):
+    """run_pull_minutes uses the Western Electric rules: 8 in a row above the center signals with no point
+    outside the limits; run_boards_failed ('limits') never flags a run."""
+    base = [25, 5, 25, 5, 25, 5, 25, 5, 25, 5]                                  # wide moving ranges; ends below
+    tail = [16, 17, 16, 17, 16, 17, 16, 17]                                     # 8 just above the center
+    vals = base + tail
+    pts = [snap.point("run_pull_minutes", f"r{i:02d}", dt.datetime(2026, 10, 1) + dt.timedelta(days=i), value=v)
+           for i, v in enumerate(vals)]
+    pts += [snap.point("run_boards_failed", f"r{i:02d}", dt.datetime(2026, 10, 1) + dt.timedelta(days=i), n=100,
+                       k=0 if i < 17 else 1, value=0.0 if i < 17 else 0.01) for i in range(18)]
+    snap.load(pg, pts)
+    rules = pg.execute("SELECT * FROM reporting.control_rules WHERE check_id = 'run_pull_minutes' ORDER BY measured_at").fetchall()
+    assert not any(r["rule1"] for r in rules)
+    assert rules[-1]["rule4"] and rules[-1]["signal"] and "8 points in a row" in rules[-1]["rules"]
+    assert not any(r["rule4"] for r in rules[:-1])
+    st = pg.execute("SELECT * FROM reporting.control_status WHERE check_id = 'run_pull_minutes'").fetchone()
+    assert st["status"] == "signal" and st["outside_limits"] == 0 and st["signals"] == 1
+    bf = pg.execute("SELECT count(*) FILTER (WHERE rule4) AS r4 FROM reporting.control_rules "
+                    "WHERE check_id = 'run_boards_failed'").fetchone()
+    assert bf["r4"] == 0                                                        # 17 zeros below the center: no flag
+
+
+def test_restudy_due(pg):
+    old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=200)
+    snap.load(pg, [
+        snap.point("regrade_agreement", "msa1", old, n=60, k=55, value=55 / 60),
+        snap.point("jev_required_agree", "t1", dt.datetime(2026, 11, 1), n=31, k=28, value=28 / 31, model="m-1",
+                   status="pass"),
+        snap.point("verdict_meets", "r1", dt.datetime(2026, 11, 2), n=100, k=30, value=0.3, model="m-2")])
+    due = {r["check_id"]: r for r in pg.execute("SELECT * FROM reporting.control_restudy").fetchall()}
+    assert due["regrade_agreement"]["due"] and "180 days" in due["regrade_agreement"]["due_reason"]
+    assert due["jev_required_agree"]["due"] and "m-2" in due["jev_required_agree"]["due_reason"]

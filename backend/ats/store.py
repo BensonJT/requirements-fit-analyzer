@@ -447,6 +447,23 @@ CREATE TABLE IF NOT EXISTS jev_evals (
     PRIMARY KEY (run_id, family)
 );
 
+-- 2026-11-12: one row per live `jev.run` (store.record_jev_run): how many postings it set out to review and how
+-- many failed (errors) or were never reached because a cap or an account error stopped it (not_reached). The
+-- public control charts count these per pipeline run (vault reporting/control_*.sql, the 10/28 billing case).
+-- Rows before 2026-11-12 were rebuilt from the launch logs (scripts/backfill_jev_runs.py, source 'log').
+CREATE TABLE IF NOT EXISTS jev_runs (
+    run_id            VARCHAR PRIMARY KEY,
+    started_at        TIMESTAMP NOT NULL,        -- UTC, stored naive
+    finished_at       TIMESTAMP,                 -- UTC, stored naive
+    prompt_version    VARCHAR,
+    run_tag           VARCHAR NOT NULL DEFAULT '',
+    considered        INTEGER, skipped_cached INTEGER, to_review INTEGER, reviewed INTEGER, reused INTEGER,
+    carried           INTEGER, errors INTEGER, not_reached INTEGER, calls INTEGER, input_tokens BIGINT,
+    stopped_by_cap    VARCHAR,
+    stopped_by_error  VARCHAR,
+    source            VARCHAR NOT NULL DEFAULT 'live'   -- live | log
+);
+
 -- 2026-10-30: each Jev prompt_version's base (jev.prompt_base: the prompt minus the fact sheet), recorded by
 -- jev_gate.ensure_required_bar. A new prompt_version whose base matches a measured one changed only the facts,
 -- so its required bar is carried over (a jev_evals row with metrics.inherited_from) instead of re-measured.
@@ -2407,6 +2424,22 @@ def insert_jev_eval(con, *, run_id: str, prompt_version: str, family: str, n: Op
                 "evaluated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [run_id, prompt_version, family, n, _json_or_none(metrics), bool(passed), reason,
                  datetime.now(timezone.utc).replace(tzinfo=None)])
+
+
+def record_jev_run(con, summary, *, prompt_version: str, run_tag: str, to_review: int, started_at, finished_at,
+                   source: str = "live", run_id: Optional[str] = None) -> str:
+    """Stores one jev.run summary in jev_runs (times are aware or naive UTC; stored naive). Returns the run_id
+    (default: 'jev-' + the start time to the microsecond, so a re-recorded run replaces its own row)."""
+    naive = lambda t: t.astimezone(timezone.utc).replace(tzinfo=None) if t is not None and t.tzinfo else t
+    run_id = run_id or "jev-" + naive(started_at).strftime("%Y%m%dT%H%M%S.%f")
+    con.execute("INSERT OR REPLACE INTO jev_runs (run_id, started_at, finished_at, prompt_version, run_tag, considered, "
+                "skipped_cached, to_review, reviewed, reused, carried, errors, not_reached, calls, input_tokens, "
+                "stopped_by_cap, stopped_by_error, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [run_id, naive(started_at), naive(finished_at), prompt_version, run_tag or "", summary.considered,
+                 summary.skipped_cached, to_review, summary.reviewed, summary.reused, summary.carried, summary.errors,
+                 summary.not_reached, summary.calls, summary.input_tokens, summary.stopped_by_cap,
+                 summary.stopped_by_error, source])
+    return run_id
 
 
 def record_jev_prompt_base(con, prompt_version: str, base_version: str) -> None:

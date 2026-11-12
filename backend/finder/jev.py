@@ -594,6 +594,10 @@ class StorePersist:
         from backend.ats import store
         store.record_jev_request_base(con, prompt_version, request_base)
 
+    def record_jev_run(self, con, summary: RunSummary, **kw) -> None:
+        from backend.ats import store
+        store.record_jev_run(con, summary, **kw)
+
 
 def twin_key(posting: Posting) -> tuple:
     """2026-11-01: postings that would send Jev byte-identical requests -- same JD text, title and employer
@@ -733,6 +737,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
     seen = {}   # twin_key -> the review made for it in this run
     if hasattr(persist, "record_jev_request_base") and run_tag is None:
         persist.record_jev_request_base(con, pv, rbase)
+    started_at = datetime.now(timezone.utc)
 
     for n, p in enumerate(todo, start=1):
         # 2026-11-01: a posting that would send byte-identical requests to a review already paid for gets a copy at
@@ -757,6 +762,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
             log(f"jev.run: {n}/{len(todo)} {p.posting_id} required_fit={record.required_fit} {note}")
             continue
         if summary.stopped_by_cap:
+            summary.not_reached += 1
             continue   # capped: only copies can still be stored
         try:
             planned = [build_role_request(p, model)] + build_lines_requests(p, facts, model, log=lambda *a: None)
@@ -768,12 +774,14 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
             summary.stopped_by_cap = "max_calls_per_run"
             log(f"jev: stopping, {meter.calls} calls made and {len(planned)} more would pass "
                 f"max_calls_per_run={caps.max_calls_per_run}; only 0-token copies from here on")
+            summary.not_reached += 1
             continue
         used = tokens_before + meter.tokens
         if used + sum(plan_tokens(b) for b in planned) > caps.daily_token_cap:
             summary.stopped_by_cap = "daily_token_cap"
             log(f"jev: stopping, {used} tokens used today; the next posting would pass "
                 f"daily_token_cap={caps.daily_token_cap}; only 0-token copies from here on")
+            summary.not_reached += 1
             continue
         try:
             record = review_posting(p, facts, transport=transport, sleep_fn=sleep_fn, endpoint=endpoint,
@@ -785,6 +793,7 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
             reason = account_error(exc)
             if reason:
                 summary.stopped_by_error = reason
+                summary.not_reached = len(todo) - n
                 log(f"jev: stopping, {reason} is an account problem, so every remaining posting would fail too")
                 break
             continue
@@ -802,6 +811,14 @@ def run(con, rows: list, *, transport=None, sleep_fn=None, live_ok: bool = False
     summary.calls = meter.calls
     summary.input_tokens = meter.tokens
     log(f"jev.run: {summary}")
+    if hasattr(persist, "record_jev_run"):
+        # 2026-11-12: one row per live run (jev_runs) so the control charts can count failed and cut-short
+        # reviews per pipeline run. A storage problem here is logged, never fatal: the reviews are already saved.
+        try:
+            persist.record_jev_run(con, summary, prompt_version=pv, run_tag=run_tag or "", to_review=len(todo),
+                                   started_at=started_at, finished_at=datetime.now(timezone.utc))
+        except Exception as exc:  # noqa: BLE001
+            log(f"jev: could not record the run summary ({type(exc).__name__}: {exc})")
     return summary
 
 

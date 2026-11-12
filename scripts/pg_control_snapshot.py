@@ -15,7 +15,11 @@ Checks loaded (rates and counts of the pipeline's own behaviour only; no employe
   judge2_required_agree / _catch  the retired second judge's tests (judge2_evals), for history
   verdict_meets / _partial / _fails  share of Jev's reviews per sweep cycle (jev_reviews)
   run_boards_failed / run_pull_minutes  per full sweep (runs with 100 or more boards)
-  regrade_msa1_agreement          the user's own re-grade study (Postgres jobs.regrade_study)
+  run_jev_failed / run_jev_cut_short    per sweep cycle: Jev reviews that failed, and reviews left for the next
+                                  night by a cap or an account error (jev_runs, 2026-11-12; earlier runs rebuilt
+                                  from the launch logs by scripts/backfill_jev_runs.py)
+  regrade_agreement / regrade_kappa  the user's own re-grade studies, one point per study (Postgres
+                                  jobs.regrade_study; source_ref = the study id)
 
 Judge tests: one point per judge version (prompt_version): its last test that was neither cut short (reason
 "insufficient...", status 'cut short', shown but never scored) nor inherited ("inherited from...", a carried-over
@@ -43,7 +47,6 @@ from backend.tracker import db as trackerdb  # noqa: E402
 POINT_COLS = ["check_id", "source_ref", "measured_at", "n", "k", "value", "model", "prompt_version",
               "scored", "status", "note"]
 FULL_SWEEP_MIN_BOARDS = 100   # a sweep reading fewer boards is an onboarding or bridge run, not a nightly sweep
-REGRADE_STUDY = "msa1"
 
 
 def utc(ts):
@@ -212,23 +215,72 @@ def run_points(duck):
     return run_points_from(rows(duck, RUNS_SQL))
 
 
-# ---------------------------------------------------------------- re-grade study (Postgres)
+# ---------------------------------------------------------------- judge reviews that failed (jev_runs)
 
-def regrade_points(pg, study=REGRADE_STUDY):
+# 2026-11-12: every Jev run (gated, gold, repeat) inside a sweep cycle, summed per cycle. Failed = a review that
+# came back as an error; not reached = left for later because a cap or an account error stopped the run.
+JEV_RUNS_SQL = f"""
+WITH sweeps AS (
+    SELECT run_id, started_at, lead(started_at) OVER (ORDER BY started_at) AS next_start
+    FROM runs WHERE boards_attempted >= {FULL_SWEEP_MIN_BOARDS}
+)
+SELECT s.run_id, s.started_at, count(*) AS jev_runs,
+       sum(j.to_review) AS to_review, sum(j.errors) AS errors, sum(j.not_reached) AS not_reached,
+       string_agg(DISTINCT j.stopped_by_cap, ', ') AS caps, string_agg(DISTINCT j.stopped_by_error, ', ') AS account_errors
+FROM sweeps s
+JOIN jev_runs j ON j.started_at >= s.started_at AND (s.next_start IS NULL OR j.started_at < s.next_start)
+GROUP BY s.run_id, s.started_at
+ORDER BY s.started_at"""
+
+
+def jev_run_points_from(rows_):
+    out = []
+    for r in rows_:
+        n = r["to_review"] or 0
+        if not n:
+            continue
+        bits = [f"{r['jev_runs']} judge run{'s' if r['jev_runs'] != 1 else ''}"]
+        if r["account_errors"]:
+            bits.append(f"stopped by {r['account_errors']}")
+        if r["caps"]:
+            bits.append(f"stopped at {r['caps'].replace('_', ' ')}")
+        note = "; ".join(bits)
+        out.append(point("run_jev_failed", r["run_id"], r["started_at"], n=n, k=r["errors"] or 0,
+                         value=share(r["errors"] or 0, n), note=note))
+        out.append(point("run_jev_cut_short", r["run_id"], r["started_at"], n=n, k=r["not_reached"] or 0,
+                         value=share(r["not_reached"] or 0, n), note=note))
+    return out
+
+
+def jev_run_points(duck):
+    if not duck.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'jev_runs'").fetchone()[0]:
+        return []
+    return jev_run_points_from(rows(duck, JEV_RUNS_SQL))
+
+
+# ---------------------------------------------------------------- re-grade studies (Postgres)
+
+def regrade_points(pg):
+    """One agreement point and one kappa point per study (only the pairs re-graded so far)."""
     if not pg.execute("SELECT to_regclass('jobs.regrade_study') AS t").fetchone()["t"]:
         return []
-    got = pg.execute("SELECT original_fit, regrade_fit, regraded_at FROM jobs.regrade_study WHERE study_id = %s",
-                     [study]).fetchall()
-    done = [r for r in got if r["regrade_fit"]]
-    if not done:
-        return []
-    pairs = [(r["original_fit"], r["regrade_fit"]) for r in done]
-    agree = sum(a == b for a, b in pairs)
-    note = f"Cohen's kappa {regrade_stats.cohen_kappa(pairs):.2f}"
-    if len(done) < len(got):
-        note += f"; {len(done)} of {len(got)} re-graded so far"
-    return [point(f"regrade_{study}_agreement", study, max(r["regraded_at"] for r in done),
-                  n=len(pairs), k=agree, value=share(agree, len(pairs)), note=note)]
+    got = pg.execute("SELECT study_id, original_fit, regrade_fit, regraded_at FROM jobs.regrade_study "
+                     "ORDER BY study_id").fetchall()
+    out = []
+    for study in sorted({r["study_id"] for r in got}):
+        mine = [r for r in got if r["study_id"] == study]
+        done = [r for r in mine if r["regrade_fit"]]
+        if not done:
+            continue
+        pairs = [(r["original_fit"], r["regrade_fit"]) for r in done]
+        agree = sum(a == b for a, b in pairs)
+        kappa = regrade_stats.cohen_kappa(pairs)
+        note = f"{len(done)} of {len(mine)} re-graded so far" if len(done) < len(mine) else None
+        at = max(r["regraded_at"] for r in done)
+        out.append(point("regrade_agreement", study, at, n=len(pairs), k=agree, value=share(agree, len(pairs)),
+                         note=note))
+        out.append(point("regrade_kappa", study, at, n=len(pairs), value=round(kappa, 6), note=note))
+    return out
 
 
 # ---------------------------------------------------------------- load
@@ -259,7 +311,7 @@ def load(pg, points):
 
 
 DUCK_SOURCES = [("jev tests", jev_tests), ("judge2 tests", judge2_tests), ("verdict mix", verdict_points),
-                ("run health", run_points)]
+                ("run health", run_points), ("judge failures", jev_run_points)]
 
 
 def run(duckdb_path, dbname=None):

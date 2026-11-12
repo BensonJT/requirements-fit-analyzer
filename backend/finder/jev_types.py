@@ -132,3 +132,6 @@ class RunSummary:
     # 2026-10-28: an account-level failure (out of credits, bad key) that stopped the run at its first
     # occurrence, e.g. "HTTP 402 billing_error"; None when the run was not stopped that way
     stopped_by_error: Optional[str] = None
+    # 2026-11-12: postings left without a review because the run stopped early (a cap or an account error);
+    # copies made after a cap are not counted here. Stored with the rest in jev_runs (control charts).
+    not_reached: int = 0

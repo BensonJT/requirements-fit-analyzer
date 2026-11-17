@@ -404,14 +404,37 @@ apply_queue() {
   echo "════ $(date '+%H:%M:%S')  $PY -u finder.py apply-queue"
   "$PY" -u finder.py apply-queue || echo "launch: apply-queue failed (non-fatal; the rows wait for the next try)"
 }
+# Retry on a held DuckDB lock. A step that finds the database locked exits 1 having written nothing
+# (the sweep and finder print "locked by another process"), so re-running it is safe. The usual holder
+# is a few seconds of the hourly inbox_watch.sh apply-queue (cron at :00) colliding with a launch
+# scheduled on the hour (11/17 09:00 lost its sweep and Top_Jobs this way). Any other failure is
+# returned at once, never retried. LOCK_RETRIES / LOCK_RETRY_SECS override the defaults (2 x 300 s).
+run_step() {
+  local out rc tries=0 max="${LOCK_RETRIES:-2}" wait="${LOCK_RETRY_SECS:-300}"
+  out="$(mktemp)"
+  while :; do
+    # shellcheck disable=SC2086
+    $CMD 2>&1 | tee "$out"
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ] && [ "$tries" -lt "$max" ] && grep -q "locked by another process" "$out"; then
+      tries=$((tries + 1))
+      echo "launch: database locked -- retry $tries of $max in $((wait / 60))m $((wait % 60))s ($(date -d "+$wait seconds" '+%H:%M:%S'))"
+      sleep "$wait"
+      echo "════ $(date '+%H:%M:%S')  $CMD   (retry $tries)"
+      continue
+    fi
+    break
+  done
+  rm -f "$out"
+  return "$rc"
+}
 apply_queue
 for s in "${STEPS[@]}"; do
   CMD="$(step_cmd "$s")"
   echo
   echo "════ $(date '+%H:%M:%S')  $CMD"
   T0=$(date +%s)
-  # shellcheck disable=SC2086
-  $CMD
+  run_step
   RC=$?
   printf "════ %s  exit %d after %dm\n" "$(date '+%H:%M:%S')" "$RC" $(( ($(date +%s) - T0) / 60 ))
   if [ "$RC" -ne 0 ]; then

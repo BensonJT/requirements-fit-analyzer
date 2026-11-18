@@ -2508,3 +2508,76 @@ def test_rmk_listing_age_flags_old_ids_only(tmp_path):
     flagged = LA.stale_listings(con, list(ids.values()))
     assert set(flagged) == {ids["1355475200"]}
     assert LA.stale_listings(con, []) == {}
+
+
+# ---------------------------------------------------------------- Precision Federal (own careers site)
+_PF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "precisionfederal")
+_PF_ROW = {"employer": "Precision Federal", "platform": "precisionfederal", "identifier_1": "precisionfederal.com"}
+
+
+def _pf_read(name):
+    with open(os.path.join(_PF_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+class _PFResp:
+    def __init__(self, text, status=200):
+        self.text, self.status_code, self.headers = text, status, {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _pf_client(monkeypatch, text, expect_url):
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def request(self, method, url, **kw):
+            assert url == expect_url
+            return _PFResp(text)
+
+    monkeypatch.setattr(A, "client", lambda: _Client())
+
+
+def test_precisionfederal_registered_with_detail():
+    assert "precisionfederal" in A.IMPLEMENTED_PLATFORMS and "precisionfederal" in A.DETAIL_PLATFORMS
+
+
+def test_precisionfederal_cards_map_rate_engagement_and_location(monkeypatch):
+    _pf_client(monkeypatch, _pf_read("careers.html"), "https://precisionfederal.com/careers")
+    out = A.precisionfederal_jobs(_PF_ROW)
+    assert len(out) == 4 and not getattr(out, "truncated", False)       # the plain /careers link is not a card
+    agentic, part, onsite, flat = out
+    assert agentic["req_id"] == "agentic-ai-decision-systems-engineer"
+    assert agentic["url"] == "https://precisionfederal.com/careers/agentic-ai-decision-systems-engineer"
+    assert agentic["title"] == "Agentic AI and Decision-Systems Engineer"
+    assert (agentic["pay_min"], agentic["pay_max"], agentic["pay_interval"], agentic["pay_source"]) == (45, 105, "hour", "ats")
+    assert agentic["employment_type"] == "contract" and agentic["workplace_type"] == "remote" and agentic["country"] == "US"
+    assert agentic["job_family"] == "Engineering & Software"
+    assert part["employment_type"] == "part_time"
+    assert onsite["workplace_type"] == "onsite" and onsite["country"] is None
+    assert flat["pay_min"] == flat["pay_max"] == 200
+
+
+def test_precisionfederal_count_mismatch_refuses_the_board(monkeypatch):
+    html = _pf_read("careers.html").replace('"numberOfItems": 4', '"numberOfItems": 540')
+    _pf_client(monkeypatch, html, "https://precisionfederal.com/careers")
+    import pytest
+    with pytest.raises(RuntimeError):
+        A.precisionfederal_jobs(_PF_ROW)
+
+
+def test_precisionfederal_detail_reads_the_jobposting_json_ld():
+    d = A._pf_detail_fields(_pf_read("role.html"), {})
+    assert d["description_text"].startswith("Build governed, auditable AI agents")
+    assert str(d["posted_at"]) == "2026-08-22" and str(d["posting_end_at"]) == "2027-08-31"
+    assert d["workplace_type"] == "remote"
+    assert (d["pay_min"], d["pay_max"], d["pay_interval"]) == (45, 105, "hour")
+
+
+def test_precisionfederal_detail_without_json_ld_is_an_error_not_gone():
+    import pytest
+    with pytest.raises(RuntimeError):
+        A._pf_detail_fields("<html><body>new markup</body></html>", {})

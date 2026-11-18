@@ -3027,6 +3027,119 @@ def ukg_detail(row, posting):
     return _ukg_detail_fields(html, posting)
 
 
+# ================================================================ Precision Federal (own careers site)
+# 2026-11-18: precisionfederal.com runs its own careers site and application form (POST /api/form), no
+# third-party ATS. `GET /careers` server-renders every open role as a card (title, slug, category, hourly
+# rate, "1099 · Part-time"-style engagement line, location) plus a schema.org ItemList whose
+# numberOfItems is the board's own count; the pull refuses a page where the two disagree, so a partial
+# render never close-passes the board. The JD, datePosted and validThrough come from the JobPosting
+# JSON-LD on each role's page (detail stage). Most roles are 1099 bench roles paid only on funded awards
+# (80-600 hours), so a "Part-time" engagement maps to part_time and the hours-cap rule keeps the hourly
+# rate from being annualized. Registry: identifier_1 = the site host (precisionfederal.com).
+_PF_CARD = re.compile(r'<a class="cb cb-card"([^>]*)>(.*?)</a>', re.S)
+_PF_ITEMLIST_N = re.compile(r'"@type":\s*"ItemList".*?"numberOfItems":\s*(\d+)', re.S)
+
+
+def _pf_text(fragment, cls):
+    m = re.search(rf'class="{cls}">(.*?)</', fragment, re.S)
+    if not m:
+        return None
+    return " ".join(N.html_to_text(m.group(1)).split()) or None
+
+
+def _pf_attr(attrs, name):
+    m = re.search(rf'{name}="([^"]*)"', attrs)
+    return N.html_to_text(m.group(1)).strip() if m else None
+
+
+def _pf_employment(engagement):
+    """'1099' -> contract; '1099 · Part-time' / 'W-2 · Part-time' -> part_time; 'W-2 · Full-time' -> full_time."""
+    e = (engagement or "").lower()
+    if "part" in e:
+        return "part_time"
+    if "full" in e and "1099" not in e:
+        return "full_time"
+    return "contract" if e else None
+
+
+def _pf_cards(html, host):
+    out = []
+    for attrs, body in _PF_CARD.findall(html or ""):
+        href = _pf_attr(attrs, "href") or ""
+        slug = href.rstrip("/").rsplit("/", 1)[-1]
+        if not href.startswith("/careers/") or not slug:
+            continue
+        rate = _pf_text(body, "cb-rate")
+        nums = [float(x) for x in re.findall(r"\$\s*([\d.]+)", rate or "")]
+        loc = _pf_text(body, "cb-loc")
+        engagement = _pf_text(body, "cb-emp")
+        out.append(N.base(
+            req_id=slug,
+            title=_pf_text(body, "cb-title"),
+            url=f"https://{host}/careers/{slug}",
+            location_primary=loc,
+            locations=N.locations_json([loc]) if loc else None,
+            country="US" if loc and "U.S." in loc else None,
+            workplace_type=("onsite" if loc and loc.lower().startswith("on site") else N.workplace_type(None, loc) if loc else None),
+            employment_type=_pf_employment(engagement),
+            job_family=_pf_attr(attrs, "data-cat"),
+            pay_min=min(nums) if nums else None, pay_max=max(nums) if nums else None,
+            pay_currency="USD" if nums else None,
+            pay_interval="hour" if nums and "/hr" in (rate or "") else None,
+            pay_source="ats" if nums else None,
+            raw_json=N.raw({"slug": slug, "rate": rate, "engagement": engagement, "location": loc,
+                            "category": _pf_attr(attrs, "data-cat"), "blurb": _pf_text(body, "cb-blurb")}),
+        ))
+    return out
+
+
+def precisionfederal_jobs(row, max_pages=None):
+    host = row["identifier_1"]
+    with client() as c:
+        html = _request(c, "GET", f"https://{host}/careers").text
+    out = _pf_cards(html, host)
+    m = _PF_ITEMLIST_N.search(html)
+    if not m:
+        raise RuntimeError(f"precisionfederal: no ItemList count on https://{host}/careers (markup changed?)")
+    if len(out) != int(m.group(1)):
+        raise RuntimeError(f"precisionfederal: {len(out)} cards parsed but the page lists {m.group(1)}")
+    return out
+
+
+def _pf_detail_fields(html, posting):
+    job = None
+    for blob in _ICIMS_LDJSON.findall(html or ""):
+        try:
+            d = json.loads(blob)
+        except ValueError:
+            continue
+        for item in d if isinstance(d, list) else [d]:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                job = item
+    if job is None:
+        raise RuntimeError("precisionfederal: no JobPosting JSON-LD on the role page")
+    out = {
+        "description_text": N.html_to_text(job.get("description")),
+        "posted_at": N.parse_date(job.get("datePosted")),
+        "posting_end_at": N.parse_date(job.get("validThrough")),
+    }
+    if str(job.get("jobLocationType") or "").upper() == "TELECOMMUTE":
+        out["workplace_type"] = "remote"
+    val = ((job.get("baseSalary") or {}).get("value") or {})
+    lo, hi = val.get("minValue"), val.get("maxValue")
+    if lo is not None or hi is not None:
+        unit = str(val.get("unitText") or "").upper()
+        out.update(pay_min=lo, pay_max=hi if hi is not None else lo, pay_currency=(job.get("baseSalary") or {}).get("currency") or "USD",
+                   pay_interval={"HOUR": "hour", "YEAR": "year"}.get(unit), pay_source="ats")
+    return out
+
+
+def precisionfederal_detail(row, posting):
+    with client() as c:
+        html = _request(c, "GET", posting["url"]).text
+    return _pf_detail_fields(html, posting)
+
+
 _LIST = {
     "workday": workday_jobs,
     "oracle_orc": oracle_orc_jobs,
@@ -3051,6 +3164,7 @@ _LIST = {
     "icims": icims_jobs,
     "pinpoint": pinpoint_jobs,
     "ukg": ukg_jobs,
+    "precisionfederal": precisionfederal_jobs,
 }
 _DETAIL = {
     "workday": workday_detail,
@@ -3069,6 +3183,7 @@ _DETAIL = {
     "radancy": radancy_detail,
     "icims": icims_detail,
     "ukg": ukg_detail,
+    "precisionfederal": precisionfederal_detail,
 }
 IMPLEMENTED_PLATFORMS = frozenset(_LIST)
 DETAIL_PLATFORMS = frozenset(_DETAIL)

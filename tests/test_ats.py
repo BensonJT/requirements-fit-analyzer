@@ -2581,3 +2581,35 @@ def test_precisionfederal_detail_without_json_ld_is_an_error_not_gone():
     import pytest
     with pytest.raises(RuntimeError):
         A._pf_detail_fields("<html><body>new markup</body></html>", {})
+
+
+# ---------------------------------------------------------------- hourly contract floor (2026-11-18)
+def _hourly_listing(top, employment_type):
+    from backend import screen as S
+    return S.Listing(source="ats", search_pass="precisionfederal", title="Quality Assurance Manager",
+                     company="Example", location="Remote (U.S.)", url="u", salary_min=30, salary_max=top,
+                     extra={"employment_type": employment_type})
+
+
+def test_hourly_contract_band_skips_the_salary_floor_and_uses_the_hourly_floor(monkeypatch):
+    from backend import screen as S
+    monkeypatch.setattr(S.P, "COMP_FLOOR", 150_000)
+    monkeypatch.setattr(S.P, "HOURLY_CONTRACT_FLOOR", 40, raising=False)
+    above = S.hourly_contract_top(_hourly_listing(45, "contract"))
+    assert above == 45
+    assert S.hourly_contract_top(_hourly_listing(45, "part_time")) == 45
+    assert S.hourly_contract_top(_hourly_listing(45, "full_time")) is None      # W-2 full time keeps the salary floor
+    assert S.hourly_contract_top(_hourly_listing(120_000, "contract")) is None   # an annual band is not hourly
+
+
+def test_screen_rejects_only_under_the_hourly_floor(monkeypatch):
+    from backend import screen as S
+    monkeypatch.setattr(S.P, "COMP_FLOOR", 150_000)
+    monkeypatch.setattr(S.P, "HOURLY_CONTRACT_FLOOR", 40, raising=False)
+    ok = S.screen(_hourly_listing(45, "contract"), skip_tracker=True)
+    assert not any(r.startswith("comp:") for r in ok.reasons) and ok.annual_top is None
+    assert any("salary floor not applied" in f for f in ok.flags)
+    low = S.screen(_hourly_listing(35, "contract"), skip_tracker=True)
+    assert any("under the $40/hr floor" in r for r in low.reasons)
+    salaried = S.screen(_hourly_listing(45, "full_time"), skip_tracker=True)
+    assert any("under the $150,000 floor" in r for r in salaried.reasons)

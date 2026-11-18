@@ -2,6 +2,7 @@
 
 COMP_FLOOR = 90_000        # reject when a posted band's top is under this
 COMP_ASK = 110_000         # score bonus when the band top reaches this
+HOURLY_CONTRACT_FLOOR = 30  # $/hr for hourly contract/part-time roles; they skip COMP_FLOOR
 HOME = "Springfield, IL"   # used for the local search lanes
 LOCAL_RADIUS_KM = 80
 COMMUTABLE_PLACES = ["springfield, il", "chatham, il?", "rochester, il"]   # "name, st" pins the state; "st?" also accepts none

@@ -345,6 +345,7 @@ BOILERPLATE_MARKERS = [
 COMP_FLOOR = None          # reject when a posted band's TOP is under this (annual)
 COMP_ASK = None            # small score bonus when the band top reaches this
 HOURLY_ANNUALIZE = 2_000   # hourly x this = annual
+HOURLY_CONTRACT_FLOOR = None  # $/hr: an hourly contract/part-time band is tested on this, not COMP_FLOOR
 HOME = None                # e.g. "Springfield, IL"; used for local search lanes
 LOCAL_RADIUS_KM = 80
 COMMUTABLE_PLACES = []     # lowercase place names; "name, st" pins the US state, "name, st?" also accepts no state

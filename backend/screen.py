@@ -75,6 +75,18 @@ def annual_top(job: Listing) -> Optional[float]:
     return top
 
 
+def hourly_contract_top(job: Listing) -> Optional[float]:
+    """Top of an HOURLY band on a contract or part-time posting (1099 bench, fractional work), else None.
+    These are screened on the hourly floor (P.HOURLY_CONTRACT_FLOOR), never annualized against the salary
+    floor: the hours are capped or award-funded, so rate x 2000 is not income (Jeff, 2026-11-18)."""
+    if job.salary_predicted or (job.extra or {}).get("employment_type") not in ("contract", "part_time"):
+        return None
+    top = job.salary_max or job.salary_min
+    if not top or top < 15 or top >= 500:
+        return None
+    return top
+
+
 # A REMOTE_TERMS hit that reads as a duties sentence, not a location/workplace statement --
 # "manage remote field teams", "supports remote sites", "virtual teams" -- never counts as the posting's
 # own location. "virtual" added 2026-09-19 (B2 amendment): "virtual teams" is duties vocabulary, not a
@@ -1057,10 +1069,19 @@ def screen(job: Listing, tracker_rows=None, recent_titles=None, *, skip_tracker:
         flags.append(f"clearance requirement unclear ({clearance_detail}) -- verify" if clearance_detail
                     else "clearance requirement unclear -- verify")
 
-    # 6. Comp -- overlap test on the band top; unposted is never a rejection
-    top = annual_top(job)
+    # 6. Comp -- overlap test on the band top; unposted is never a rejection. An hourly contract or
+    #    part-time band is tested against the hourly floor and leaves annual_top unset (no salary floor,
+    #    no level/pay credit from an annualized figure).
+    hourly = hourly_contract_top(job)
+    top = None if hourly is not None else annual_top(job)
     job.annual_top = top
-    if top is not None and P.COMP_FLOOR and top < P.COMP_FLOOR:
+    if hourly is not None:
+        floor = getattr(P, "HOURLY_CONTRACT_FLOOR", None)
+        if floor and hourly < floor:
+            reasons.append(f"comp: hourly contract top ${hourly:,.0f}/hr under the ${floor:,}/hr floor")
+        else:
+            flags.append(f"hourly contract/part-time (${hourly:,.0f}/hr top) -- salary floor not applied")
+    elif top is not None and P.COMP_FLOOR and top < P.COMP_FLOOR:
         reasons.append(f"comp: band top ${top:,.0f} under the ${P.COMP_FLOOR:,} floor")
     elif top is not None and P.COMP_ASK and top < P.COMP_ASK:
         flags.append(f"${P.COMP_ASK / 1000:,.0f}K ask sits above the ${top:,.0f} top")
